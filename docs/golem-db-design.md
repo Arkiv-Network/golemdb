@@ -80,6 +80,7 @@ document assumes of it.
 - **[3. Records and Cells](#3-records-and-cells)**
   - [The Cell Key](#the-cell-key)
   - [Record Identity: the `#key` Cell](#record-identity-the-key-cell)
+  - [Record Shape: the `#meta` Cell](#record-shape-the-meta-cell)
   - [Cell Names](#cell-names)
   - [Cell Kinds and Types](#cell-kinds-and-types)
   - [Benefits and Trade-offs of the Cell Decomposition](#benefits-and-trade-offs-of-the-cell-decomposition)
@@ -634,8 +635,54 @@ Three things follow from identity being an ordinary cell rather than a side tabl
 content: `create` may supply zero user cells, and removing the last user cell through
 `patch` does not delete the record. Its `#key`, `#recordKeys` binding and engine-maintained
 metadata remain; `get` succeeds for the existing record. Only `delete` removes its
-identity and binding from live state. The per-record `#meta` counts and charges for
-empty records are specified in the [metering record model](golem-db-metering.md#record-model).
+identity and binding from live state. Its [`#meta`](#record-shape-the-meta-cell) counters
+are all zero; the charges for empty records are in the
+[metering record model](golem-db-metering.md#record-model).
+
+### Record Shape: the `#meta` Cell
+
+Every user record carries a second reserved meta cell beside `#key`: four counters over its user
+cells.
+
+```
+Cell:  recordID ‖ "#meta"   →   typeTag(field, bytes32) ‖ cells ‖ cellBytes ‖ indexedCells ‖ indexBytes
+                                                          (four u64, big-endian)
+```
+
+| Counter        | Counts                                                     |
+| -------------- | ---------------------------------------------------------- |
+| `cells`        | live user cells                                            |
+| `cellBytes`    | Σ `(8 + \|name\|) + (1 + \|value\|)` over those cells      |
+| `indexedCells` | live user cells of kind `attribute`                        |
+| `indexBytes`   | Σ `\|name\| + 2 + \|value\|` over those cells (their index term keys) |
+
+The sizes follow the [metering size rules](golem-db-metering.md#d4-storage-and-size-counting):
+cell key plus value, and the full term key, counted per record. System cells are never counted.
+
+`#meta` gives the engine and the host a record's shape without reading the record. A `patch` reads
+only the cells it touches, so without `#meta` it could neither check the per-record caps nor keep a
+record's maximum deletion cost computable; and a host pricing storage over time, such as Arkiv's
+`extend`, would have to read the whole record to learn its size. What metering uses each counter
+for is in the [metering record model](golem-db-metering.md#the-meta-cell).
+
+- **User records only.** System and admin records carry `#key` but no `#meta`: they are exempt from
+  the caps and never deleted ([§4](#structural-invariants)).
+- **Engine-maintained.** `create` writes it, `patch` updates it when a count changes, `delete`
+  removes it with the record. Like `#key`, it is a `field` whose `#` name no user cell may take, so
+  the data plane cannot write it. It is committed, historised and rolled back like any cell.
+- **No overflow.** Every counter is bounded by the per-record caps times the length ceilings of
+  [`#params`](#params-recordid-0), far below `u64`.
+- **Read through a dedicated accessor**, `meta`, at a branch or a commit ([API](golem-db-api.md#record-accessors)).
+- **Distinct from the global counters** in [`#alloc`](#alloc-recordid-1), which count the leaves of
+  the whole tries.
+
+**Record completeness proofs.** Cell paths are `Hash(recordID ‖ cellKey)`
+([§8](#the-two-tries)), so a record's cells are scattered through the `CellTrie` and the trie alone
+offers no proof that a set of cells is all of them. `#meta` closes that gap indirectly: a client
+holding an inclusion proof of `#meta` at commit _c_ can check that a whole-record read at _c_
+withholds no user cell, because the proven cells must match `cells` (and `cellBytes`). This covers
+whole-record reads only; projections use per-name non-inclusion proofs, and index queries are a
+separate question (D06).
 
 ### Cell Names
 
@@ -927,8 +974,8 @@ Record 5 is reserved for the log digest that requirement SE-1 asks of [§11](#11
 its layout is decided in `CHANGES.md` D19.
 
 System records are ordered by **ascending mutability**: record 0 never changes and describes the
-deployment itself; 1–2 are touched by the commit machinery (2 at every commit, 1 at every commit
-that creates a record); 3 grows per item. Bootstrap
+deployment itself; 1–2 are touched by the commit machinery (both at every commit: 2 gains a cell, and that cell
+changes 1's `#liveCells`); 3 grows per item. Bootstrap
 order happens to match — a node validates `#params` first, needs the allocator before it can create
 anything, roots before it can prove anything, and mappings last.
 
@@ -967,6 +1014,8 @@ anything, roots before it can prove anything, and mappings last.
 | `#maxStrLen`      | `u32` (BE) | cap on `str` values (attribute values land in index keys) |
 | `#maxBytesLen`    | `u32` (BE) | cap on `bytes` values (field-only, never in an index key) |
 | `#maxCellNameLen` | `u32` (BE) | cap on user cell names                                    |
+| `#maxRecordCells` | `u32` (BE) | cap on user cells per user record ([metering D5](golem-db-metering.md#d5-record-shape-and-deletion-bound)) |
+| `#maxRecordIndexedCells` | `u32` (BE) | cap on `attribute` cells per user record ([metering D5](golem-db-metering.md#d5-record-shape-and-deletion-bound)) |
 | `#minRetention`   | `u64` (BE) | minimum retention window, in commits: the consensus-path API refuses reads at commits before `head − #minRetention`, identically on every node ([§1](#1-fundamentals) property 5; mechanism D05) |
 | `#shardSpan`      | `u64` (BE) | commits per segment shard file ([§11](#genesis-declaration)) |
 | `#immutableDataSegments` | layout open (D09) | segment declarations `(name, columns, compression)` ([§11](#genesis-declaration)) |
@@ -997,10 +1046,21 @@ underneath.
 | Cell key        | Value      | Semantics                             |
 | --------------- | ---------- | ------------------------------------- |
 | `#nextRecordID` | `u64` (BE) | next `recordID` to mint (genesis: 64) |
+| `#liveCells`    | `u64` (BE) | number of `CellTrie` leaves           |
+| `#indexTerms`   | `u64` (BE) | number of `IndexTrie` leaves          |
 
-Read-modify-written in the branch overlay during execution; a discarded branch's allocations vanish
-with its records, and concurrent branches resolve through the ordinary single-winner commit — no
-bespoke allocator rules.
+`#nextRecordID` is read-modify-written in the branch overlay during execution; a discarded branch's
+allocations vanish with its records, and concurrent branches resolve through the ordinary
+single-winner commit — no bespoke allocator rules.
+
+`#liveCells` and `#indexTerms` are the **global counters** from which metering derives the modeled
+trie depth ([metering D3](golem-db-metering.md#d3-write-metering-and-modeled-trie-depth)). They
+count every leaf of each trie, across all record classes — user cells, `#key` and `#meta` cells,
+bindings, root history, weights, and these counters themselves — because the depth they model is
+the depth of the whole trie. They are not per-record counts; those are in
+[`#meta`](#record-shape-the-meta-cell). The engine updates them once per commit, from the net diff
+([§10](#committing-a-branch) step 4), so a branch prices against the values at its origin commit.
+Genesis sets them to the leaf counts of the genesis state.
 
 #### `#roots` (recordID 2)
 
@@ -1175,7 +1235,8 @@ Ergonomics that make the invariants easy to honour — not security boundaries:
 
 **Genesis (commit 0)** performs, in order: `Superblock` format rows written; every assigned reserved
 record created with its `#key` cell; `#params` written from the genesis file and
-validated against the physical ceilings; `#alloc` initialized (`#nextRecordID = 64`); `#roots` and
+validated against the physical ceilings; `#alloc` initialized (`#nextRecordID = 64`, `#liveCells` and `#indexTerms` set to the genesis
+state's leaf counts); `#roots` and
 `#recordKeys` empty; model version 1 installed complete (`@meteringModel` activation 0, full
 `@modelWeight` set); `head = (0, SR_0, IR_0)`.
 
@@ -1213,7 +1274,7 @@ Three uses follow directly:
 - **Current roots:** the `Superblock` `head`.
 
 **Per-commit overhead** is one `#roots` cell plus its trie path, plus one small rewrite each for the
-touched `#alloc` cell — a handful of rows. Mapping writes
+touched `#alloc` cells — a handful of rows. Mapping writes
 gain one `CellTrie` path each over an uncommitted predecessor: the price of making bindings provable
 and historised.
 
@@ -2610,7 +2671,9 @@ experiences all nine as one operation.
    surviving operation; a cell written five times appears once. The branch's `#alloc` cell is one of
    those overlay cells — advanced per `create` ([above](#the-in-memory-overlay)) — so the allocator's
    high-water mark enters the net diff here and is covered by the root like any other touched cell.
-   The log plays no part here. Its one
+   The global counters `#liveCells` and `#indexTerms` ([§4](#alloc-recordid-1)) are then advanced
+   by the net number of leaves the diff adds or removes, step 3's `#roots` cell included, and join
+   the diff themselves. The log plays no part here. Its one
    contribution is free: the **oldest** log entry touching a given cell holds that cell's value at the
    origin commit, which is exactly the pre-image `CellChangeSet` needs — so the change-set pre-images
    require no additional reads of committed state.
@@ -3324,7 +3387,7 @@ onto chapters.
 | D03 | Crash recovery: restart from the `Superblock` head; segment truncation; behaviour on segment-fsync or MDBX-write failure; retry idempotence; already-issued receipts | §10, §11 |
 | D04 | Concurrency contract: one MDBX read snapshot per branch and per query; where the commit guard's critical section starts relative to segment appends; arbitration of two sealed candidates | §10 |
 | D05 | Retention. **Decided (P06):** the minimum window is `#minRetention`, in commits, in `#params`, and the consensus path refuses beyond it on every node. Open: which structures survive per read class (point, filtered, proof, segments); earliest supported commit; reader and cursor protection from GC; `Pruned` vs `NotFound`; discovering terms and cell names deleted since T; where a shard's starting mark survives once the previous system-segment shard is pruned | §7, §11, §13 |
-| D06 | Proof scope: which classes are proven (membership, non-inclusion; not range completeness); how the server obtains a mismatching virtual leaf's tagged value at head and historically; cost | §8 |
+| D06 | Proof scope: which classes are proven (membership, non-inclusion; not range completeness — though whole-record completeness follows indirectly from a proof of the record's `#meta` counts, [metering](golem-db-metering.md#the-meta-cell)); how the server obtains a mismatching virtual leaf's tagged value at head and historically; cost | §8 |
 | D07 | Branch transitions: delete visibility over real overlay values; the net diff with restored or no-op entries after rollback; history of cancelled changes; create-then-delete in one commit | §10 |
 | D08 | `#recordKeys` on delete: does the binding survive (§4: re-creation `patch`es it) or is it removed (§10: the inverse of delete restores it)? | §4, §10 |
 | D09 | The normative encoding profile: Roaring version, container selection and run-opt rule; odd-nibble padding; `EMPTY_ROOT`; `typeTag` for reserved-record layouts; the absent pre-image encoding for `IndexChangeSet`; `bool` byte forms; the shipped type-id map; change-set key caps | §2, §3, §4, §6, §8 |

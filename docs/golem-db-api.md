@@ -10,7 +10,7 @@ No rationale, no mechanics, no storage layout — every such question is answere
   receipts, calibration requirements and pricing-schedule lifecycle. Cited as _metering Dn_.
 
 Writes and branch reads take a branch handle; queries and historical reads target a `CommitId`.
-Data-plane calls (`create` / `get` / `patch` / `delete`, `query`, `count`) return a metered result — a
+Data-plane calls (`create` / `get` / `patch` / `delete`, the record accessors, `query`, `count`) return a metered result — a
 value plus a cost receipt — or an error. Branch operations, introspection and administration are
 unmetered.
 
@@ -18,7 +18,7 @@ unmetered.
 
 - [Data Model](#data-model) — [Records](#records) · [Record keys](#record-keys) · [Cells](#cells) · [Cell names](#cell-names) · [Cell Types](#cell-types) · [Reserved records](#reserved-records)
 - [Commits and Branches](#commits-and-branches) — [Commits](#commits) · [Branches](#branches) · [Frames and checkpoints](#frames-and-checkpoints) · [Operations](#operations)
-- [CRUD Operations](#crud-operations) — [`create`](#create--insert-a-new-record) · [`get`](#get--point-read-by-key) · [`patch`](#patch--partial-mutation-of-one-record) · [`delete`](#delete--remove-a-record)
+- [CRUD Operations](#crud-operations) — [`create`](#create--insert-a-new-record) · [`get`](#get--point-read-by-key) · [`patch`](#patch--partial-mutation-of-one-record) · [`delete`](#delete--remove-a-record) · [Record accessors](#record-accessors)
 - [Immutable data](#immutable-data)
 - [Query](#query) — [`query`](#query--filtered-sorted-paged-read) · [Filtering](#filtering) · [Sorting](#sorting) · [Paging](#paging) · [`count`](#count--count-matches-without-materializing-records)
 - [Cost and Budget](#cost-and-budget)
@@ -42,8 +42,10 @@ record = (key, cells)
 - **`cells`** — named, individually typed values in one flat namespace per record. Sparse: two records
   sharing a cell name need not agree on that cell's type.
 
-Records are internally addressed by a dense, monotonically allocated id that is never reused, and the
-key is stored as a reserved `#key` cell readable by `get`. One consequence reaches the API:
+Records are internally addressed by a dense, monotonically allocated id that is never reused; a
+re-created key gets a new id. The id is visible through the [record accessors](#record-accessors),
+since a cell proof's path is derived from it. The key is stored as a reserved `#key` cell readable by
+`get`. One consequence reaches the API:
 **creation order** is a well-defined deterministic order ([Sorting](#sorting)).
 → _design [§3](golem-db-design.md#record-identity-the-key-cell)_
 
@@ -212,7 +214,8 @@ cannot see. Rollback cost is proportional to the operations undone, never to the
 
 **All branch operations are unmetered**, and `rollback` additionally **issues no refund**. `commit` is
 unmetered at the data plane: record-induced work is prepaid and block/commit overhead is
-host-funded ([Cost and Budget](#cost-and-budget)). Operation charges also cover undo work.
+host-funded ([Cost and Budget](#cost-and-budget)). Rollback is uncharged: rolled-back operations
+have already paid for deferred work that is never performed.
 
 #### `seal` — compute the roots without persisting
 
@@ -258,7 +261,8 @@ is authoritative for cost structure and counting rules.
 
 Successful creates and patches must respect genesis-fixed limits on user-cell counts,
 indexed-cell counts, names and values. System cells are excluded from user-cell counts.
-Exact parameter names and metadata layout are defined with the schema; the metering
+The caps are `#maxRecordCells` and `#maxRecordIndexedCells` in `#params`, and the per-record
+counts live in [`#meta`](golem-db-design.md#record-shape-the-meta-cell); the metering
 requirements are in [D5](golem-db-metering.md#d5-record-shape-and-deletion-bound).
 
 ### `create` — insert a new record
@@ -277,8 +281,7 @@ The engine additionally creates the record's `#key` and `#meta` cells and its bi
 `#recordKeys`. A create of _k_ user cells therefore incurs _k_ + 3 cell-create charges,
 plus admission, record-base and applicable index charges. Receipt user-cell counts exclude
 these three system operations. `#key` is readable by `get`; neither `#key` nor `#meta` is
-writable through the data plane. The `#meta` encoding and read visibility remain to be
-specified alongside the schema.
+writable through the data plane; `#meta` is read through [`meta`](#record-accessors).
 
 `create` with `cells: {}` creates an existing record with no user-defined cells. Its
 binding, `#key` and `#meta` are still created and charged; it performs no index joins.
@@ -322,8 +325,8 @@ commit lies. → _design [§7](golem-db-design.md#resolving-a-value-as-of-a-comm
 A `set` may change kind and/or type. **Changing an indexed value flips two terms**, not one — the
 record leaves its old term and joins the new one. Untouched user cells contribute nothing.
 The call also pays admission, record-base and the system-cell work defined by the metering
-model. Assigning the current value is charged as an update and, for an indexed cell, as
-leave plus join, even if an implementation elides the writes.
+model. Assigning a cell its current type and value is a no-op: it pays only for the reads
+that establish that nothing changes.
 
 Removing the last user-defined cell leaves the record alive, with its binding and
 system cells intact. Its user-cell counts become zero. Only `delete` removes the record;
@@ -353,6 +356,24 @@ same key later is an ordinary `create`.
 > → [Cost and Budget](#cost-and-budget)
 
 **Errors:** `NotFound`, `Reserved`, `Conflict`, `OutOfBudget`.
+
+### Record accessors
+
+Fixed-size point reads of a record's identity and shape, without reading its cells.
+
+| op       | signature                                | returns                                                                 |
+| -------- | ---------------------------------------- | ----------------------------------------------------------------------- |
+| `meta`   | `(target, key, budget) → counts`         | the record's `#meta` counters: `cells`, `cellBytes`, `indexedCells`, `indexBytes` |
+| `key_of` | `(target, id, budget) → key`             | the record key held by `#key` of record `id`                            |
+| `id_of`  | `(target, key, budget) → id`             | the record id bound to `key` in `#recordKeys`                           |
+
+`target` is a branch handle or a `CommitId`, as for [`get`](#get--point-read-by-key). Each call
+returns a cost receipt and is charged a flat read weight
+([metering D6](golem-db-metering.md#d6-read-metering)). `meta` applies to user records only;
+on a reserved record it returns `Reserved`.
+→ _design [§3](golem-db-design.md#record-shape-the-meta-cell)_
+
+**Errors:** `NotFound`, `Reserved`, `OutOfBudget`, `HandleInvalid`.
 
 ---
 
@@ -561,7 +582,8 @@ depth is an explicit multiplier, not solely folded into a weight. See
   input still pays for validation performed; no write charge is collected for failed planning.
 - Arithmetic overflow returns `OutOfBudget` with `required: None`, even under `Unlimited`.
 - **Rollback and branch discard refund nothing**, including charges for purely in-memory
-  work. Operation charges cover undo; rollback carries no additional charge.
+  work. Rollback carries no charge: rolled-back operations have already paid for deferred
+  work that is never performed, which exceeds the in-memory undo.
 - **`commit` carries no additional data-plane charge:** record-induced work is prepaid,
   while root-history, committed allocator and other block/commit overhead are host-funded.
 - **Deletion is not pre-paid at creation.** A host whose entities are life-limited — where expiry, not
@@ -575,7 +597,7 @@ it does not consume IDs or change counters. A host-authorized unlimited estimate
 performs validation and checked arithmetic. The estimate is valid only for the inspected
 state and schedule. A multi-operation simulation must use a disposable branch if later
 operations need to observe earlier writes. Host resource controls are described in
-[metering D7](golem-db-metering.md#shared-planner-and-arkiv-usage-contexts).
+[metering D8](golem-db-metering.md#shared-planner-and-arkiv-usage-contexts).
 
 ---
 
@@ -640,7 +662,7 @@ Golem DB keeps the active model and complete weights in memory, reconstructing t
 committed head and metering records when unavailable. It publishes head and the matching
 pricing snapshot together at commit boundaries; uncommitted changes do not affect prices.
 Activation at commit 100 applies once head reaches 100, not to branch work based on 99
-that produces commit 100. See [metering D8](golem-db-metering.md#d8-cost-schedules).
+that produces commit 100. See [metering D9](golem-db-metering.md#d9-cost-schedules).
 
 **Surface separation.** `open()` returns a **data handle** and an **admin handle**. Admin operations
 take no branch — each forms its own single-purpose commit — which makes commit homogeneity structural.
