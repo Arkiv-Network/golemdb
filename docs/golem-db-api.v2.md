@@ -17,6 +17,7 @@ Related documents:
 
 ## Contents
 
+- [Glossary](#glossary) — [Words](#words) · [Names in the API](#names-in-the-api)
 - [Shape of the API](#shape-of-the-api)
 - [Opening a database](#opening-a-database) — [Genesis](#genesis) · [Config and open modes](#config-and-open-modes) · [Stores](#stores) · [Constructors](#constructors) · [What genesis writes](#what-genesis-writes) · [Reopening](#reopening) · [Opening errors](#opening-errors)
 - [Data model](#data-model) — [Records](#records) · [Record keys](#record-keys) · [Cell names](#cell-names) · [Cell types and kinds](#cell-types-and-kinds) · [Rust values](#rust-values) · [Reserved records](#reserved-records) · [`#meta`](#meta)
@@ -28,6 +29,63 @@ Related documents:
 - [Agreed changes, not yet implemented](#agreed-changes-not-yet-implemented)
 - [Not implemented](#not-implemented)
 - [Differences from v1](#differences-from-v1)
+
+---
+
+## Glossary
+
+The names below were agreed during the implementation review (its decisions N1–N21) and are
+applied in the code. Two ideas guide them:
+
+- **One word, one meaning.** "Database" used to name both what a caller opens and the
+  key/value layer underneath it, and "engine" meant five different things. Each concept now
+  has its own word.
+- **Follow established Rust and database conventions,** so a reader who knows sled, redb,
+  RocksDB or reth finds familiar names. The crate path supplies context (`golemdb_api::Config`),
+  so type names do not repeat the product name.
+
+### Words
+
+| Word | Means | Why this word |
+| --- | --- | --- |
+| **GolemDB** | the product, in prose | One word, like RocksDB, FoundationDB, SurrealDB. Pending product sign-off; this document still writes "Golem DB" until then. |
+| **`golemdb`** | the product as an identifier: packages (`golemdb-api`, used as `golemdb_api`), domain tags (`"golemdb/genesis/v1"`), and the repo after its rename | Rust package names are lowercase; a one-word product gets a one-word prefix. |
+| **database** | what a caller opens and talks to: the `Database` handle and everything behind it | It is what users of any embedded database call the thing they open. Reserving it for that frees "store" for the layer below. |
+| **store** | the transactional key/value layer underneath: the `Store` trait | Matches the package `golemdb-storage`. Previously this layer was also called `Database`, so two different "databases" were public. |
+| **store implementation** | one implementation of `Store`: memory (`MemoryStore`) or MDBX (`MdbxStore`) | Replaces "backend", which meant both the store a caller passes in and an implementation of the trait. |
+| **reserved** | records 0–63 and the `#` / `@` names, as opposed to user records and names | Covers both system (`#`) and admin (`@`) records; "system" alone would exclude the admin records. Replaces "engine records" and "engine names". |
+| **internal** | stored rows that are neither user cells nor reserved records: trie nodes, metadata | Names what the 16 KiB internal-value floor of opening is for. Replaces "engine rows". |
+| **trusted library code** | code that bypasses the checks, such as a store taken from `OpenedStore::into_store()` | The design's own term (§4). Makes clear that bypassing checks is a privilege of code linked into the process, not of a caller. |
+| **genesis file** | the deployment's YAML: identical on every node, never changes | Ethereum clients use the same word for the same thing. |
+| **store file** | one node's YAML: store and tuning, may change between restarts | Kept apart from the genesis file because the two change on different timescales and only one is consensus-relevant. |
+
+**"Engine" is not used** in this document or in the code. It had meant the database as callers
+see it, reserved names, internal rows, trusted code, and MDBX itself; each now has a word above.
+
+### Names in the API
+
+| Name | What it is | Why this name |
+| --- | --- | --- |
+| `Database` | the cloneable handle a caller opens; implements `Api` | Precedents `redb::Database`, `sled::Db`: the type does not repeat the product name. Was `GolemDb`. |
+| `Api` | the trait with record and branch operations | Lets consumers depend on the contract (`Arc<dyn Api + Send + Sync>`) and mock it, not on `Database`. |
+| `Inner` (private) | the shared state behind a `Database`'s clones | The idiomatic Rust name for state behind a cheap-to-clone handle (`std::thread::Thread`, `Arc`'s `ArcInner`), already used by `Branches` and `MemoryStore`. Was `Engine`, which overstated a thin forwarding adapter. |
+| `Genesis` | the deployment's settings: hash, cell limits, key mode | Follows Ethereum clients' type for the parsed genesis file (`alloy_genesis::Genesis`). Was `GenesisConfig`. |
+| `Genesis::DEV` | the development preset | A named preset, as reth names `MAINNET` and `DEV`. Deliberately no `Default`: genesis is consensus-relevant, and a default that changed between releases would split nodes silently. |
+| `Config` | what opening needs on any store: `genesis` and `mode` | The crate path gives the context (`golemdb_api::Config`, like `sled::Config`). Was `OpenConfig`. |
+| `OpenMode` | `CreateIfMissing`, `ExistingOnly`, `CreateNew` | Not just `Mode`: the spec also has a key mode and a paging mode. Non-exhaustive so a read-only mode can be added. |
+| `StoreConfig` | which built-in store to open, with its node-local options | Names its scope: everything about the store, nothing about the deployment. |
+| `Database::open`, `open_memory`, `from_store` | the three constructors | One standard constructor taking anything that converts into a `StoreConfig` (a path means MDBX); `open_memory` takes only a genesis, since a fresh store makes the mode meaningless; `from_store` says that the caller supplies the store. Replaced `open_database`, `open_with_options` and an alias. |
+| `internals` feature: `open_store`, `OpenedStore` | the lower opening layer | Public only on request, so ordinary consumers see one way to open a database. |
+| `RecordKeys`: `CallerAssigned`, `Generated { seed }` | the key mode, in `Genesis::record_keys` | Says who makes the key. `Generated` replaces the spec's `EngineAssigned` and matches what the README already called generated keys. |
+| `RecordOp<op::Create \| Patch \| Get \| Delete>` | one operation on one record | One builder for all four calls; the operation marker decides which methods exist. The markers live in `op` so that generic names like `Get` stay out of the crate root. Replaced `RecordInput`, `PatchInput` and `Projection`. |
+| `attribute(name, value)`, `field(name, value)` | write an indexed or a stored-only cell | The design's two cell kinds. There is deliberately no kind-preserving `set`: a call site shows which writes touch the index. |
+| `Metered<T>`, `Receipt`, `Details` | a record call's outcome with its cost, pricing commit and effects | "Metered" says the outcome carries its metering; "receipt" is the term metering uses; "details" are metering D4's receipt details. |
+| `RecordMeta`, `Record::meta()` | the decoded `#meta` counts | Mirrors the cell name `#meta`. |
+| `ApiError::StoreFull` | the store reached its size cap | Names the store, not MDBX: it is a property of one node's store, and it must never become a result other nodes see. |
+| `OpenError::StoreYaml` | an invalid store file | Pairs with `OpenError::Yaml` for the genesis file. |
+| `ApiError::KeyModeMismatch` | a create whose key does not match the key mode | Says which rule was broken, rather than a generic `InvalidArgument`. |
+| `StorageError::Implementation` | a failure inside a store implementation | Replaces `StorageError::Backend`, following "store implementation" above. |
+| `CellNameRef::parse_user`, `parse_reserved`, `raw` | the three ways to make a cell name | Named after the namespace each accepts. `parse_reserved` replaces `parse_engine`. |
 
 ---
 
