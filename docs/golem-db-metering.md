@@ -90,7 +90,7 @@ Budget:
 Coverage and reporting:
 
 - **R8:** every read and write call (`create`, `get`, `patch`, `delete`, `query`, `count`) is metered for compute, and writes also for storage. So are the immutable-log calls (`immutable_data_append`, `immutable_data_get`, `immutable_data_range_of`, `immutable_data_rows_of`; D7).
-- **R9:** every receipt reports the call's cost and the commit that priced it (`priced_at`). Details of cell and index data added and removed by write calls (D4) are opt-in per call. Every implementation must support this option and return the details when requested; only the caller's choice to request them is optional.
+- **R9:** every receipt reports the call's cost and the commit that priced it (`priced_at`). Details of cell and index data added and removed by write calls (D4) are opt-in per call on a transport, which keeps receipts small; every implementation must support the option and return the details when requested. An in-process API may return them with every receipt, as the Rust API does ([API v2](golem-db-api.v2.md#receipts)).
 - **R10:** every user record has a maximum deletion cost, computable at any time from its shape and the current schedule. Actual deletion may cost less.
 
 Cost schedules:
@@ -151,8 +151,8 @@ rest just to price or validate the call.
 | cell bytes, index bytes | host storage accounting: Arkiv's `extend` prices the bytes an entity keeps stored times the blocks added to its lifetime (goal 4) |
 
 Sizes follow D4. Golem DB's own pricing does not use the byte counters. Maintaining
-`#meta` is charged as a system cell operation (D2); reading it through the `meta`
-accessor is a read (D6). The database-wide counters that set the modeled trie depth are
+`#meta` is charged as a system cell operation (D2); reading it is an ordinary `get` of
+the cell, alone or with the full record, and is metered as a read (D6). The database-wide counters that set the modeled trie depth are
 separate (D3).
 
 ## D1. Where Metering Happens
@@ -381,7 +381,7 @@ nodes of a deployment charge the same.
 - A cell counts `8 + |name|` bytes for its key (ID prefix and name) and `1 + |value|` bytes for its value (type tag and value).
 - An index entry counts `|name| + 2 + |value|` bytes: its term key, name ‖ `0x00` ‖ type tag ‖ value.
 - [`#meta`](#the-meta-cell) keeps four counts per record on this basis: cells, cell bytes, indexed cells, and index bytes. They cover user cells only; system cells are fixed-size and charged separately (D2).
-- When details are requested for a write call, its receipt must report cells created, updated and deleted; index joins, leaves and terms created; and cell and index bytes written and deleted, on this basis (R9). Deleted counts are reported, never refunded (R6).
+- When details are requested for a write call, its receipt must report cells created, updated and deleted; index joins, leaves and terms created; and cell and index bytes written and deleted, on this basis (R9). Terms created come from the index-term reads of D2 step 4, which planning performs anyway to price `w_idx_term_create`; an implementation without metering may not report them yet. Deleted counts are reported, never refunded (R6).
 - Counting per record overcounts popular index terms: the safe direction (R4).
 
 ## D5. Record Shape and Deletion Bound
@@ -417,7 +417,7 @@ Reads are counted, not modeled: nothing on the read path is deferred, so cost ac
 - Sort comparisons are the exception: modeled as `⌈N log₂ N⌉ × S` from the match count N and S sort terms, so the choice of sort algorithm stays out of the receipt.
 - Resolving an item at a past commit is a flat surcharge, independent of how far back.
 - Range scans charge every index term stepped over, so ranges over attributes with many distinct values pay for their width.
-- The record accessors ([API](golem-db-api.md#record-accessors)) are fixed-size point reads with a flat charge: `id_of` is one key resolution (`key_resolve`), `key_of` one cell read (`cell_read`), `meta` both.
+- Reading `#meta` is a `get` of one cell; the full record includes it. The `id_of` and `key_of` accessors, to be specified with the proof API, are fixed-size point reads with a flat charge: `id_of` is one key resolution (`key_resolve`), `key_of` one cell read (`cell_read`).
 - Golem DB provides a budgeted, index-ordered scan for bulk deletion, such as a host's expiry purge ([mapping §6](arkiv-golem-db-mapping.md#purge-before-transactions)).
 
 ## D7. Immutable-Log Metering
@@ -446,6 +446,12 @@ read cost       = rows read × w_imm_read_base + bytes read × bytes_read
   pruning strategy that keeps a segment longer does so at the node's own cost.
 - `immutable_data_get` reads one row, `immutable_data_rows_of` the commit's whole run;
   `immutable_data_range_of` reads one system-segment row and no segment bytes.
+- Every immutable-log call returns its result together with a receipt, like the record
+  calls.
+- Optional per-segment row keys, which the Rust API already declares
+  ([API v2](golem-db-api.v2.md#immutable-data)), are a proposal outside design §11 and
+  are not priced here. Adopting them adds a uniqueness check and a key-index write to
+  each keyed append, and a key resolution to each read by key.
 
 **Who pays is the host's decision.** A deployment has two options:
 
