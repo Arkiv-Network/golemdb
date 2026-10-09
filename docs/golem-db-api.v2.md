@@ -25,6 +25,7 @@ Related documents:
 - [Branches](#branches)
 - [Immutable data](#immutable-data)
 - [Errors](#errors)
+- [Agreed changes, not yet implemented](#agreed-changes-not-yet-implemented)
 - [Not implemented](#not-implemented)
 - [Differences from v1](#differences-from-v1)
 
@@ -572,7 +573,7 @@ Rust's `?` works only on `Result`, so callers write `.into_result()?` or `.resul
 | --- | --- |
 | write, or `get` on a branch | the branch's origin commit, looked up without side effects |
 | `get` on `Head` or `Commit`, success | the head of the snapshot read |
-| `get` on `Commit(c)`, failure | `c` |
+| `get` on `Commit(c)`, failure | `c`; to change to the head ([Agreed changes](#agreed-changes-not-yet-implemented)) |
 | unknown or consumed handle; failed head read | `None` |
 
 Looking up the origin for a receipt never invalidates a branch, and an origin never changes,
@@ -675,8 +676,8 @@ Intended contract, as documented on the trait:
 - `immutable_data_rows_of(segment, commit)` returns that commit's rows in append order.
 
 Row keys are an addition to design §11, which has ordinal addressing only. They are not priced
-in metering D7. These calls return `Result<T>`; under metering D7 they will return a value
-together with a receipt.
+in metering D7. These calls return `Result<T>` today; their target signatures, with a budget
+and a receipt, are in [Agreed changes](#agreed-changes-not-yet-implemented).
 
 ---
 
@@ -701,6 +702,52 @@ internal failures keep their causes as sources.
 | `CommitUnavailable { requested, head }` | `get` on a commit other than the head |
 | `StoreFull` | the store reached its size cap; the commit wrote nothing. Environmental, not deterministic: it must never become part of a result other nodes see |
 | `Internal { source }` | corrupt state or another lower-layer failure |
+
+---
+
+## Agreed changes, not yet implemented
+
+Decided against the metering spec; the code on `feat/record-ops` does not reflect them yet.
+
+**Explicit budgets.** Every metered call carries a budget, and there is no default:
+
+```rust
+pub enum Budget { Limited(u64), Unlimited }
+```
+
+`Unlimited` must be stated, never implied by omission; it is for host-authorized estimation
+(metering D8). How a `RecordOp` receives its budget, for example as a constructor argument, is
+open. Today `.budget(n)` is optional and unenforced.
+
+**`priced_at` from the head.** A committed read prices against the head's schedule, also when
+it fails: `get(Commit(c))` failing with `CommitUnavailable { requested, head }` reports
+`priced_at = head`, not `c` (metering D9).
+
+**Bad handles cost 0.** A call on an unknown, consumed, stale or sealed handle is rejected
+before admission and charged nothing (metering D8). Today's receipts already report cost 0.
+
+**No-op means same type, kind and value.** As implemented; metering D2 now says the same.
+
+**Immutable-data target signatures.** Budgeted, and returning a receipt like the record calls
+(metering D7):
+
+```rust
+fn immutable_data_append(&self, branch: BranchId, segment: &str,
+    key: Option<ImmutableDataKey>, row: ImmutableDataRow, budget: Budget)
+    -> Metered<ImmutableDataOrdinal>;
+fn immutable_data_get(&self, segment: &str, address: ImmutableDataAddress, budget: Budget)
+    -> Metered<ImmutableDataRow>;
+fn immutable_data_range_of(&self, segment: &str, commit: CommitId, budget: Budget)
+    -> Metered<Range<ImmutableDataOrdinal>>;
+fn immutable_data_rows_of(&self, segment: &str, commit: CommitId, budget: Budget)
+    -> Metered<Vec<ImmutableDataRow>>;
+```
+
+Whether row keys stay (`key`, `ImmutableDataAddress::Key`) is still open: they are not in
+design §11 or metering D7.
+
+Still under discussion: the order of checks within a call, and the shape of `OutOfBudget`
+(`spent`, `required`).
 
 ---
 

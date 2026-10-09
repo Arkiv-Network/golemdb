@@ -1,6 +1,6 @@
 # Golem DB Metering
 
-Status: draft for discussion, 2026-09-27. How Arkiv turns these costs into fees is in a separate document.
+Status: draft for discussion, 2026-10-09. How Arkiv turns these costs into fees is in a separate document.
 
 ## Contents
 
@@ -234,6 +234,9 @@ admission work is performed and `spent` is zero. No record, cell or index charge
 collected unless its step is reached. Validation order and byte-counting rules must be
 deterministic; checking a declared length is distinct from inspecting payload bytes.
 Transport decoding and allocation before the Golem DB call remain host responsibilities.
+Input errors that a typed API detects while the request is built, such as an invalid
+name passed to a builder, count as admission: they are charged as the admission work
+that would detect them, though they are reported when the call is made.
 
 **Reference admission procedure.** Define the deterministic validation order, entry
 and byte counting rules, charge checkpoints, and hard request-size and change-count
@@ -272,8 +275,8 @@ System cells have fixed-length encodings, so their byte terms are constants. The
 | Read result and request | Cell operation | Bytes written | Bytes deleted |
 | --- | --- | --- | --- |
 | cell missing, value assigned | create | new cell | – |
-| cell present, different type or value assigned | update | new cell | old cell |
-| cell present, its current type and value assigned | no-op: read only; no index operation | – | – |
+| cell present, different type, kind or value assigned | update | new cell | old cell |
+| cell present, its current type, kind and value assigned | no-op: read only; no index operation | – | – |
 | cell present, deletion requested | delete | – | old cell |
 | cell missing, deletion requested | read only (`w_cell_read`); no index operation | – | – |
 
@@ -285,7 +288,7 @@ Bytes written are made live and charged (D4). Bytes deleted leave live state but
   - **History append.** At commit, the commit number is added to the cell's `CellHistory` bitmap, once per modified cell per commit. The bitmap grows with the cell's retained modifications; `w_cell[op]` covers it as a fixed charge, calibrated for `#minRetention` (D4).
   - **Branch processing.** On every touch, planning reads the old value and the operation log captures it; a rollback copies it back. This work grows with the old value's size and recurs per touch. `w_cell_read` and `w_cell[op]` cover it as fixed charges, calibrated up to `#maxBytesLen`.
 - A record `delete` performs a cell delete for every user cell.
-- Assigning a cell its current value is a no-op: it pays only for the reads that establish that nothing changes. No cell write, index leave or join, or history entry follows.
+- Assigning a cell its current value with its current kind is a no-op: it pays only for the reads that establish that nothing changes. A kind change alone is an update, since it joins or leaves the index. No cell write, index leave or join, or history entry follows.
 
 **Index operations.** Leave the old term if the old cell was indexed; join the new term if the resulting cell is indexed, including attribute/field transitions. Each join or leave charges `w_idx_read`, even for the same term:
 
@@ -467,6 +470,7 @@ read cost       = rows read × w_imm_read_base + bytes read × bytes_read
 Meets R6, R7.
 
 - Cost is charged at the call, against its budget, using its captured pricing schedule (D9).
+- A call on an unknown, consumed, stale or sealed branch handle (`HandleInvalid`, `Conflict`, `Sealed`) costs 0: it is rejected before admission, and no pricing snapshot is captured.
 - `OutOfBudget{spent, required?}` reports cost already incurred, including the reads that established the price. A refusal is not free. For a write, `required` is `Some(total)` when planning completed and the full cost is representable, otherwise `None`. A read aborts as it goes and does not report a full required cost.
 - Any cost computation that overflows is treated as `OutOfBudget{spent, required: None}`, including under `Unlimited`. Costs use checked `u64` arithmetic: neither wrapping nor saturation may turn an unrepresentable total into a valid cost.
 - **Failed writes** are charged for the work done in the plan phase (D2), never for writes:
