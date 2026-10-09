@@ -6,7 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+golemdb-cells.workspace = true
 golemdb-index.workspace = true
+golemdb-merkle.workspace = true
+golemdb-storage.workspace = true
+roaring.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-golemdb-storage.workspace = true
+proptest.workspace = true
