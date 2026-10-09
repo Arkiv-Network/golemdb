@@ -9,6 +9,7 @@ members = [
     "crates/branch",
     "crates/record",
     "crates/api",
+    "crates/query",
     "crates/integration-tests",
 ]
 
@@ -28,6 +29,7 @@ golemdb-index = { path = "crates/index", version = "0.1.0" }
 golemdb-branch = { path = "crates/branch", version = "0.1.0" }
 golemdb-record = { path = "crates/record", version = "0.1.0" }
 golemdb-api = { path = "crates/api", version = "0.1.0" }
+golemdb-query = { path = "crates/query", version = "0.1.0" }
 
 # Common external dependencies.
 anyhow = "1"

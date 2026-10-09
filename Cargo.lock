@@ -584,6 +584,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "golemdb-query"
+version = "0.1.0"
+dependencies = [
+ "golemdb-index",
+ "golemdb-storage",
+]
+
+[[package]]
 name = "golemdb-record"
 version = "0.1.0"
 dependencies = [
