@@ -672,7 +672,7 @@ for is in the [metering record model](golem-db-metering.md#the-meta-cell).
   the data plane cannot write it. It is committed, historised and rolled back like any cell.
 - **No overflow.** Every counter is bounded by the per-record caps times the length ceilings of
   [`#params`](#params-recordid-0), far below `u64`.
-- **Read through a dedicated accessor**, `meta`, at a branch or a commit ([API](golem-db-api.md#record-accessors)).
+- **Read with `get`**, at a branch or a commit: a full read includes `#meta`, and a projection can name it alone ([API](golem-db-api.md#meta)).
 - **Distinct from the global counters** in [`#alloc`](#alloc-recordid-1), which count the leaves of
   the whole tries.
 
@@ -741,7 +741,7 @@ Kind and type are declared **per write** and stored **per cell**, never bound gl
 same cell name may be an `i32` in one record and a `dec256` in another, because a global name→type
 binding would let the first writer of `price` permanently deny that name to every other user. A later
 write to the same cell may declare a different kind or type — retyping is an ordinary write
-([golem-db-api.md](golem-db-api.md#cells)). The tag therefore lives at exactly the granularity of the
+([golem-db-api.md](golem-db-api.md#cell-types-and-kinds)). The tag therefore lives at exactly the granularity of the
 `Cell` table itself and needs no registry: a value is validated against the codec its own write
 declares, and the existing tag is read only as the pre-image the change-set needs — the point lookup
 of `(recordID, cellKey)` that the mutation performs anyway.
@@ -1014,11 +1014,28 @@ anything, roots before it can prove anything, and mappings last.
 | `#maxStrLen`      | `u32` (BE) | cap on `str` values (attribute values land in index keys) |
 | `#maxBytesLen`    | `u32` (BE) | cap on `bytes` values (field-only, never in an index key) |
 | `#maxCellNameLen` | `u32` (BE) | cap on user cell names                                    |
+| `#keyMode`        | `u32` (BE) | record-key mode: 0 caller-assigned, 1 generated ([below](#record-key-modes)) |
+| `#keySeed`        | `bytes32`  | seed of generated keys; present only in the generated mode |
 | `#maxRecordCells` | `u32` (BE) | cap on user cells per user record ([metering D5](golem-db-metering.md#d5-record-shape-and-deletion-bound)) |
 | `#maxRecordIndexedCells` | `u32` (BE) | cap on `attribute` cells per user record ([metering D5](golem-db-metering.md#d5-record-shape-and-deletion-bound)) |
 | `#minRetention`   | `u64` (BE) | minimum retention window, in commits: the consensus-path API refuses reads at commits before `head − #minRetention`, identically on every node ([§1](#1-fundamentals) property 5; mechanism D05) |
 | `#shardSpan`      | `u64` (BE) | commits per segment shard file ([§11](#genesis-declaration)) |
 | `#immutableDataSegments` | layout open (D09) | segment declarations `(name, columns, compression)` ([§11](#genesis-declaration)) |
+
+##### Record-key modes
+
+A database assigns record keys in exactly one mode, fixed at genesis by `#keyMode`:
+
+- **Caller-assigned** (0): every `create` names its key; an existing key fails with
+  `AlreadyExists`.
+- **Generated** (1): a `create` names no key, and the engine derives it as
+  `H("golemdb/record-key/v1" ‖ #keySeed ‖ recordID)`, with the deployment's hash and the new
+  record's `recordID` as `u64` big-endian. Keys are deterministic, unique within the database
+  (IDs are never reused), and differ between deployments with different seeds.
+
+The modes are exclusive because generated keys are predictable: the seed is a readable `#params`
+cell, so if callers could also assign keys, one could claim a future generated key first. A
+`create` that does not match the mode fails with `KeyModeMismatch` before anything is written.
 
 **Chain parameters** — a third kind of configuration beside _code_ (protocol rules, changed by
 upgrade) and _governance data_ (weights, tuned at runtime): fixed per deployment at genesis,
@@ -1192,8 +1209,9 @@ As a matrix:
 | metering API      | n/a                                              | allowed, validated             | n/a       |
 
 **The `Reserved` error.** One entry in the shared error set: _the operation addresses a reserved
-record through a surface that may not modify it._ It is raised at admission, before any work, so the
-receipt reports zero cost. It is distinct from `InvalidArgument` so a host can tell malformed input
+record through a surface that may not modify it._ It is raised at admission, after the branch handle is
+validated and before any record state is read, and is charged the admission work done
+([metering D8](golem-db-metering.md#d8-budget-rollback-and-commit)). It is distinct from `InvalidArgument` so a host can tell malformed input
 from a reserved-structure violation.
 
 **Determinism.** Every invariant is a pure function of the operation and of state (a record's class
@@ -1234,8 +1252,8 @@ Ergonomics that make the invariants easy to honour — not security boundaries:
 ### Genesis, and Roots as Cells
 
 **Genesis (commit 0)** performs, in order: `Superblock` format rows written; every assigned reserved
-record created with its `#key` cell; `#params` written from the genesis file and
-validated against the physical ceilings; `#alloc` initialized (`#nextRecordID = 64`, `#liveCells` and `#indexTerms` set to the genesis
+record created with its `#key` cell; `#params` written from the genesis file, including
+`#keyMode` and, in the generated mode, `#keySeed`, and validated against the physical ceilings; `#alloc` initialized (`#nextRecordID = 64`, `#liveCells` and `#indexTerms` set to the genesis
 state's leaf counts); `#roots` and
 `#recordKeys` empty; model version 1 installed complete (`@meteringModel` activation 0, full
 `@modelWeight` set); `head = (0, SR_0, IR_0)`.
@@ -2758,7 +2776,7 @@ Ordinals run across a segment, not within a shard, so a shard covers a contiguou
 
 The shape mirrors the primary store one level down: **a row is to a segment what a record is to `Cell`, and a column is to a row what a cell is to a record.** The differences are exactly the ones that make a segment cheap — cells are named and sparse, columns are positional and fixed; cells are typed, columns are not; cells are mutable and historised, rows are written once.
 
-A row is addressed by `(segment, ordinal)` and by nothing else. There is no key, no index and no scan-by-value — anything more is the host's to build, on top of what the engine stores.
+A row is addressed by `(segment, ordinal)`, and optionally by a host-supplied key ([Row keys](#row-keys)). There is no scan-by-value — anything more is the host's to build, on top of what the engine stores.
 
 #### On-Disk Form
 
@@ -2878,10 +2896,31 @@ That is deliberate. A `one-per-commit` declaration would be marginally faster �
 
 | op                        | signature                      | notes                                   |
 | ------------------------- | ------------------------------ | --------------------------------------- |
-| `immutable_data_append`   | `(b, seg, row) → ordinal`      | sealed branch only; staged, provisional |
-| `immutable_data_get`      | `(seg, ordinal) → row`         |                                         |
+| `immutable_data_append`   | `(b, seg, key?, row) → ordinal` | sealed branch only; staged, provisional |
+| `immutable_data_get`      | `(seg, ordinal \| key) → row`  |                                         |
 | `immutable_data_range_of` | `(seg, commitNr) → [from, to)` | reads the system segment                |
 | `immutable_data_rows_of`  | `(seg, commitNr) → [row]`      | the whole run, one contiguous read      |
+
+#### Row keys
+
+A host serving lookups by its own identifiers, such as a chain's `eth_getTransactionByHash`, can
+give a row an optional 32-byte key at append. The engine keeps a per-segment **key index**
+from key to ordinal:
+
+- **Uncommitted.** The index is outside the state commitment, like the segments themselves.
+  It is written in the same MDBX transaction as the commit, so it is atomic with it, and it is
+  pruned with the shards its rows live in. This is reth's model: static files for the rows, a
+  separate uncommitted table for hash lookups.
+- **Per segment.** The same key may appear in several segments, so a transaction's body and
+  receipt can both be keyed by its hash.
+- **Uniqueness is the host's job.** The engine does not check it. An append whose key already
+  exists points the index at the new row: **the newest row wins**. Older rows are never
+  overwritten and stay readable by ordinal until their shard is pruned. An append never fails
+  because of its key, so no commit outcome depends on how much history a node retains.
+- **Pruned keys** disappear with their index entries, so a lookup of a pruned row by key
+  returns `NotFound`, not `Pruned`.
+
+The physical layout of the key index is open.
 
 **`truncate` and `prune` are not in the API.** Truncation is internal to crash recovery and `rewind`; pruning is the engine's existing retention mechanism, extended to drop whole shards whose commit span has fallen entirely outside the window. A host never asks for either.
 
@@ -2890,7 +2929,7 @@ That is deliberate. A `one-per-commit` declaration would be marginally faster �
 Two additions to the shared surfaces:
 
 - **`Pruned`**, a new error — the ordinal existed but is beyond the retention window — distinct from `NotFound`, which means it never existed. A node serving historical reads needs to tell a caller which of the two happened.
-- **Metering.** Appends consume disk, so under the security property of [architecture §10](../golem-db-architecture.md#what-cost-must-be) they must be charged: a `immutable_data_append` op class plus the byte term, and `immutable_data_read` plus `bytes_read` on the way out.
+- **Metering.** Appends consume disk, so under the security property of [architecture §10](../golem-db-architecture.md#what-cost-must-be) they are metered: a `immutable_data_append` op class plus the byte term, and `immutable_data_read` plus `bytes_read` on the way out ([metering D7](golem-db-metering.md#d7-immutable-log-metering)). Who pays is the host's decision: a deployment may pass the cost to its clients, absorb it, or set the weights to zero when its clients already pay for the same bytes elsewhere.
 
 ### Genesis Declaration
 

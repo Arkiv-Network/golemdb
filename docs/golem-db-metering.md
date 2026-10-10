@@ -90,7 +90,7 @@ Budget:
 Coverage and reporting:
 
 - **R8:** every read and write call (`create`, `get`, `patch`, `delete`, `query`, `count`) is metered for compute, and writes also for storage. So are the immutable-log calls (`immutable_data_append`, `immutable_data_get`, `immutable_data_range_of`, `immutable_data_rows_of`; D7).
-- **R9:** every receipt reports the call's cost and the commit that priced it (`priced_at`). Details of cell and index data added and removed by write calls (D4) are opt-in per call on a transport, which keeps receipts small; every implementation must support the option and return the details when requested. An in-process API may return them with every receipt, as the Rust API does ([API v2](golem-db-api.v2.md#receipts)).
+- **R9:** every receipt reports the call's cost and the commit that priced it (`priced_at`). Details of cell and index data added and removed by write calls (D4) are opt-in per call on a transport, which keeps receipts small; every implementation must support the option and return the details when requested. An in-process API may return them with every receipt, as the [Rust API](golem-db-api.md#receipts) does.
 - **R10:** every user record has a maximum deletion cost, computable at any time from its shape and the current schedule. Actual deletion may cost less.
 
 Cost schedules:
@@ -181,6 +181,21 @@ plan; planning never consumes record IDs, changes counters or appends rollback e
 The plan and estimate are valid only for the inspected branch state and pricing schedule;
 execution must prevent intervening changes or replan.
 
+**Order of checks.** Every call checks in three stages, cheapest and least state-dependent
+first. The first failure is returned; no later stage runs.
+
+| Stage | Checks | Cost | Failures |
+| --- | --- | --- | --- |
+| 1. Handle | writes and branch reads: the branch handle is known, not consumed, its origin is still the head, and, for writes, not sealed. Committed reads instead select their snapshot: the head, or the requested commit | 0 | `HandleInvalid`, `Conflict` (commit only), `Sealed`, `CommitUnavailable` |
+| 2. Admission | input form, including errors found while the request was built; reserved keys; key mode; cell names and value lengths against the genesis limits. Reads no record state | admission cost | `InvalidArgument`, `Reserved`, `KeyModeMismatch` |
+| 3. Record state | the binding, then `#meta`, cells and index terms; the per-record caps | `w_rec[op]` plus the reads performed | `NotFound`, `AlreadyExists`, `CellNotFound`, cap violations |
+
+Stage 1 comes first because it fixes the pricing snapshot (D9): without a valid handle or
+snapshot, there is no schedule to charge with, so a call rejected there costs nothing (D8).
+Validating a handle reads only the current head, a fixed-size row, not record state. The genesis
+limits and key mode used in stage 2 are `#params` cells, fixed at genesis, so they count as
+configuration rather than state. Within stage 3, the steps below fix the order.
+
 Before each charged planning step, starting with admission and later the `w_rec[op]` binding lookup,
 check that its charge fits the remaining limited budget. If it does not, stop without
 performing the step and return `OutOfBudget{spent, required: None}`. Each step must have
@@ -190,7 +205,7 @@ admission limits. `spent` includes only completed charged steps. Equality fits:
 exhausting the budget does not by itself fail a call if no further charge is needed.
 
 1. **Plan** (reads only, no writes):
-  1. Admission: check the input's form, cell names and value lengths, charging incrementally as defined below. No state is read. Rejected input still incurs the admission cost performed before rejection.
+  1. Admission (stage 2): check the input's form, reserved keys, the key mode, cell names and value lengths, charging incrementally as defined below. No record state is read. Rejected input still incurs the admission cost performed before rejection.
    2. Read the key binding (`w_rec[op]`). `create` fails with `AlreadyExists` if it exists; `patch` and `delete` fail with `NotFound` if it does not. A deleted record has no binding, so its key can be re-created.
    3. `patch` and `delete` only: read [`#meta`](#the-meta-cell) for the current counts. A `create` starts from zero.
    4. `patch` and `delete`: read every touched cell. All operations: read every touched index term. The results decide each operation and its bytes.
@@ -275,6 +290,7 @@ System cells have fixed-length encodings, so their byte terms are constants. The
 | Read result and request | Cell operation | Bytes written | Bytes deleted |
 | --- | --- | --- | --- |
 | cell missing, value assigned | create | new cell | – |
+| cell missing, `set` requested (keep the stored kind) | none: the patch fails with `CellNotFound` | – | – |
 | cell present, different type, kind or value assigned | update | new cell | old cell |
 | cell present, its current type, kind and value assigned | no-op: read only; no index operation | – | – |
 | cell present, deletion requested | delete | – | old cell |
@@ -287,6 +303,7 @@ Bytes written are made live and charged (D4). Bytes deleted leave live state but
   - **Change-set copy.** At commit, the pre-image goes into `CellChangeSet`, once per modified cell per commit, however often the branch touched it. The work grows with the old value's size, not with the number of earlier versions. The write byte weight pre-pays it: every byte is copied at most once, when it is overwritten or deleted, so it is charged once, when written (D4).
   - **History append.** At commit, the commit number is added to the cell's `CellHistory` bitmap, once per modified cell per commit. The bitmap grows with the cell's retained modifications; `w_cell[op]` covers it as a fixed charge, calibrated for `#minRetention` (D4).
   - **Branch processing.** On every touch, planning reads the old value and the operation log captures it; a rollback copies it back. This work grows with the old value's size and recurs per touch. `w_cell_read` and `w_cell[op]` cover it as fixed charges, calibrated up to `#maxBytesLen`.
+- A patch's `set` takes the kind from the cell read in step 4, so for `set` only the type or value can differ. Its failure on a missing cell is decided by a read the patch owes anyway (R3).
 - A record `delete` performs a cell delete for every user cell.
 - Assigning a cell its current value with its current kind is a no-op: it pays only for the reads that establish that nothing changes. A kind change alone is an update, since it joins or leaves the index. No cell write, index leave or join, or history entry follows.
 
@@ -416,6 +433,7 @@ Meets R5, R8.
 
 Reads are counted, not modeled: nothing on the read path is deferred, so cost accumulates as the work happens and the call aborts when it crosses its budget ([architecture §10](golem-db-architecture.md#read-metering)).
 
+- Reads follow the D2 order of checks: the handle or snapshot first, free; then admission; then counted state reads.
 - The counted descent is the reference one, whether or not an implementation short-circuits it (D1).
 - Sort comparisons are the exception: modeled as `⌈N log₂ N⌉ × S` from the match count N and S sort terms, so the choice of sort algorithm stays out of the receipt.
 - Resolving an item at a past commit is a flat surcharge, independent of how far back.
@@ -451,10 +469,9 @@ read cost       = rows read × w_imm_read_base + bytes read × bytes_read
   `immutable_data_range_of` reads one system-segment row and no segment bytes.
 - Every immutable-log call returns its result together with a receipt, like the record
   calls.
-- Optional per-segment row keys, which the Rust API already declares
-  ([API v2](golem-db-api.v2.md#immutable-data)), are a proposal outside design §11 and
-  are not priced here. Adopting them adds a uniqueness check and a key-index write to
-  each keyed append, and a key resolution to each read by key.
+- Optional per-segment row keys ([design §11](golem-db-design.md#row-keys)) add one key-index
+  write to each keyed append, with no uniqueness check, and one key resolution to each read by
+  key. Their weights follow once the index layout is specified.
 
 **Who pays is the host's decision.** A deployment has two options:
 
@@ -470,16 +487,16 @@ read cost       = rows read × w_imm_read_base + bytes read × bytes_read
 Meets R6, R7.
 
 - Cost is charged at the call, against its budget, using its captured pricing schedule (D9).
-- A call on an unknown, consumed, stale or sealed branch handle (`HandleInvalid`, `Conflict`, `Sealed`) costs 0: it is rejected before admission, and no pricing snapshot is captured.
-- `OutOfBudget{spent, required?}` reports cost already incurred, including the reads that established the price. A refusal is not free. For a write, `required` is `Some(total)` when planning completed and the full cost is representable, otherwise `None`. A read aborts as it goes and does not report a full required cost.
+- A call on an unknown, consumed, stale or sealed branch handle (`HandleInvalid`, `Conflict`, `Sealed`) costs 0: it is rejected before admission, and no pricing snapshot is captured. Charging it would also break R1: handles are process-local, so whether one is valid depends on a node's in-memory state, not on the call and committed state. This assumes branch handles never come from untrusted callers: the host creates and holds them, as Arkiv does when it executes transactions in its own branches. A host that lets untrusted callers pass handles, for example over a remote API, must protect itself against free rejected calls, as for estimation below: rate limiting, authenticated access, timeouts.
+- `OutOfBudget{spent, required?}` reports cost already incurred, including the reads that established the price. `spent` is what the call costs, so an API may carry it in the call's receipt, which every outcome has, and `required` in the error. Only `OutOfBudget` has a `required`: other failures, such as invalid input, are not budget questions, and their receipt alone states their cost. A refusal is not free. For a write, `required` is `Some(total)` when planning completed and the full cost is representable, otherwise `None`. A read aborts as it goes and does not report a full required cost.
 - Any cost computation that overflows is treated as `OutOfBudget{spent, required: None}`, including under `Unlimited`. Costs use checked `u64` arithmetic: neither wrapping nor saturation may turn an unrepresentable total into a valid cost.
 - **Failed writes** are charged for the work done in the plan phase (D2), never for writes:
 
   | Failure | Charge |
   | --- | --- |
-  | Admission (malformed input, `Reserved`) | Admission work performed, including the check that detects the error |
+  | Admission (malformed input, `Reserved`, `KeyModeMismatch`) | Admission work performed, including the check that detects the error |
   | Key failure (`AlreadyExists`, `NotFound`) | Admission cost + `w_rec[op]` |
-  | Later check (cap exceeded, invalid value) | Admission cost + `w_rec[op]` + the cell and index reads performed |
+  | Later check (cap exceeded, invalid value, `CellNotFound`) | Admission cost + `w_rec[op]` + the cell and index reads performed |
   | `OutOfBudget{spent, required?}` | `spent`: completed charged planning steps, never more than a limited budget; `required` is present only after the full cost is established |
 
   The key-failure and later-check rows assume the preceding charged steps fit the budget;
