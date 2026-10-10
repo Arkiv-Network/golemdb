@@ -263,7 +263,7 @@ MDBX rules for `open`:
   existing empty directory is also `NotInitialized`, but MDBX has created its environment
   files in it by then.
 - Open a directory at most once per process and share it with `clone`. A second process may
-  open it: its branches are separate, and of two competing commits one gets `Conflict`.
+  open it: its branches are separate, and of two competing commits the loser gets `HandleInvalid`.
 - A store should back one open database at a time. Reopening it after the database is dropped
   is fine.
 
@@ -763,10 +763,11 @@ consumed, and every other branch over the old head becomes stale. A reader holdi
 snapshot keeps seeing it. A storage failure after sealing keeps the sealed result for a retry
 or discard. A full store is `StoreFull`; the head stays unchanged.
 
-**Stale branches.** A branch whose origin is no longer the head is stale. The first call that
-detects it removes the branch: `commit` returns `Conflict`, any other call `HandleInvalid`.
-After that, every call returns `HandleInvalid`. So a stale branch reports `Conflict` only if
-`commit` is its first call after losing the race.
+**Stale branches.** A branch whose origin is no longer the head is stale. Every call on it,
+`commit` included, returns `HandleInvalid`, and the first call that detects it removes the
+branch. This includes a `commit` that loses the race inside the store writer, after its handle
+was validated. One condition, one error: the caller's action is always to re-open over the new
+head and re-execute, whichever call noticed (decision D15).
 
 History and change-sets are not written yet: commits persist current state and roots only.
 
@@ -818,8 +819,8 @@ internal failures keep their causes as sources.
 | `OutOfBudget { required: Option<u64> }` (agreed shape) | the call's budget cannot cover its next step or its total; not returned yet |
 | `Reserved` | create, patch or delete addresses a reserved key |
 | `InvalidArgument { message, source }` | a builder problem, or a name or value over a genesis limit |
-| `HandleInvalid` | an unknown, consumed or stale branch handle (except `Conflict` below) |
-| `Conflict` | `commit` of a branch whose origin lost the race |
+| `HandleInvalid` | an unknown, consumed or stale branch handle, on any call including `commit` |
+| `Conflict` | reserved for an optimistic-concurrency mismatch, should record versioning be added ([Open items](#open-items)); not raised today |
 | `Sealed` | a write, checkpoint or rollback on a sealed branch; the handle stays valid |
 | `NoFrameToRollback` | rollback with every frame already rolled back |
 | `CommitUnavailable { requested, head }` | `get` on a commit other than the head |
@@ -866,6 +867,10 @@ has no stored kind to keep. `feature/golem-db-api` today has `insert` and `set` 
 **Order of checks.** Handle first, then admission, then record state
 ([Order of checks](#order-of-checks), metering D2). Both implementations check reserved keys
 before the handle, and `patch` validates names and values after resolving the key; both move.
+
+**A stale branch is `HandleInvalid` everywhere** (decision D15). Both implementations return
+`Conflict` when `commit` is the first call to detect a stale branch; that call returns
+`HandleInvalid` instead.
 
 **Builder steps never fail.** As described in [`RecordOp`](#recordop): the first invalid step is
 kept and reported by the call, with a receipt, so input errors are charged as admission
@@ -921,8 +926,8 @@ carry over the previous spec's contracts for them; their Rust signatures are not
 - Immutable-data storage, including the row-key index.
 - Per-record caps (`#maxRecordCells`, `#maxRecordIndexedCells`) and the global counters
   `#liveCells` / `#indexTerms` in `#alloc` (design §4, metering D3 and D5).
-- The remaining `#params` cells of design §4: `#minRetention`, `#shardSpan`,
-  `#immutableDataSegments`.
+- The remaining `#params` cells of design §4: `#minActivationDelay`, `#minRetention`,
+  `#shardSpan`, `#immutableDataSegments`.
 - Transport serialization: adapters own it.
 
 Every new genesis cell above changes the genesis identity when added.
@@ -1136,13 +1141,17 @@ are data, one `u64` per named weight per model version, stored in the admin reco
 Lifecycle rules; a violation is `InvalidArgument`:
 
 1. **Install, then validate at activation.** `install_model` requires `version` > current,
-   `activation` > head, and parseable cells. **Completeness is checked at the activation
-   commit**, not at install, which keeps the upgrade window between the two.
-2. **The active model takes immediate patches only.** `set_weight` on it takes effect at the
+   `activation ≥ head + 1 + #minActivationDelay` (a genesis parameter), and parseable cells.
+   Weight names cannot be checked by every node at install; the admin tool, running the new
+   version's code, rejects unknown or missing names before sending it. At activation, a missing
+   weight is **unpriced**: calls needing it fail with `OutOfBudget`, and a warn log names it.
+2. **Weight names are a fixed list coded with each model version.** `set_weight` on the active
+   model with a name its code does not declare is reverted with `InvalidArgument`.
+3. **The active model takes immediate patches only.** `set_weight` on it takes effect at the
    next committed head, after the admin commit succeeds, never mid-branch. There is no
    scheduling for the current model; future work is staged under the pending version.
-3. **Capture pricing once, never re-price in flight** ([Receipts](#receipts), metering D9).
-4. **At most one pending model** at a time.
+4. **Capture pricing once, never re-price in flight** ([Receipts](#receipts), metering D9).
+5. **At most one pending model** at a time.
 
 **Surface separation.** Opening returns a data handle and a separate admin handle. Admin
 operations take no branch: each forms its own single-purpose commit, which makes commit
@@ -1208,7 +1217,7 @@ Four ideas run through the differences below:
 
 | Topic | Previous spec | This spec | Why |
 | --- | --- | --- | --- |
-| Call shape | `create(branch, key?, cells, budget, debug?)` etc. | one `RecordOp<Op>` argument per call, returning `Metered<T>` | Ideas 1 and 2. An operation is also a plain value: it can be cloned to retry after `Conflict` and compared in a mock. |
+| Call shape | `create(branch, key?, cells, budget, debug?)` etc. | one `RecordOp<Op>` argument per call, returning `Metered<T>` | Ideas 1 and 2. An operation is also a plain value: it can be cloned to retry after losing a commit race and compared in a mock. |
 | Key modes | `CallerAssigned` / `EngineAssigned`, per branch lineage | `CallerAssigned` / `Generated { seed }`, fixed in genesis, with a specified derivation | Idea 3. Generated keys are predictable, so mixing modes would let a caller claim a future generated key; one mode per database rules that out. A specified derivation makes generated keys reproducible on every node. |
 | Reading `#meta` | dedicated `meta` accessor | `get`, full or `.only(["#meta"])`, decoded by `Record::meta()` | Idea 4. A completeness proof needs `#meta` in the same read as the cells, so `get` must return it anyway; a projection on `#meta` is already a fixed-size point read. |
 | `id_of`, `key_of` | record accessors | not built; to come with proofs | Idea 4. Exposing record IDs makes them part of the contract. Their only consumer is proof verification, whose cell paths are derived from the ID. |
@@ -1217,6 +1226,7 @@ Four ideas run through the differences below:
 | Kind on write | per write, any setter | `attribute` / `field` declare it; patch's `set` keeps the stored kind and fails with `CellNotFound` on a missing cell; no `insert` | A value change should not silently change indexing; a missing cell under `set` is most likely a typo. |
 | Commit and branch IDs | `u64` values | distinct newtypes over `u64` | Mixing up a commit number and a branch handle is an easy mistake with two `u64`s; separate types make it a compile error. Taken from `feature/golem-db-api`. |
 | Operation inspection | not covered | `cells()`, `changes()`, `names()` besides the per-name accessors | Code that receives an operation, such as a mock, an adapter or a policy wrapper, must be able to list its contents, not only ask about a known name. Taken from `feature/golem-db-api`. |
+| Stale branch on `commit` | `Conflict` | `HandleInvalid`, as for every other call | The error depended on which call noticed first; the caller's action never does. `Conflict` stays free for a version mismatch. |
 | Rollback | not idempotent, multi-frame | multi-frame, with `NoFrameToRollback` when exhausted | A rollback past the first frame is reported, not ignored, so a host's batch bookkeeping cannot silently drift from the branch. |
 | `branch_info` | `{origin, frame_depth}` | `{commit_id, branch_id, version, sealed}` | Reports what the branch layer tracks today; `commit_id` is the previous spec's `origin`. Not a deliberate design change; to be aligned. |
 | `expected_version?` | provisional OCC guard on patch and delete | not present | Idea 4. Record versioning is undecided ([Open items](#open-items)); the guard follows that decision. |

@@ -186,7 +186,7 @@ first. The first failure is returned; no later stage runs.
 
 | Stage | Checks | Cost | Failures |
 | --- | --- | --- | --- |
-| 1. Handle | writes and branch reads: the branch handle is known, not consumed, its origin is still the head, and, for writes, not sealed. Committed reads instead select their snapshot: the head, or the requested commit | 0 | `HandleInvalid`, `Conflict` (commit only), `Sealed`, `CommitUnavailable` |
+| 1. Handle | writes and branch reads: the branch handle is known, not consumed, its origin is still the head, and, for writes, not sealed. Committed reads instead select their snapshot: the head, or the requested commit | 0 | `HandleInvalid`, `Sealed`, `CommitUnavailable` |
 | 2. Admission | input form, including errors found while the request was built; reserved keys; key mode; cell names and value lengths against the genesis limits. Reads no record state | admission cost | `InvalidArgument`, `Reserved`, `KeyModeMismatch` |
 | 3. Record state | the binding, then `#meta`, cells and index terms; the per-record caps | `w_rec[op]` plus the reads performed | `NotFound`, `AlreadyExists`, `CellNotFound`, cap violations |
 
@@ -487,9 +487,9 @@ read cost       = rows read × w_imm_read_base + bytes read × bytes_read
 Meets R6, R7.
 
 - Cost is charged at the call, against its budget, using its captured pricing schedule (D9).
-- A call on an unknown, consumed, stale or sealed branch handle (`HandleInvalid`, `Conflict`, `Sealed`) costs 0: it is rejected before admission, and no pricing snapshot is captured. Charging it would also break R1: handles are process-local, so whether one is valid depends on a node's in-memory state, not on the call and committed state. This assumes branch handles never come from untrusted callers: the host creates and holds them, as Arkiv does when it executes transactions in its own branches. A host that lets untrusted callers pass handles, for example over a remote API, must protect itself against free rejected calls, as for estimation below: rate limiting, authenticated access, timeouts.
+- A call on an unknown, consumed, stale or sealed branch handle (`HandleInvalid`, `Sealed`) costs 0: it is rejected before admission, and no pricing snapshot is captured. Charging it would also break R1: handles are process-local, so whether one is valid depends on a node's in-memory state, not on the call and committed state. This assumes branch handles never come from untrusted callers: the host creates and holds them, as Arkiv does when it executes transactions in its own branches. A host that lets untrusted callers pass handles, for example over a remote API, must protect itself against free rejected calls, as for estimation below: rate limiting, authenticated access, timeouts.
 - `OutOfBudget{spent, required?}` reports cost already incurred, including the reads that established the price. `spent` is what the call costs, so an API may carry it in the call's receipt, which every outcome has, and `required` in the error. Only `OutOfBudget` has a `required`: other failures, such as invalid input, are not budget questions, and their receipt alone states their cost. A refusal is not free. For a write, `required` is `Some(total)` when planning completed and the full cost is representable, otherwise `None`. A read aborts as it goes and does not report a full required cost.
-- Any cost computation that overflows is treated as `OutOfBudget{spent, required: None}`, including under `Unlimited`. Costs use checked `u64` arithmetic: neither wrapping nor saturation may turn an unrepresentable total into a valid cost.
+- Any cost computation that overflows, or needs an unpriced weight (D9), is treated as `OutOfBudget{spent, required: None}`, including under `Unlimited`. Costs use checked `u64` arithmetic: neither wrapping nor saturation may turn an unrepresentable total into a valid cost.
 - **Failed writes** are charged for the work done in the plan phase (D2), never for writes:
 
   | Failure | Charge |
@@ -511,7 +511,7 @@ Meets R6, R7.
 
 ### Host-Funded Block/Commit Overhead
 
-The host funds commit-level engine overhead outside record-call budgets and receipts:
+The host funds commit-level database overhead outside record-call budgets and receipts:
 the `#roots` insertion, persistence of the final `#alloc` value when changed, the
 update of the global counters (D3), their
 history/change-set and trie work, and Superblock head and commit-transaction maintenance
@@ -573,8 +573,8 @@ its complete weight set in memory as a snapshot associated with that committed s
 At startup or whenever this snapshot is unavailable, reconstruct it from the committed
 `@meteringModel` and `@modelWeight` records at head: select the greatest model version
 whose activation commit is at or before head, validate its weight set, and load it.
-Unsupported active models or invalid weights must prevent serving priced calls, not
-silently fall back to an older schedule. Cache reconstruction does not change a call's
+Unsupported active models or malformed weights must prevent serving priced calls, not
+silently fall back to an older schedule; missing weights are unpriced (below). Cache reconstruction does not change a call's
 logical charge.
 
 **Refresh at commit boundaries.** Whenever head advances, check model activation and
@@ -587,7 +587,11 @@ if that number can be reused after a rewind.
 
 - **Model = code.** Cost structure, counting rules, byte definitions and expected weight names, identified by `modelVersion` ([design §4](golem-db-design.md#meteringmodel-recordid-32)). D2's structure, D3's depth table and D4's counting are model changes: a new version.
 - **Weights = data.** One `u64` per weight name per model version, stored in `@modelWeight` and versioned by Golem DB's own history.
-- **Install, then activate.** A new model version is installed with its weights and an activation commit ahead of the head; completeness is checked at activation. At most one model is pending.
+- **Install, then activate.** A new model version is installed with its weights and an activation commit `A ≥ head + 1 + #minActivationDelay`. At most one model is pending. Nodes not yet running the new version's code cannot know its weight names, so install checks only what every node can: the version is newer, `A` is within bounds, the cells are well-formed. Typos are the admin tool's job: it runs the new code and must reject unknown or missing weight names before it sends the install.
+- **Missing weights are unpriced.** If, at activation, the active model's code expects a weight that has no value, that weight is **unpriced**: any call whose cost needs it fails with `OutOfBudget{spent, required: None}`, also under `Unlimited`, exactly like an arithmetic overflow (D8). This fails safe (R4): the affected operations are unavailable until fixed, never free. Nothing halts and nothing splits, since every node prices from the same committed weights, and the admin repairs it with a weight patch, which is unmetered. Weight names the code does not declare are ignored at activation.
+- **Unknown names are rejected where every node can check.** A weight patch on the **active** model naming a weight its code does not declare is reverted with `InvalidArgument`: every node runs that code, so the verdict is deterministic. Writes to a pending version are checked for form only.
+- **Warn logs.** Golem DB writes a warn-level log entry, for operators' observability, at activation for every missing weight and every ignored name, and on every call that fails because a weight is unpriced, naming the weight. These are node logs, not consensus output.
+- **Minimum activation delay.** `#minActivationDelay` (`u32`, commits) is a genesis parameter in `#params` ([design §4](golem-db-design.md#params-recordid-0)). It guarantees every node operator a window between a model's install and its activation in which to upgrade to code that implements it. Without it, `A > head` would allow installing at head 99 with activation 100, leaving no window. For Arkiv, a value of about a day of blocks.
 - **Patch the active model.** A weight change staged while head is H takes effect only after the commit containing it succeeds and head becomes H+1. It cannot change pricing mid-branch or before persistence; a failed or discarded change has no effect.
 - **Capture pricing once.** Branch calls retain the pricing snapshot from their base commit; stale branches remain subject to the existing invalidation rules. Calls without a branch capture the current head's snapshot at admission. `priced_at` records that pricing commit, not the data commit being read. A call already in progress keeps its captured snapshot even if head advances.
 - **Historical data does not select historical prices.** A read targeting an old commit uses the same current pricing snapshot as a current-data read admitted at the same head. Each query page is a new call: pinning the data commit does not pin the pricing schedule across pages.
