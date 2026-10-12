@@ -1,19 +1,20 @@
 //! Query evaluation over the transactional index.
 //!
-//! A [`Query`] is plain data the caller builds; [`execute`] resolves it to the
-//! IDs of the matching records. Predicates are typed: `amount = I32(100)`
-//! reads only the `i32` run of `amount`, so a cell of another type under the
-//! same name is treated as absent.
+//! A query's [`Filter`] is plain data the caller builds; [`evaluate`] resolves
+//! it to its match set, the IDs of the matching records. Leaves are typed:
+//! `amount = CellValue::from_i32(100)` reads only the `i32` run of `amount`,
+//! so a cell of another type under the same name is treated as absent.
 //!
-//! All index reads go through [`PostingSource`]. [`IndexSource`] adapts an
+//! Admission validates the whole filter before any state read. All index
+//! reads then go through [`PostingSource`]. [`IndexSource`] adapts an
 //! [`Index`](golemdb_index::Index) at one read snapshot; the evaluation itself
 //! never touches storage.
 //!
 //! ```
-//! use golemdb_cells::CellType;
+//! use golemdb_cells::{CellNameRef, CellType, CellValue};
 //! use golemdb_index::{Index, IndexTerm, PostingChange};
 //! use golemdb_merkle::{Keccak256Hasher, RootRef};
-//! use golemdb_query::{IndexSource, Predicate, Query, execute};
+//! use golemdb_query::{Filter, IndexSource, evaluate};
 //! use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 //!
 //! let store = MemoryStore::new();
@@ -27,21 +28,22 @@
 //! tx.commit()?;
 //!
 //! let read = store.begin_read()?;
-//! let query = Query::from(Predicate::eq("color", "blue"));
-//! let ids = execute(&IndexSource::new(&index, &read), &query)?;
-//! assert_eq!(ids.iter().collect::<Vec<_>>(), [42]);
+//! let filter = Filter::Eq {
+//!     field: CellNameRef::parse_user(b"color", 32)?.into(),
+//!     value: CellValue::from_str("blue"),
+//! };
+//! let ids = evaluate(&IndexSource::new(&index, &read), &filter)?;
+//! assert_eq!(ids.treemap().iter().collect::<Vec<_>>(), [42]);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 mod error;
 mod eval;
+mod filter;
 mod plan;
-mod query;
 mod source;
-mod value;
 
 pub use error::{QueryError, Result};
-pub use eval::execute;
-pub use query::{Op, Predicate, Query};
+pub use eval::evaluate;
+pub use filter::Filter;
 pub use source::{IndexSource, PostingSource};
-pub use value::Value;

@@ -1,24 +1,21 @@
-//! Query evaluation over any [`PostingSource`].
+//! Filter evaluation over any [`PostingSource`].
 
-use roaring::RoaringTreemap;
+use golemdb_index::Bitmap;
 
-use crate::{
-    PostingSource, Query, Result,
-    plan::{Lookup, plan},
-};
+use crate::{Filter, PostingSource, Result, plan::Plan};
 
-/// The IDs of every record matching `query`, in ascending order.
+/// The match set of `filter`: the IDs of every matching record, ascending.
+///
+/// Admission validates the whole filter before the first read.
 ///
 /// # Errors
 ///
-/// [`QueryError::InvalidPredicate`](crate::QueryError::InvalidPredicate) for a
-/// predicate with no valid index term; [`QueryError::Index`](crate::QueryError::Index)
+/// [`QueryError::InvalidArgument`](crate::QueryError::InvalidArgument) for a
+/// leaf with no valid index term; [`QueryError::Internal`](crate::QueryError::Internal)
 /// when the source fails.
-pub fn execute(source: &impl PostingSource, query: &Query) -> Result<RoaringTreemap> {
-    match query {
-        Query::Predicate(predicate) => match plan(predicate)? {
-            Lookup::Term(term) => Ok(source.postings(&term)?),
-        },
+pub fn evaluate(source: &impl PostingSource, filter: &Filter) -> Result<Bitmap> {
+    match Plan::try_from(filter)? {
+        Plan::TermRead(term) => Ok(source.postings(&term)?),
     }
 }
 
@@ -26,24 +23,51 @@ pub fn execute(source: &impl PostingSource, query: &Query) -> Result<RoaringTree
 mod tests {
     use std::collections::BTreeMap;
 
-    use golemdb_index::{IndexError, IndexTerm, TermError};
+    use golemdb_cells::{CellKind, CellName, CellNameRef, CellType, CellValue};
+    use golemdb_index::{BitmapContainer, IndexError, IndexTerm, TermError, path};
 
     use super::*;
-    use crate::{Predicate, QueryError, Value};
+    use crate::QueryError;
 
     /// Posting lists in a `BTreeMap`: byte-ordered like the `Index` table.
     #[derive(Default)]
-    struct FakeSource(BTreeMap<IndexTerm, RoaringTreemap>);
+    struct FakeSource(BTreeMap<IndexTerm, Bitmap>);
 
     impl FakeSource {
-        fn with(mut self, term: IndexTerm, ids: impl IntoIterator<Item = u64>) -> Self {
-            self.0.entry(term).or_default().extend(ids);
+        /// Index `ids` under `field = value` the way the write path does: as
+        /// an attribute cell, through `IndexTerm::from_cell`.
+        fn with(
+            mut self,
+            field: &str,
+            value: CellValue,
+            ids: impl IntoIterator<Item = u64>,
+        ) -> Self {
+            let attribute = value
+                .with_kind(CellKind::Attribute)
+                .expect("indexable type");
+            let term = IndexTerm::from_cell(field, attribute.as_view())
+                .expect("valid term")
+                .expect("attribute");
+            self.0.insert(term, bitmap(ids));
             self
         }
     }
 
+    /// Chunk record IDs by their 48-bit path, as the BitmapTrie stores them.
+    fn bitmap(ids: impl IntoIterator<Item = u64>) -> Bitmap {
+        let mut chunks: BTreeMap<u64, Vec<u16>> = BTreeMap::new();
+        for id in ids {
+            let (path, offset) = path::split(id);
+            chunks.entry(path).or_default().push(offset);
+        }
+        Bitmap::from_containers(chunks.into_iter().map(|(path, offsets)| {
+            BitmapContainer::from_values(path, offsets).expect("48-bit path")
+        }))
+        .expect("unique, ordered paths")
+    }
+
     impl PostingSource for FakeSource {
-        fn postings(&self, term: &IndexTerm) -> golemdb_index::Result<RoaringTreemap> {
+        fn postings(&self, term: &IndexTerm) -> golemdb_index::Result<Bitmap> {
             Ok(self.0.get(term).cloned().unwrap_or_default())
         }
     }
@@ -52,18 +76,31 @@ mod tests {
     struct FailingSource;
 
     impl PostingSource for FailingSource {
-        fn postings(&self, _: &IndexTerm) -> golemdb_index::Result<RoaringTreemap> {
+        fn postings(&self, _: &IndexTerm) -> golemdb_index::Result<Bitmap> {
             Err(IndexError::Corruption("injected"))
         }
     }
 
-    fn term(field: &str, value: impl Into<Value>) -> IndexTerm {
-        value.into().term(field).expect("valid term")
+    /// Raw, so tests can also build names the grammar rejects.
+    fn name(field: &[u8]) -> CellName {
+        CellNameRef::raw(field).into()
     }
 
-    fn ids(source: &FakeSource, predicate: Predicate) -> Vec<u64> {
-        execute(source, &Query::from(predicate))
-            .expect("query runs")
+    fn eq(field: &str, value: CellValue) -> Filter {
+        Filter::Eq {
+            field: name(field.as_bytes()),
+            value,
+        }
+    }
+
+    fn str(value: &str) -> CellValue {
+        CellValue::from_str(value)
+    }
+
+    fn ids(source: &FakeSource, filter: Filter) -> Vec<u64> {
+        evaluate(source, &filter)
+            .expect("filter evaluates")
+            .treemap()
             .iter()
             .collect()
     }
@@ -71,83 +108,96 @@ mod tests {
     #[test]
     fn equality_returns_the_term_postings() {
         let source = FakeSource::default()
-            .with(term("color", "blue"), [1, 5, 1 << 40])
-            .with(term("color", "red"), [2]);
-        assert_eq!(
-            ids(&source, Predicate::eq("color", "blue")),
-            [1, 5, 1 << 40]
-        );
-        assert_eq!(ids(&source, Predicate::eq("color", "red")), [2]);
+            .with("color", str("blue"), [1, 5, 1 << 40])
+            .with("color", str("red"), [2]);
+        assert_eq!(ids(&source, eq("color", str("blue"))), [1, 5, 1 << 40]);
+        assert_eq!(ids(&source, eq("color", str("red"))), [2]);
     }
 
     #[test]
     fn absent_term_matches_nothing() {
-        let source = FakeSource::default().with(term("color", "blue"), [1]);
-        assert!(ids(&source, Predicate::eq("color", "green")).is_empty());
-        assert!(ids(&source, Predicate::eq("shape", "blue")).is_empty());
-        assert!(ids(&FakeSource::default(), Predicate::eq("color", "blue")).is_empty());
+        let source = FakeSource::default().with("color", str("blue"), [1]);
+        assert!(ids(&source, eq("color", str("green"))).is_empty());
+        assert!(ids(&source, eq("shape", str("blue"))).is_empty());
+        assert!(ids(&FakeSource::default(), eq("color", str("blue"))).is_empty());
     }
 
     #[test]
     fn other_types_under_the_same_name_are_absent() {
         let source = FakeSource::default()
-            .with(term("amount", Value::I32(100)), [1])
-            .with(term("amount", Value::U32(100)), [2])
-            .with(term("amount", Value::Dec32(100)), [3])
-            .with(term("amount", "100"), [4])
-            .with(term("amount", Value::I64(100)), [5]);
-        assert_eq!(ids(&source, Predicate::eq("amount", Value::I32(100))), [1]);
-        assert_eq!(ids(&source, Predicate::eq("amount", Value::U32(100))), [2]);
+            .with("amount", CellValue::from_i32(100), [1])
+            .with("amount", CellValue::from_u32(100), [2])
+            .with("amount", CellValue::from_dec32_unscaled(100), [3])
+            .with("amount", str("100"), [4])
+            .with("amount", CellValue::from_i64(100), [5]);
+        assert_eq!(ids(&source, eq("amount", CellValue::from_i32(100))), [1]);
+        assert_eq!(ids(&source, eq("amount", CellValue::from_u32(100))), [2]);
         assert_eq!(
-            ids(&source, Predicate::eq("amount", Value::Dec32(100))),
+            ids(&source, eq("amount", CellValue::from_dec32_unscaled(100))),
             [3]
         );
-        assert_eq!(ids(&source, Predicate::eq("amount", "100")), [4]);
-        assert_eq!(ids(&source, Predicate::eq("amount", Value::I64(100))), [5]);
-        assert!(ids(&source, Predicate::eq("amount", Value::U64(100))).is_empty());
+        assert_eq!(ids(&source, eq("amount", str("100"))), [4]);
+        assert_eq!(ids(&source, eq("amount", CellValue::from_i64(100))), [5]);
+        assert!(ids(&source, eq("amount", CellValue::from_u64(100))).is_empty());
     }
 
     #[test]
     fn names_sharing_a_prefix_are_distinct() {
         let source = FakeSource::default()
-            .with(term("a", "x"), [1])
-            .with(term("ab", "x"), [2])
-            .with(term("a", "bx"), [3]);
-        assert_eq!(ids(&source, Predicate::eq("a", "x")), [1]);
-        assert_eq!(ids(&source, Predicate::eq("ab", "x")), [2]);
-        assert_eq!(ids(&source, Predicate::eq("a", "bx")), [3]);
+            .with("a", str("x"), [1])
+            .with("ab", str("x"), [2])
+            .with("a", str("bx"), [3]);
+        assert_eq!(ids(&source, eq("a", str("x"))), [1]);
+        assert_eq!(ids(&source, eq("ab", str("x"))), [2]);
+        assert_eq!(ids(&source, eq("a", str("bx"))), [3]);
     }
 
     #[test]
-    fn negative_zero_finds_zero() {
-        let source = FakeSource::default().with(term("t", 0.0f64), [7]);
-        assert_eq!(ids(&source, Predicate::eq("t", -0.0f64)), [7]);
+    fn the_value_kind_plays_no_part() {
+        let source = FakeSource::default().with("a", CellValue::from_u64(7), [1]);
+        let attribute = CellValue::from_u64(7)
+            .with_kind(CellKind::Attribute)
+            .expect("indexable type");
+        assert_eq!(ids(&source, eq("a", CellValue::from_u64(7))), [1]);
+        assert_eq!(ids(&source, eq("a", attribute)), [1]);
     }
 
     #[test]
-    fn invalid_predicate_is_rejected_before_reading() {
-        // FailingSource would surface as QueryError::Index if it were consulted.
-        for (predicate, expected) in [
-            (Predicate::eq("1bad", 1i32), TermError::InvalidName),
-            (Predicate::eq("t", f64::NAN), TermError::NaN),
+    fn invalid_arguments_are_rejected_before_reading() {
+        // FailingSource would surface as QueryError::Internal if it were consulted.
+        let not_utf8 = Filter::Eq {
+            field: name(&[0xff]),
+            value: CellValue::from_i32(1),
+        };
+        for (filter, field, expected) in [
+            (
+                eq("1bad", CellValue::from_i32(1)),
+                name(b"1bad"),
+                TermError::InvalidName,
+            ),
+            (not_utf8, name(&[0xff]), TermError::InvalidName),
+            (
+                eq("b", CellValue::from_bytes(b"x")),
+                name(b"b"),
+                TermError::UnsupportedType(CellType::Bytes),
+            ),
         ] {
-            let field = predicate.field.clone();
-            match execute(&FailingSource, &Query::from(predicate)) {
-                Err(QueryError::InvalidPredicate { field: got, source }) => {
+            match evaluate(&FailingSource, &filter) {
+                Err(QueryError::InvalidArgument { field: got, source }) => {
                     assert_eq!(got, field);
                     assert_eq!(source, expected);
                 }
-                other => panic!("expected InvalidPredicate, got {other:?}"),
+                other => panic!("expected InvalidArgument, got {other:?}"),
             }
         }
     }
 
     #[test]
     fn source_errors_propagate() {
-        let result = execute(&FailingSource, &Query::from(Predicate::eq("a", 1i32)));
+        let result = evaluate(&FailingSource, &eq("a", CellValue::from_i32(1)));
         assert!(matches!(
             result,
-            Err(QueryError::Index(IndexError::Corruption("injected")))
+            Err(QueryError::Internal(IndexError::Corruption("injected")))
         ));
     }
 }

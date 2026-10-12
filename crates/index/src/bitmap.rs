@@ -6,8 +6,9 @@ use crate::{BitmapContainer, BitmapError};
 ///
 /// Owns the chunk-to-record-ID conversion, not storage or Merkle hashing. Use
 /// [`Self::treemap`] for Roaring's set operations; [`Self::into_treemap`] hands
-/// ownership to the query evaluator without a second copy.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// ownership to the query evaluator without a second copy. The default is the
+/// empty bitmap.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Bitmap {
     values: RoaringTreemap,
 }

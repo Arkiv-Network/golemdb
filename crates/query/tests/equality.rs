@@ -1,16 +1,29 @@
 mod support;
 
-use golemdb_index::TermError;
-use golemdb_query::{Predicate, QueryError, Value};
+use golemdb_cells::{CellNameRef, CellType, CellValue};
+use golemdb_index::{IndexTerm, TermError};
+use golemdb_query::{Filter, QueryError};
 use proptest::prelude::*;
 use support::{TestIndex, add, any_value, remove, small_value, written_term};
 
-fn eq(field: &str, value: Value) -> Predicate {
-    Predicate::eq(field, value)
+/// Raw, so tests can also build names the grammar rejects.
+fn eq(field: &str, value: CellValue) -> Filter {
+    Filter::Eq {
+        field: CellNameRef::raw(field.as_bytes()).into(),
+        value,
+    }
+}
+
+fn f32_value(value: f32) -> CellValue {
+    CellValue::from_f32(value).expect("not NaN")
+}
+
+fn f64_value(value: f64) -> CellValue {
+    CellValue::from_f64(value).expect("not NaN")
 }
 
 /// Boundary values of every type. All distinct, so each has its own term.
-fn samples() -> Vec<Value> {
+fn samples() -> Vec<CellValue> {
     let i256_min = {
         let mut v = [0; 32];
         v[0] = 0x80;
@@ -22,56 +35,56 @@ fn samples() -> Vec<Value> {
         v
     };
     vec![
-        Value::Bool(false),
-        Value::Bool(true),
-        Value::Str(String::new()),
-        Value::Str("a".into()),
-        Value::Str("é𝄞\u{10FFFF}".into()),
-        Value::Str("long".repeat(256)),
-        Value::Bytes4([0; 4]),
-        Value::Bytes4([0xff; 4]),
-        Value::Bytes8([0xff; 8]),
-        Value::Bytes16([0xff; 16]),
-        Value::Bytes20([0; 20]),
-        Value::Bytes20([0xff; 20]),
-        Value::Bytes32([0; 32]),
-        Value::U32(0),
-        Value::U32(u32::MAX),
-        Value::U64(0),
-        Value::U64(u64::MAX),
-        Value::U128(u128::MAX),
-        Value::U256([0; 32]),
-        Value::U256([0xff; 32]),
-        Value::I32(i32::MIN),
-        Value::I32(-1),
-        Value::I32(0),
-        Value::I32(i32::MAX),
-        Value::I64(i64::MIN),
-        Value::I64(i64::MAX),
-        Value::I128(i128::MIN),
-        Value::I128(i128::MAX),
-        Value::I256(i256_min),
-        Value::I256([0xff; 32]),
-        Value::I256(i256_max),
-        Value::Dec32(i32::MIN),
-        Value::Dec64(-1),
-        Value::Dec128(i128::MAX),
-        Value::Dec256(i256_min),
-        Value::F32(f32::NEG_INFINITY),
-        Value::F32(-f32::from_bits(1)),
-        Value::F32(0.0),
-        Value::F32(f32::MAX),
-        Value::F32(f32::INFINITY),
-        Value::F64(f64::NEG_INFINITY),
-        Value::F64(f64::MIN),
-        Value::F64(0.0),
-        Value::F64(f64::from_bits(1)),
-        Value::F64(f64::INFINITY),
-        Value::Date32(i32::MIN),
-        Value::Date32(0),
-        Value::Date32(i32::MAX),
-        Value::Timestamp64(i64::MIN),
-        Value::Timestamp64(i64::MAX),
+        CellValue::from_bool(false),
+        CellValue::from_bool(true),
+        CellValue::from_str(""),
+        CellValue::from_str("a"),
+        CellValue::from_str("é𝄞\u{10FFFF}"),
+        CellValue::from_str(&"long".repeat(256)),
+        CellValue::from_bytes4([0; 4]),
+        CellValue::from_bytes4([0xff; 4]),
+        CellValue::from_bytes8([0xff; 8]),
+        CellValue::from_bytes16([0xff; 16]),
+        CellValue::from_bytes20([0; 20]),
+        CellValue::from_bytes20([0xff; 20]),
+        CellValue::from_bytes32([0; 32]),
+        CellValue::from_u32(0),
+        CellValue::from_u32(u32::MAX),
+        CellValue::from_u64(0),
+        CellValue::from_u64(u64::MAX),
+        CellValue::from_u128(u128::MAX),
+        CellValue::from_u256_be([0; 32]),
+        CellValue::from_u256_be([0xff; 32]),
+        CellValue::from_i32(i32::MIN),
+        CellValue::from_i32(-1),
+        CellValue::from_i32(0),
+        CellValue::from_i32(i32::MAX),
+        CellValue::from_i64(i64::MIN),
+        CellValue::from_i64(i64::MAX),
+        CellValue::from_i128(i128::MIN),
+        CellValue::from_i128(i128::MAX),
+        CellValue::from_i256_be(i256_min),
+        CellValue::from_i256_be([0xff; 32]),
+        CellValue::from_i256_be(i256_max),
+        CellValue::from_dec32_unscaled(i32::MIN),
+        CellValue::from_dec64_unscaled(-1),
+        CellValue::from_dec128_unscaled(i128::MAX),
+        CellValue::from_dec256_unscaled_be(i256_min),
+        f32_value(f32::NEG_INFINITY),
+        f32_value(-f32::from_bits(1)),
+        f32_value(0.0),
+        f32_value(f32::MAX),
+        f32_value(f32::INFINITY),
+        f64_value(f64::NEG_INFINITY),
+        f64_value(f64::MIN),
+        f64_value(0.0),
+        f64_value(f64::from_bits(1)),
+        f64_value(f64::INFINITY),
+        CellValue::from_date32(i32::MIN),
+        CellValue::from_date32(0),
+        CellValue::from_date32(i32::MAX),
+        CellValue::from_timestamp64(i64::MIN),
+        CellValue::from_timestamp64(i64::MAX),
     ]
 }
 
@@ -92,7 +105,7 @@ fn every_type_round_trips_through_the_index() {
     );
     for (i, value) in samples.iter().enumerate() {
         assert_eq!(
-            index.query(eq("f", value.clone())).unwrap(),
+            index.evaluate(&eq("f", value.clone())).unwrap(),
             [id(i)],
             "{value:?}"
         );
@@ -104,19 +117,24 @@ fn values_never_stored_match_nothing() {
     let mut index = TestIndex::default();
     index.apply(samples().iter().map(|value| add(1, "f", value)));
     for value in [
-        Value::Str("b".into()),
-        Value::U32(1),
-        Value::I32(1),
-        Value::Dec32(-1),
-        Value::F64(1.0),
-        Value::Timestamp64(0),
+        CellValue::from_str("b"),
+        CellValue::from_u32(1),
+        CellValue::from_i32(1),
+        CellValue::from_dec32_unscaled(-1),
+        f64_value(1.0),
+        CellValue::from_timestamp64(0),
     ] {
         assert!(
-            index.query(eq("f", value.clone())).unwrap().is_empty(),
+            index.evaluate(&eq("f", value.clone())).unwrap().is_empty(),
             "{value:?}"
         );
     }
-    assert!(index.query(eq("g", Value::Bool(true))).unwrap().is_empty());
+    assert!(
+        index
+            .evaluate(&eq("g", CellValue::from_bool(true)))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -134,66 +152,88 @@ fn postings_span_container_boundaries() {
         u64::MAX - 1,
         u64::MAX,
     ];
-    let blue = Value::from("blue");
-    let red = Value::from("red");
+    let blue = CellValue::from_str("blue");
+    let red = CellValue::from_str("red");
     let mut index = TestIndex::default();
     index.apply(ids.iter().map(|&id| add(id, "color", &blue)));
     index.apply(ids.iter().map(|&id| add(id ^ 1, "color", &red)));
-    assert_eq!(index.query(eq("color", blue)).unwrap(), ids);
+    assert_eq!(index.evaluate(&eq("color", blue)).unwrap(), ids);
     let mut reds: Vec<u64> = ids.iter().map(|id| id ^ 1).collect();
     reds.sort_unstable();
-    assert_eq!(index.query(eq("color", red)).unwrap(), reds);
+    assert_eq!(index.evaluate(&eq("color", red)).unwrap(), reds);
 }
 
 #[test]
 fn removed_postings_stop_matching() {
-    let blue = Value::from("blue");
+    let blue = CellValue::from_str("blue");
     let mut index = TestIndex::default();
     index.apply([1, 2, 3, 70_000].map(|id| add(id, "color", &blue)));
     index.apply([remove(2, "color", &blue)]);
     assert_eq!(
-        index.query(eq("color", blue.clone())).unwrap(),
+        index.evaluate(&eq("color", blue.clone())).unwrap(),
         [1, 3, 70_000]
     );
 
     // The last posting going removes the term itself.
     index.apply([1, 3, 70_000].map(|id| remove(id, "color", &blue)));
-    assert!(index.query(eq("color", blue.clone())).unwrap().is_empty());
+    assert!(
+        index
+            .evaluate(&eq("color", blue.clone()))
+            .unwrap()
+            .is_empty()
+    );
 
     index.apply([add(9, "color", &blue)]);
-    assert_eq!(index.query(eq("color", blue)).unwrap(), [9]);
+    assert_eq!(index.evaluate(&eq("color", blue)).unwrap(), [9]);
 }
 
 #[test]
 fn one_record_under_many_terms() {
     let mut index = TestIndex::default();
     index.apply([
-        add(9, "a", &Value::I32(1)),
-        add(9, "ab", &Value::I32(1)),
-        add(9, "b", &Value::U32(1)),
-        add(10, "a", &Value::I32(2)),
+        add(9, "a", &CellValue::from_i32(1)),
+        add(9, "ab", &CellValue::from_i32(1)),
+        add(9, "b", &CellValue::from_u32(1)),
+        add(10, "a", &CellValue::from_i32(2)),
     ]);
-    assert_eq!(index.query(eq("a", Value::I32(1))).unwrap(), [9]);
-    assert_eq!(index.query(eq("ab", Value::I32(1))).unwrap(), [9]);
-    assert_eq!(index.query(eq("b", Value::U32(1))).unwrap(), [9]);
-    assert!(index.query(eq("b", Value::I32(1))).unwrap().is_empty());
-    assert_eq!(index.query(eq("a", Value::I32(2))).unwrap(), [10]);
+    assert_eq!(
+        index.evaluate(&eq("a", CellValue::from_i32(1))).unwrap(),
+        [9]
+    );
+    assert_eq!(
+        index.evaluate(&eq("ab", CellValue::from_i32(1))).unwrap(),
+        [9]
+    );
+    assert_eq!(
+        index.evaluate(&eq("b", CellValue::from_u32(1))).unwrap(),
+        [9]
+    );
+    assert!(
+        index
+            .evaluate(&eq("b", CellValue::from_i32(1)))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        index.evaluate(&eq("a", CellValue::from_i32(2))).unwrap(),
+        [10]
+    );
 }
 
 #[test]
-fn invalid_predicates_are_errors_not_empty_results() {
+fn invalid_arguments_are_errors_not_empty_results() {
     let index = TestIndex::default();
     assert!(matches!(
-        index.query(eq("not valid", Value::I32(1))),
-        Err(QueryError::InvalidPredicate {
+        index.evaluate(&eq("not valid", CellValue::from_i32(1))),
+        Err(QueryError::InvalidArgument {
             source: TermError::InvalidName,
             ..
         })
     ));
     assert!(matches!(
-        index.query(eq("f", Value::F32(f32::NAN))),
-        Err(QueryError::InvalidPredicate {
-            source: TermError::NaN,
+        index.evaluate(&eq("f", CellValue::from_bytes(b"x"))),
+        Err(QueryError::InvalidArgument {
+            source: TermError::UnsupportedType(CellType::Bytes),
             ..
         })
     ));
@@ -212,8 +252,10 @@ fn record_id() -> impl Strategy<Value = u64> {
 
 proptest! {
     #[test]
-    fn query_terms_equal_written_terms(field in "[a-zA-Z][a-zA-Z0-9_.:-]{0,15}", value in any_value()) {
-        prop_assert_eq!(value.term(&field).unwrap(), written_term(&field, &value));
+    fn lookup_terms_equal_written_terms(field in "[a-zA-Z][a-zA-Z0-9_.:-]{0,15}", value in any_value()) {
+        // Filters hold fields; seal indexes attributes. The kind must not matter.
+        let lookup = IndexTerm::for_value(&field, value.as_view()).unwrap();
+        prop_assert_eq!(lookup, written_term(&field, &value));
     }
 
     #[test]
@@ -232,7 +274,7 @@ proptest! {
         index.apply(records.iter().flat_map(|(&id, cells)| {
             cells.iter().map(move |(field, value)| add(id, field, value))
         }));
-        let stored: Vec<(&str, &Value)> = records
+        let stored: Vec<(&str, &CellValue)> = records
             .values()
             .flat_map(|cells| cells.iter().map(|(field, value)| (*field, value)))
             .collect();
@@ -245,14 +287,15 @@ proptest! {
                 }
                 Some(_) | None => (field, value),
             };
-            // A record matches iff its cell under `field` has the query's type
-            // and value; `Value`'s equality already compares both (and -0 == 0).
+            // A record matches iff its cell under `field` has the leaf's type
+            // and value. Every generated value is a field, so `CellValue`
+            // equality compares exactly type and stored bytes (-0 is already 0).
             let expected: Vec<u64> = records
                 .iter()
                 .filter(|(_, cells)| cells.get(field) == Some(&value))
                 .map(|(&id, _)| id)
                 .collect();
-            prop_assert_eq!(index.query(eq(field, value)).unwrap(), expected);
+            prop_assert_eq!(index.evaluate(&eq(field, value)).unwrap(), expected);
         }
     }
 }

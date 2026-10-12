@@ -59,9 +59,16 @@ impl IndexTerm {
         if !cell.is_indexable() {
             return Ok(None);
         }
-        let mut bytes = Self::prefix(name, cell.cell_type())?;
-        bytes.extend_from_slice(cell.value());
-        Ok(Some(Self(bytes)))
+        Self::for_value(name, cell).map(Some)
+    }
+
+    /// The term `name = value` is indexed under, whatever the cell's kind:
+    /// queries look a value up by name, type and value. The payload is already
+    /// valid and order-encoded, so it is copied verbatim, as for `from_cell`.
+    pub fn for_value(name: &str, value: CellValueRef<'_>) -> Result<Self, TermError> {
+        let mut bytes = Self::prefix(name, value.cell_type())?;
+        bytes.extend_from_slice(value.value());
+        Ok(Self(bytes))
     }
 
     /// Prefix that confines range/prefix scans to one attribute name and type.
@@ -205,5 +212,147 @@ impl Error for TermError {
             Self::Value(error) => Some(error),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use golemdb_cells::{CellKind, CellValue};
+
+    use super::*;
+
+    /// One value of every indexable type, with the native big-endian bytes
+    /// `IndexTerm::new` takes for it.
+    fn values() -> Vec<(CellValue, Vec<u8>)> {
+        let mut i256 = [0xff; 32];
+        i256[31] = 0xfe; // -2
+        let float = |value: f64| CellValue::from_f64(value).expect("not NaN");
+        vec![
+            (CellValue::from_bool(true), vec![1]),
+            (CellValue::from_str("blue"), b"blue".to_vec()),
+            (CellValue::from_str(""), vec![]),
+            (CellValue::from_bytes4([1, 2, 3, 4]), vec![1, 2, 3, 4]),
+            (CellValue::from_bytes8([8; 8]), vec![8; 8]),
+            (CellValue::from_bytes16([16; 16]), vec![16; 16]),
+            (CellValue::from_bytes20([20; 20]), vec![20; 20]),
+            (CellValue::from_bytes32([32; 32]), vec![32; 32]),
+            (CellValue::from_u32(7), 7u32.to_be_bytes().to_vec()),
+            (
+                CellValue::from_u64(u64::MAX),
+                u64::MAX.to_be_bytes().to_vec(),
+            ),
+            (CellValue::from_u128(1), 1u128.to_be_bytes().to_vec()),
+            (CellValue::from_u256_be([0xff; 32]), vec![0xff; 32]),
+            (CellValue::from_i32(-7), (-7i32).to_be_bytes().to_vec()),
+            (
+                CellValue::from_i64(i64::MIN),
+                i64::MIN.to_be_bytes().to_vec(),
+            ),
+            (
+                CellValue::from_i128(i128::MAX),
+                i128::MAX.to_be_bytes().to_vec(),
+            ),
+            (CellValue::from_i256_be(i256), i256.to_vec()),
+            (
+                CellValue::from_dec32_unscaled(-12_345),
+                (-12_345i32).to_be_bytes().to_vec(),
+            ),
+            (
+                CellValue::from_dec64_unscaled(1),
+                1i64.to_be_bytes().to_vec(),
+            ),
+            (
+                CellValue::from_dec128_unscaled(-1),
+                (-1i128).to_be_bytes().to_vec(),
+            ),
+            (CellValue::from_dec256_unscaled_be(i256), i256.to_vec()),
+            (
+                CellValue::from_f32(-1.5).expect("not NaN"),
+                (-1.5f32).to_be_bytes().to_vec(),
+            ),
+            (float(f64::INFINITY), f64::INFINITY.to_be_bytes().to_vec()),
+            // Both constructions normalize negative zero.
+            (float(-0.0), (-0.0f64).to_be_bytes().to_vec()),
+            (CellValue::from_date32(-1), (-1i32).to_be_bytes().to_vec()),
+            (
+                CellValue::from_timestamp64(i64::MIN),
+                i64::MIN.to_be_bytes().to_vec(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn for_value_appends_the_stored_payload_to_the_prefix() {
+        for (value, _) in values() {
+            let term = IndexTerm::for_value("Price", value.as_view()).expect("indexable");
+            let mut expected = IndexTerm::prefix("Price", value.cell_type()).expect("indexable");
+            expected.extend_from_slice(value.value());
+            assert_eq!(term.as_bytes(), expected, "{value:?}");
+            assert_eq!(
+                IndexTerm::decode(term.as_bytes()).expect("canonical"),
+                term,
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn for_value_agrees_with_native_construction() {
+        for (value, native) in values() {
+            let term = IndexTerm::for_value("Price", value.as_view()).expect("indexable");
+            let from_native = IndexTerm::new("Price", value.cell_type(), &native).expect("valid");
+            assert_eq!(term, from_native, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn for_value_ignores_the_cell_kind() {
+        for (field, _) in values() {
+            let attribute = field
+                .clone()
+                .with_kind(CellKind::Attribute)
+                .expect("indexable type");
+            let term = IndexTerm::for_value("Price", field.as_view()).expect("indexable");
+            assert_eq!(
+                IndexTerm::for_value("Price", attribute.as_view()).expect("indexable"),
+                term
+            );
+            // from_cell is for_value for attributes, and nothing for fields.
+            assert_eq!(
+                IndexTerm::from_cell("Price", attribute.as_view()).expect("indexable"),
+                Some(term)
+            );
+            assert_eq!(
+                IndexTerm::from_cell("Price", field.as_view()).expect("indexable"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn for_value_keeps_names_and_types_apart() {
+        let price = |name| IndexTerm::for_value(name, CellValue::from_u32(7).as_view());
+        assert_ne!(price("Price"), price("Price2"));
+        assert_ne!(
+            price("Price"),
+            IndexTerm::for_value("Price", CellValue::from_i32(7).as_view())
+        );
+        assert!(price("$owner").is_ok());
+    }
+
+    #[test]
+    fn for_value_rejects_invalid_names_and_variable_length_bytes() {
+        let value = CellValue::from_u32(7);
+        for name in ["", "$", "0bad", "#key", "@admin", "a b", "a\0b", "é"] {
+            assert_eq!(
+                IndexTerm::for_value(name, value.as_view()),
+                Err(TermError::InvalidName),
+                "{name:?}"
+            );
+        }
+        assert_eq!(
+            IndexTerm::for_value("Price", CellValue::from_bytes(b"x").as_view()),
+            Err(TermError::UnsupportedType(CellType::Bytes))
+        );
     }
 }
