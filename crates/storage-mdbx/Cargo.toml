@@ -12,5 +12,5 @@ libmdbx = "=0.6.6"
 mdbx-sys = "=13.11.0"
 
 [dev-dependencies]
-# Used by the public API documentation example.
+# Used by the public API documentation example and unit tests.
 tempfile = "3"

@@ -7,23 +7,36 @@ use golemdb_storage::{
     Database, Entry, ReadCursor, ReadTransaction, Result, StorageError, Table, WriteTransaction,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// Backend capacity settings, not table declarations or logical storage quotas.
 #[derive(Clone, Copy, Debug)]
 pub struct MdbxOptions {
     pub max_tables: u64,
+    /// Maximum database size in bytes. Reserves address space, not disk.
     pub max_map_size: usize,
     pub growth_step: usize,
+    /// Page size in bytes, used only when creating a database. Sets the maximum key size.
+    pub page_size: usize,
 }
 
 impl Default for MdbxOptions {
     fn default() -> Self {
         Self {
             max_tables: 128,
-            max_map_size: 1024 * 1024 * 1024,
+            max_map_size: DEFAULT_MAX_MAP_SIZE,
             growth_step: 16 * 1024 * 1024,
+            page_size: DEFAULT_PAGE_SIZE,
         }
     }
 }
+
+/// 1 TiB: a generous ceiling, since it only reserves address space.
+const DEFAULT_MAX_MAP_SIZE: usize = 1024 * 1024 * 1024 * 1024;
+
+/// Fixed so the maximum key size doesn't depend on the OS page size.
+const DEFAULT_PAGE_SIZE: usize = 4096;
 
 /// Clone to share one environment. Do not independently open the same directory
 /// twice within a process; close all handles before reopening it.
@@ -81,7 +94,11 @@ impl MdbxDatabase {
                 .into(),
             )
         };
-        if options.max_tables == 0 || options.max_map_size == 0 || options.growth_step == 0 {
+        if options.max_tables == 0
+            || options.max_map_size == 0
+            || options.growth_step == 0
+            || options.page_size == 0
+        {
             return Err(invalid());
         }
         let max_size = isize::try_from(options.max_map_size).map_err(|_| invalid())?;
@@ -91,6 +108,7 @@ impl MdbxDatabase {
             path,
             libmdbx::DatabaseOptions {
                 max_tables: Some(options.max_tables),
+                page_size: Some(libmdbx::PageSize::Set(options.page_size)),
                 mode: libmdbx::Mode::ReadWrite(libmdbx::ReadWriteOptions {
                     sync_mode: libmdbx::SyncMode::Durable,
                     max_size: Some(max_size),
