@@ -39,11 +39,11 @@
 
 mod error;
 mod eval;
-mod filter;
 mod plan;
+mod query_op;
 mod source;
 
 pub use error::{QueryError, Result};
 pub use eval::evaluate;
-pub use filter::Filter;
+pub use query_op::{Budget, CountOp, Direction, Filter, Metering, QueryOp, QueryPage, SortKey};
 pub use source::{IndexSource, PostingSource};

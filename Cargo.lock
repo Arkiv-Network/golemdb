@@ -587,9 +587,11 @@ dependencies = [
 name = "golemdb-query"
 version = "0.1.0"
 dependencies = [
+ "golemdb-branch",
  "golemdb-cells",
  "golemdb-index",
  "golemdb-merkle",
+ "golemdb-record",
  "golemdb-storage",
  "proptest",
  "thiserror",
