@@ -1,11 +1,11 @@
 use crate::{CellPatch, ReadTarget, RecordCells, RecordError, RecordKey, Records};
 use golemdb_branch::Branches;
 use golemdb_cells::{
-    CellChange, CellKey, CellName, CellNameRef, CellType, CellValue, CellValueRef, Cells, Width,
-    reserved, system,
+    CellChange, CellKey, CellName, CellNameRef, CellType, CellValue, CellValueRef, Width, reserved,
+    system,
 };
-use golemdb_merkle::{HashProvider, Keccak256Hasher, RootRef};
-use golemdb_storage::{Database, MemoryDatabase, Table, WriteTransaction};
+use golemdb_merkle::Keccak256Hasher;
+use golemdb_storage::{Database, MemoryDatabase};
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
 const OTHER: RecordKey = RecordKey([0x43; 32]);
@@ -33,7 +33,7 @@ fn binding(key: RecordKey) -> CellKey {
 
 // Explicit initialized state, as supplied by the future connection/genesis layer.
 // Build the real cell trie so seal/commit exercise production root updates.
-fn initialize(db: &impl Database) {
+fn initialize<D: Database>(db: D) -> Branches<D, Keccak256Hasher> {
     let mut changes = Vec::new();
     let mut put = |id, name: CellNameRef<'_>, value| {
         changes.push(CellChange::Put {
@@ -65,23 +65,7 @@ fn initialize(db: &impl Database) {
         );
     }
     put(system::ALLOC.id, reserved::NEXT_RECORD_ID, u64_value(64));
-    let hash = Keccak256Hasher;
-    let mut tx = db.begin_write().unwrap();
-    let update = Cells::new(&hash)
-        .apply(&mut tx, RootRef::Empty, changes)
-        .unwrap();
-    tx.put(
-        Table("Superblock"),
-        b"head",
-        &[
-            0u64.to_be_bytes().as_slice(),
-            &update.root.hash(&hash),
-            &hash.hash(&[]),
-        ]
-        .concat(),
-    )
-    .unwrap();
-    tx.commit().unwrap();
+    Branches::create(db, Keccak256Hasher, changes).unwrap()
 }
 
 fn setup() -> (
@@ -90,8 +74,7 @@ fn setup() -> (
     Records<MemoryDatabase, Keccak256Hasher>,
 ) {
     let db = MemoryDatabase::new();
-    initialize(&db);
-    let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
+    let branches = initialize(db.clone());
     let records = Records::new(branches.clone());
     (db, branches, records)
 }
@@ -474,4 +457,31 @@ fn committed_cell_reader_keeps_one_snapshot_when_head_advances() {
         records.get(ReadTarget::Commit(2), KEY, None).unwrap().cells[b"name".as_slice()],
         text("after", true)
     );
+}
+
+#[test]
+fn committed_record_reads_reject_missing_or_unsupported_format() {
+    use golemdb_branch::tables::SUPERBLOCK;
+    use golemdb_storage::WriteTransaction;
+
+    let (db, branches, records) = setup();
+    let branch = branches.begin().unwrap();
+    records.create(branch, KEY, values("Alice")).unwrap();
+    let commit = branches.commit(branch).unwrap();
+    for format in [None, Some(2u32.to_be_bytes())] {
+        let mut tx = db.begin_write().unwrap();
+        match format {
+            Some(bytes) => tx.put(SUPERBLOCK, b"format", &bytes).unwrap(),
+            None => {
+                tx.delete(SUPERBLOCK, b"format").unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        assert!(matches!(
+            records.get(ReadTarget::Commit(commit), KEY, None),
+            Err(RecordError::Branch(
+                golemdb_branch::BranchError::UnsupportedDatabaseFormat
+            ))
+        ));
+    }
 }

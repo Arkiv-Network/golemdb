@@ -8,14 +8,12 @@ use std::{
     time::Duration,
 };
 
-use crate::{BranchError, BranchId, BranchInfo, Branches, OperationError};
+use crate::{BranchError, BranchId, BranchInfo, Branches, OperationError, tables::SUPERBLOCK};
 use golemdb_cells::{CellKey, CellNameRef, CellValue, tables};
 use golemdb_merkle::{HashProvider, Keccak256Hasher};
 use golemdb_storage::{
     Database, MemoryDatabase, ReadTransaction, StorageError, Table, WriteTransaction,
 };
-
-const SUPERBLOCK: Table = Table("Superblock");
 
 fn key() -> CellKey {
     CellKey::new(64, CellNameRef::raw(b"name"))
@@ -33,6 +31,7 @@ fn publish(db: &impl Database, commit: u64, text: &str) {
     row.extend_from_slice(&[0x22; 32]);
     let mut tx = db.begin_write().unwrap();
     tx.put(SUPERBLOCK, b"head", &row).unwrap();
+    crate::head::write_format(&mut tx, 0).unwrap();
     tx.put(tables::CELL, &key().encode(), value(text).encoded_bytes())
         .unwrap();
     tx.commit().unwrap();

@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use crate::{CellPatch, RecordKey, Records};
-use golemdb_branch::Branches;
+use golemdb_branch::{Branches, tables::SUPERBLOCK};
 use golemdb_cells::{
     CellKey, CellNameRef, CellType, CellValue, CellValueRef, Width, reserved, system, tables,
 };
@@ -64,7 +64,10 @@ fn late_storage_failure_restores_earlier_patch_writes_and_checkpoint_state() {
     let db = MemoryDatabase::new();
     // Minimal read-only origin fixture; this test never seals or commits it.
     let mut tx = db.begin_write().unwrap();
-    tx.put(Table("Superblock"), b"head", &[0; 72]).unwrap();
+    tx.put(SUPERBLOCK, b"head", &[0; 72]).unwrap();
+    tx.put(SUPERBLOCK, b"format", &1u32.to_be_bytes()).unwrap();
+    tx.put(SUPERBLOCK, b"retention", &0u64.to_be_bytes())
+        .unwrap();
     for name in [
         reserved::MAX_STR_LEN,
         reserved::MAX_BYTES_LEN,

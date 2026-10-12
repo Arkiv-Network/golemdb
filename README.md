@@ -21,7 +21,7 @@ The unpublished integration-test package is a workspace member only.
 - `crates/branch` (package `golemdb-branch`) — head-validated branch IDs and guarded cell
   read/write views, encoded-key prefix scans, atomic writes, checkpoints and undo;
   seal buffers cell/index updates and roots; commit atomically persists them and
-  advances head, with history deferred
+  advances head and collects obsolete trie/bitmap nodes, with history deferred
 - `crates/record` (package `golemdb-record`) — caller-keyed record CRUD, allocation,
   identity and bindings; branch work-in-progress and committed-head reads
 - `crates/integration-tests` (package `golemdb-integration-tests`) — backend and

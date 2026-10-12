@@ -25,6 +25,10 @@ impl<'a, R> Buffered<'a, R> {
     pub(crate) fn into_writes(self) -> Writes {
         self.writes
     }
+
+    pub(crate) fn writes(&self) -> &Writes {
+        &self.writes
+    }
 }
 
 fn validate(table: Table) -> Result<()> {

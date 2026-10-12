@@ -1,9 +1,7 @@
-use golemdb_branch::{BranchError, BranchId, Branches, OperationError};
+use golemdb_branch::{BranchError, BranchId, Branches, OperationError, tables::SUPERBLOCK};
 use golemdb_cells::{CellKey, CellNameRef, CellValue, tables};
 use golemdb_merkle::{HashProvider, Keccak256Hasher};
-use golemdb_storage::{Database, MemoryDatabase, ReadTransaction, Table, WriteTransaction};
-
-const SUPERBLOCK: Table = Table("Superblock");
+use golemdb_storage::{Database, MemoryDatabase, ReadTransaction, WriteTransaction};
 
 fn key() -> CellKey {
     CellKey::new(64, CellNameRef::raw(b"name"))
@@ -21,6 +19,9 @@ fn publish(db: &impl Database, commit: u64, text: &str) {
     row.extend_from_slice(&[0x22; 32]);
     let mut tx = db.begin_write().unwrap();
     tx.put(SUPERBLOCK, b"head", &row).unwrap();
+    tx.put(SUPERBLOCK, b"format", &1u32.to_be_bytes()).unwrap();
+    tx.put(SUPERBLOCK, b"retention", &0u64.to_be_bytes())
+        .unwrap();
     tx.put(tables::CELL, &key().encode(), value(text).encoded_bytes())
         .unwrap();
     tx.commit().unwrap();

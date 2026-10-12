@@ -1,15 +1,14 @@
 use golemdb_cells::{
-    CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, CellsUpdate,
-    system, tables,
+    CellChange, CellKey, CellNameRef, CellType, CellValueRef, Cells, CellsUpdate, system, tables,
 };
-use golemdb_index::{Index, IndexTerm, IndexUpdate, PostingChange, TermError};
+use golemdb_index::{Index, IndexUpdate};
 use golemdb_merkle::{Hash, HashProvider};
 use golemdb_storage::ReadTransaction;
 
 use crate::{
     BranchError, CommitId, Result,
     buffer::{Buffered, Writes},
-    head::read_head_state,
+    head::{Head, read_head_state, read_retention, write_head},
     overlay::CellOverlay,
 };
 
@@ -23,8 +22,9 @@ pub struct SealedCommit {
     pub index_root: Hash,
     pub cells: CellsUpdate,
     pub index: IndexUpdate,
-    // Replayed by commit inside the head-checked writer.
+    // Replayed by commit inside a writer whose head still equals `origin`.
     pub(crate) writes: Writes,
+    pub(crate) origin: Head,
 }
 
 pub(crate) fn compute(
@@ -33,6 +33,7 @@ pub(crate) fn compute(
     hasher: &impl HashProvider,
 ) -> Result<SealedCommit> {
     let head = read_head_state(origin)?;
+    let retention = read_retention(origin)?;
     let commit_id = head
         .commit_id
         .checked_add(1)
@@ -62,39 +63,33 @@ pub(crate) fn compute(
         value: roots_value,
     }]);
     let mut tx = Buffered::new(origin);
-    let cells_update = cells.apply(&mut tx, cell_root, changes)?;
-    let mut postings = Vec::new();
-    for change in &cells_update.changed_cells {
-        let before = term(&change.key, change.before.as_ref())?;
-        let after = term(&change.key, change.after.as_ref())?;
-        if before == after {
-            continue;
-        }
-        let record_id = change.key.record_id();
-        if let Some(term) = before {
-            postings.push(PostingChange::Remove { term, record_id });
-        }
-        if let Some(term) = after {
-            postings.push(PostingChange::Add { term, record_id });
-        }
-    }
-    let index_update = index.apply(&mut tx, index_root, postings)?;
+    let (cells_update, index_update) =
+        crate::state::apply(&mut tx, hasher, cell_root, index_root, changes)?;
+    crate::gc::update(
+        &mut tx,
+        retention,
+        cell_root,
+        index_root,
+        &cells_update,
+        &index_update,
+    )?;
+    let state_root = cells_update.root.hash(hasher);
+    let index_root = index_update.root.hash(hasher);
+    write_head(
+        &mut tx,
+        &Head {
+            commit_id,
+            state_root,
+            index_root,
+        },
+    )?;
     Ok(SealedCommit {
         commit_id,
-        state_root: cells_update.root.hash(hasher),
-        index_root: index_update.root.hash(hasher),
+        state_root,
+        index_root,
         cells: cells_update,
         index: index_update,
         writes: tx.into_writes(),
+        origin: head,
     })
-}
-
-fn term(key: &CellKey, value: Option<&CellValue>) -> Result<Option<IndexTerm>> {
-    let Some(value) = value.filter(|value| value.is_indexable()) else {
-        return Ok(None);
-    };
-    // Binary reserved field names never reach UTF-8/name validation.
-    let name = key.name();
-    let name = std::str::from_utf8(name.as_bytes()).map_err(|_| TermError::InvalidName)?;
-    Ok(IndexTerm::from_cell(name, value.as_view())?)
 }
