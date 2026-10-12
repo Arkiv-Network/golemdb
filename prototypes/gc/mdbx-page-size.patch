@@ -1,0 +1,15 @@
+diff --git a/crates/storage-mdbx/src/lib.rs b/crates/storage-mdbx/src/lib.rs
+index 205610e..523d644 100644
+--- a/crates/storage-mdbx/src/lib.rs
++++ b/crates/storage-mdbx/src/lib.rs
+@@ -91,6 +91,10 @@ impl MdbxStore {
+             path,
+             libmdbx::DatabaseOptions {
+                 max_tables: Some(options.max_tables),
++                // Benchmark: GOLEMDB_PAGE_SIZE sets the page size of a new database.
++                page_size: std::env::var("GOLEMDB_PAGE_SIZE")
++                    .ok()
++                    .map(|size| libmdbx::PageSize::Set(size.parse().unwrap())),
+                 mode: libmdbx::Mode::ReadWrite(libmdbx::ReadWriteOptions {
+                     sync_mode: libmdbx::SyncMode::Durable,
+                     max_size: Some(max_size),

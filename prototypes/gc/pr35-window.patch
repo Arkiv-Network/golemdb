@@ -1,0 +1,421 @@
+diff --git a/crates/branch/src/gc.rs b/crates/branch/src/gc.rs
+index 783ce7d..bdea868 100644
+--- a/crates/branch/src/gc.rs
++++ b/crates/branch/src/gc.rs
+@@ -23,6 +23,7 @@
+ //! Seal stages counts and deletions in its buffer; publication replays them
+ //! atomically with head after validating the origin.
+ use std::collections::{BTreeMap, BTreeSet};
++use std::sync::OnceLock;
+ 
+ use golemdb_cells::{CELL_TRIE_PATH_BYTES, CellsUpdate, tables as cells};
+ use golemdb_index::{BITMAP_TRIE_PATH_BYTES, INDEX_TRIE_PATH_BYTES, IndexUpdate, tables as index};
+@@ -34,6 +35,99 @@ use crate::{BranchError, Result, buffer::Buffered, tables::NODE_REFS};
+ /// Commits before head whose physical tries are retained. Zero is head-only.
+ pub(crate) const RETENTION: u64 = 0;
+ 
++// ---- Bench prototype: retention windows (scratch copy only) ----
++// GOLEMDB_GCA = head (PR as is) | window (A1: release the roots of the commit
++// leaving the window) | defer (A2: head-only counting, deletion of nodes that
++// reach zero delayed by W commits, in batches of K). GOLEMDB_GCA_W, GOLEMDB_GCA_K.
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum Mode {
++    Head,
++    Window,
++    Defer,
++}
++
++struct Config {
++    mode: Mode,
++    w: u64,
++    k: u64,
++}
++
++fn config() -> &'static Config {
++    static CONFIG: OnceLock<Config> = OnceLock::new();
++    CONFIG.get_or_init(|| {
++        let num = |name: &str, default: u64| {
++            std::env::var(name).ok().map(|v| v.parse().unwrap()).unwrap_or(default)
++        };
++        let mode = match std::env::var("GOLEMDB_GCA").as_deref() {
++            Ok("window") => Mode::Window,
++            Ok("defer") => Mode::Defer,
++            _ => Mode::Head,
++        };
++        Config {
++            mode,
++            w: num("GOLEMDB_GCA_W", 0),
++            k: num("GOLEMDB_GCA_K", 1).max(1),
++        }
++    })
++}
++
++/// Roots released per commit, replayed W commits later (A1).
++const RELEASES: Table = Table("GcReleases");
++/// Nodes that reached zero per commit, deleted W commits later (A2).
++const PENDING: Table = Table("GcPending");
++/// A2: a node at zero awaiting deletion stores `MARK ‖ death commit` as its count.
++const MARK: u8 = 0xff;
++
++fn encode(nodes: &[Node]) -> Vec<u8> {
++    nodes.iter().flat_map(|node| node.key()).collect()
++}
++
++fn decode(bytes: &[u8]) -> Vec<Node> {
++    bytes
++        .chunks(33)
++        .map(|key| Node {
++            kind: match key[0] {
++                0 => Kind::Cell,
++                1 => Kind::Index,
++                2 => Kind::Bitmap,
++                _ => Kind::Container,
++            },
++            hash: key[1..].try_into().unwrap(),
++        })
++        .collect()
++}
++
++fn marker(commit: u64) -> [u8; 9] {
++    let mut bytes = [MARK; 9];
++    bytes[1..].copy_from_slice(&commit.to_be_bytes());
++    bytes
++}
++
++/// A2: delete the nodes that reached zero at commits `≤ commit − W` and are
++/// still at zero from that death, once per batch of K commits.
++fn sweep_deferred<R: ReadTransaction>(tx: &mut Buffered<'_, R>, commit: u64) -> Result<()> {
++    let Config { w, k, .. } = *config();
++    let Some(due) = commit.checked_sub(w) else {
++        return Ok(());
++    };
++    if due % k != 0 {
++        return Ok(());
++    }
++    for death in due.saturating_sub(k - 1)..=due {
++        let Some(bytes) = tx.get(PENDING, &death.to_be_bytes())? else {
++            continue;
++        };
++        tx.delete_existing(PENDING, &death.to_be_bytes());
++        for node in decode(&bytes) {
++            if tx.get(NODE_REFS, &node.key())?.as_deref() == Some(marker(death).as_slice()) {
++                tx.delete_existing(NODE_REFS, &node.key());
++                tx.delete_existing(node.kind.table(), &node.hash);
++            }
++        }
++    }
++    Ok(())
++}
++
+ /// Reject a database whose retention policy is not implemented.
+ pub(crate) fn check_retention(retention: u64) -> Result<()> {
+     if retention != RETENTION {
+@@ -120,6 +214,7 @@ impl Roots {
+ pub(crate) fn update<R: ReadTransaction>(
+     tx: &mut Buffered<'_, R>,
+     retention: u64,
++    commit: u64,
+     origin_cells: RootRef<CELL_TRIE_PATH_BYTES>,
+     origin_index: RootRef<INDEX_TRIE_PATH_BYTES>,
+     cells: &CellsUpdate,
+@@ -136,7 +231,28 @@ pub(crate) fn update<R: ReadTransaction>(
+             released.bitmap(tx, hash)?;
+         }
+     }
+-    transfer(tx, acquired, released)
++    let config = config();
++    match config.mode {
++        Mode::Head => transfer(tx, acquired, released, None),
++        Mode::Window => {
++            if config.w > 0 {
++                tx.put(RELEASES, &commit.to_be_bytes(), &encode(&released.0))?;
++                released = Roots::default();
++                if let Some(leaving) = commit.checked_sub(config.w) {
++                    let key = leaving.to_be_bytes();
++                    if let Some(bytes) = tx.get(RELEASES, &key)? {
++                        tx.delete_existing(RELEASES, &key);
++                        released = Roots(decode(&bytes));
++                    }
++                }
++            }
++            transfer(tx, acquired, released, None)
++        }
++        Mode::Defer => {
++            transfer(tx, acquired, released, Some(commit))?;
++            sweep_deferred(tx, commit)
++        }
++    }
+ }
+ 
+ /// Net the count changes of moving from `released` to `acquired`, then stage
+@@ -147,6 +263,7 @@ pub(crate) fn transfer<R: ReadTransaction>(
+     tx: &mut Buffered<'_, R>,
+     acquired: Roots,
+     released: Roots,
++    defer: Option<u64>,
+ ) -> Result<()> {
+     let mut created = BTreeSet::new();
+     for kind in [Kind::Cell, Kind::Index, Kind::Bitmap, Kind::Container] {
+@@ -168,6 +285,8 @@ pub(crate) fn transfer<R: ReadTransaction>(
+         balance: BTreeMap::new(),
+         stored: BTreeMap::new(),
+         dead: BTreeSet::new(),
++        revived: BTreeSet::new(),
++        defer,
+     };
+     for node in acquired.0 {
+         session.add(node, 1)?;
+@@ -177,6 +296,24 @@ pub(crate) fn transfer<R: ReadTransaction>(
+             session.add(child, 1)?;
+         }
+     }
++    // A2: a node awaiting deferred deletion that gains a reference comes back to
++    // life and restores the edges to its children it gave up when it died.
++    if defer.is_some() {
++        let mut gained: Vec<Node> = (session.balance.iter())
++            .filter(|&(node, &balance)| balance > 0 && !session.created.contains(node))
++            .map(|(&node, _)| node)
++            .collect();
++        while let Some(node) = gained.pop() {
++            if session.revived.contains(&node) || session.stored_count(node)? != 0 {
++                continue;
++            }
++            session.revived.insert(node);
++            for child in session.children(node)? {
++                session.add(child, 1)?;
++                gained.push(child);
++            }
++        }
++    }
+     let mut pending = Vec::new();
+     for node in released.0 {
+         session.add(node, -1)?;
+@@ -221,6 +358,8 @@ struct Session<'tx, 'r, R> {
+     balance: BTreeMap<Node, i64>,
+     stored: BTreeMap<Node, u64>,
+     dead: BTreeSet<Node>,
++    revived: BTreeSet<Node>,
++    defer: Option<u64>,
+ }
+ 
+ impl<R: ReadTransaction> Session<'_, '_, R> {
+@@ -242,6 +381,7 @@ impl<R: ReadTransaction> Session<'_, '_, R> {
+         }
+         let count = match self.tx.get(NODE_REFS, &node.key())? {
+             None => 1,
++            Some(bytes) if self.defer.is_some() && bytes.len() == 9 && bytes[0] == MARK => 0,
+             Some(bytes) => bytes
+                 .try_into()
+                 .map(u64::from_be_bytes)
+@@ -300,10 +440,14 @@ impl<R: ReadTransaction> Session<'_, '_, R> {
+             let before = self.stored_count(node)?;
+             // Rows were read to reach zero or to find a count above one;
+             // skip the existence checks.
+-            if before > 1 {
++            if before > 1 || self.revived.contains(&node) {
+                 self.tx.delete_existing(NODE_REFS, &node.key());
+             }
+             if self.dead.contains(&node) {
++                if let Some(death) = self.defer {
++                    self.tx.put(NODE_REFS, &node.key(), &marker(death))?;
++                    continue;
++                }
+                 self.tx.delete_existing(node.kind.table(), &node.hash);
+                 continue;
+             }
+@@ -315,6 +459,12 @@ impl<R: ReadTransaction> Session<'_, '_, R> {
+                 self.tx.put(NODE_REFS, &node.key(), &after.to_be_bytes())?;
+             }
+         }
++        if let Some(death) = self.defer {
++            let dead: Vec<Node> = self.dead.iter().copied().collect();
++            if !dead.is_empty() {
++                self.tx.put(PENDING, &death.to_be_bytes(), &encode(&dead))?;
++            }
++        }
+         Ok(())
+     }
+ }
+diff --git a/crates/branch/src/genesis.rs b/crates/branch/src/genesis.rs
+index ffef131..aa02b79 100644
+--- a/crates/branch/src/genesis.rs
++++ b/crates/branch/src/genesis.rs
+@@ -34,6 +34,7 @@ pub fn create_genesis_in(
+     gc::update(
+         &mut buffer,
+         gc::RETENTION,
++        0,
+         RootRef::Empty,
+         RootRef::Empty,
+         &cells,
+diff --git a/crates/branch/src/seal.rs b/crates/branch/src/seal.rs
+index aa21821..f2585c6 100644
+--- a/crates/branch/src/seal.rs
++++ b/crates/branch/src/seal.rs
+@@ -68,6 +68,7 @@ pub(crate) fn compute(
+     crate::gc::update(
+         &mut tx,
+         retention,
++        commit_id.get(),
+         cell_root,
+         index_root,
+         &cells_update,
+diff --git a/crates/integration-tests/tests/gcwin.rs b/crates/integration-tests/tests/gcwin.rs
+new file mode 100644
+index 0000000..28f259d
+--- /dev/null
++++ b/crates/integration-tests/tests/gcwin.rs
+@@ -0,0 +1,153 @@
++//! Windowed reference counting check (benchmark scratch copy only). Run with
++//! GOLEMDB_GCA=window|defer, GOLEMDB_GCA_W and GOLEMDB_GCA_K set. After every
++//! commit, stored trie rows must be exactly the rows reachable from the roots of
++//! the last W commits (window, and defer with K = 1), or lie between those and
++//! the rows reachable from the last W + K − 1 commits (defer with K > 1).
++use std::collections::BTreeSet;
++
++use golemdb_branch::{Branches, CommitId, create_genesis_in, read_head_state};
++use golemdb_cells::{CellKey, CellNameRef, CellType, CellValue, CellValueRef, tables};
++use golemdb_index::tables as itables;
++use golemdb_merkle::{BranchNodeCompact, Hash, Keccak256Hasher, RootRef};
++use golemdb_storage::{MemoryDatabase, ReadTransaction, Database, Table, WriteTransaction, scan_prefix};
++
++const HASH: Keccak256Hasher = Keccak256Hasher;
++
++type Row = (Table, Hash);
++
++/// Physical roots of one commit: state, index, and every term's bitmap root.
++fn roots(tx: &impl ReadTransaction) -> Vec<Row> {
++    let head = read_head_state(tx).unwrap();
++    let mut out = vec![(tables::CELL_TRIE, head.state_root), (itables::INDEX_TRIE, head.index_root)];
++    for row in scan_prefix(tx, itables::INDEX, vec![]).unwrap() {
++        let hash: Hash = row.unwrap().1.try_into().unwrap();
++        let table = if tx.get(itables::BITMAP_CONTAINER, &hash).unwrap().is_some() {
++            itables::BITMAP_CONTAINER
++        } else {
++            itables::BITMAP_TRIE
++        };
++        out.push((table, hash));
++    }
++    out
++}
++
++fn reach(tx: &impl ReadTransaction, roots: &[Row], strict: bool, out: &mut BTreeSet<Row>) {
++    let mut stack: Vec<(Row, bool)> = roots.iter().map(|&row| (row, true)).collect();
++    while let Some(((table, hash), root)) = stack.pop() {
++        let Some(bytes) = tx.get(table, &hash).unwrap() else {
++            // Only a cell/index root that is a leaf or empty has no row.
++            assert!(!strict || (root && table != itables::BITMAP_TRIE), "reachable row missing in {table:?}");
++            continue;
++        };
++        if !out.insert((table, hash)) || table == itables::BITMAP_CONTAINER {
++            continue;
++        }
++        let children: Vec<RootRef<32>> = if table == itables::BITMAP_TRIE {
++            let node = BranchNodeCompact::<6>::decode(&bytes).unwrap();
++            (0..16)
++                .filter_map(|slot| node.child(slot))
++                .map(|child| match child {
++                    RootRef::Branch(h) => RootRef::Branch(h),
++                    RootRef::Leaf(leaf) => {
++                        stack.push(((itables::BITMAP_CONTAINER, leaf.hash), false));
++                        RootRef::Empty
++                    }
++                    RootRef::Empty => RootRef::Empty,
++                })
++                .collect()
++        } else {
++            let node = BranchNodeCompact::<32>::decode(&bytes).unwrap();
++            (0..16).filter_map(|slot| node.child(slot)).collect()
++        };
++        for child in children {
++            if let RootRef::Branch(h) = child {
++                stack.push(((table, h), false));
++            }
++        }
++    }
++}
++
++fn stored(tx: &impl ReadTransaction) -> BTreeSet<Row> {
++    let mut rows = BTreeSet::new();
++    for table in [
++        tables::CELL_TRIE,
++        itables::INDEX_TRIE,
++        itables::BITMAP_TRIE,
++        itables::BITMAP_CONTAINER,
++    ] {
++        for row in scan_prefix(tx, table, vec![]).unwrap() {
++            rows.insert((table, row.unwrap().0.try_into().unwrap()));
++        }
++    }
++    rows
++}
++
++#[test]
++fn windowed_refcounts_keep_exactly_the_window() {
++    let mode = std::env::var("GOLEMDB_GCA").unwrap_or_default();
++    if mode != "window" && mode != "defer" {
++        return;
++    }
++    let env = |name: &str, default: u64| {
++        std::env::var(name).ok().map(|v| v.parse().unwrap()).unwrap_or(default)
++    };
++    let (w, k) = (env("GOLEMDB_GCA_W", 0), env("GOLEMDB_GCA_K", 1));
++    let span = if mode == "defer" { w + k - 1 } else { w };
++    let db = MemoryDatabase::new();
++    let mut tx = db.begin_write().unwrap();
++    create_genesis_in(&mut tx, &HASH, []).unwrap();
++    tx.commit().unwrap();
++    let branches = Branches::new(db.clone(), HASH).unwrap();
++    let mut history = vec![roots(&db.begin_read().unwrap())];
++    let mut seed = 7u64;
++    let mut rand = move |n: u64| {
++        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++        (seed >> 33) % n
++    };
++    for commit in 1..=300u64 {
++        let branch = branches.begin().unwrap();
++        branches
++            .write(branch, |cells| {
++                for _ in 0..30 {
++                    // Few values per attribute, so bitmaps and nodes often return
++                    // to earlier states (hash-key sharing and revival).
++                    let id = golemdb_index::path::join(rand(3), 64 + rand(200) as u16).unwrap();
++                    let name = ["tag", "owner", "note"][rand(3) as usize];
++                    let key = CellKey::new(id, CellNameRef::raw(name.as_bytes()));
++                    if rand(3) == 0 {
++                        cells.delete(key);
++                    } else {
++                        let value: CellValue = CellValueRef::new(
++                            CellType::Str,
++                            format!("v{}", rand(4)).as_bytes(),
++                            name != "note",
++                        )
++                        .unwrap()
++                        .into();
++                        cells.put(key, value);
++                    }
++                }
++                Ok::<_, ()>(())
++            })
++            .unwrap();
++        assert_eq!(branches.commit(branch).unwrap(), CommitId::new(commit));
++        let tx = db.begin_read().unwrap();
++        history.push(roots(&tx));
++        let rows = stored(&tx);
++        let window = |n: u64, strict: bool| {
++            let mut set = BTreeSet::new();
++            for c in commit.saturating_sub(n)..=commit {
++                reach(&tx, &history[c as usize], strict, &mut set);
++            }
++            set
++        };
++        let retained = window(w, true);
++        if span == w {
++            assert_eq!(rows, retained, "commit {commit}: stored rows differ from the window's");
++        } else {
++            assert!(retained.is_subset(&rows), "commit {commit}: a retained row was deleted");
++            let outer = window(span, false);
++            assert!(rows.is_subset(&outer), "commit {commit}: a row outlived W + K − 1");
++        }
++    }
++}

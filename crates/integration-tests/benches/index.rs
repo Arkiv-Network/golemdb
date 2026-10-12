@@ -176,9 +176,12 @@ fn backend(
     });
     // Read transaction lifetime is excluded from these warm-snapshot queries.
     drop(read);
+    // Timed writes belong to the next commit, as seal's do: new keys after the
+    // seeded rows, never overwriting them in place.
+    let next = Index::new(hasher).at(1);
     for (label, changes) in workloads(chunks) {
         let mut check = db.begin_write().unwrap();
-        let updated = index.apply(&mut check, root, changes.clone()).unwrap();
+        let updated = next.apply(&mut check, root, changes.clone()).unwrap();
         assert_ne!(updated.root, root);
         assert!(!updated.changed_terms.is_empty());
         check.abort();
@@ -188,8 +191,7 @@ fn backend(
                 || (db.begin_write().unwrap(), changes.clone()),
                 |(tx, changes)| {
                     black_box(
-                        index
-                            .apply(tx, black_box(root), std::mem::take(changes))
+                        next.apply(tx, black_box(root), std::mem::take(changes))
                             .unwrap(),
                     )
                 },
@@ -201,7 +203,8 @@ fn backend(
 }
 
 fn durable_commit(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider) {
-    let index = Index::new(hasher);
+    // The commit after the seeded one, as in the engine.
+    let index = Index::new(hasher).at(1);
     c.bench_function(
         &format!("index/{algorithm}/mdbx/transaction_begin_apply_durable_commit"),
         |b| {

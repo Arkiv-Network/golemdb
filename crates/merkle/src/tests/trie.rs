@@ -16,10 +16,10 @@ const TEST_BRANCH_DOMAIN: u8 = 0x05;
 const HASH: Keccak256Hasher = Keccak256Hasher;
 
 fn leaf<const N: usize>(path: [u8; N], value: u32) -> LeafRef<N> {
-    LeafRef {
+    LeafRef::new(
         path,
-        hash: HASH.hash_parts(&[&[TEST_LEAF_DOMAIN], &path, &value.to_be_bytes()]),
-    }
+        HASH.hash_parts(&[&[TEST_LEAF_DOMAIN], &path, &value.to_be_bytes()]),
+    )
 }
 
 // Independent sorted-leaf oracle: groups paths by their first differing nibble,
@@ -90,7 +90,9 @@ fn exercise<const N: usize>(ops: &[(u8, u32, u8)]) {
     let mut expected = BTreeMap::new();
     let mut root = RootRef::Empty;
     let mut history = Vec::new();
-    for &(id, value, action) in ops {
+    // Each edit is its own commit, so every intermediate root stays readable.
+    for (commit, &(id, value, action)) in ops.iter().enumerate() {
+        let trie = Trie::<_, N>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).at(commit as u64 + 1);
         let path = key(id);
         if action == 0 {
             root = trie.remove(&mut tx, root, &path).unwrap();
@@ -135,16 +137,23 @@ proptest! {
     }
 }
 
-/// Branch rows reachable from `root`.
+/// Branch rows reachable from `root`, keyed by commit and route.
 fn branches<const N: usize>(tx: &impl ReadTransaction, root: RootRef<N>) -> BTreeSet<Vec<u8>> {
+    let trie = Trie::<_, N>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     let mut seen = BTreeSet::new();
-    let mut stack = vec![root];
-    while let Some(root) = stack.pop() {
-        if let RootRef::Branch(hash) = root {
+    let mut stack = vec![(root, Vec::new())];
+    while let Some((root, route)) = stack.pop() {
+        if let RootRef::Branch(branch) = root {
+            let key = trie.node_key(branch.commit, &route);
             let node =
-                BranchNodeCompact::<N>::decode(&tx.get(TABLE, &hash).unwrap().unwrap()).unwrap();
-            stack.extend((0..16).filter_map(|slot| node.child(slot)));
-            seen.insert(hash.to_vec());
+                BranchNodeCompact::<N>::decode(&tx.get(TABLE, &key).unwrap().unwrap()).unwrap();
+            let base: Vec<u8> = route.iter().copied().chain(node.unpack_prefix()).collect();
+            for slot in 0..16 {
+                if let Some(child) = node.child(slot) {
+                    stack.push((child, [&base[..], &[slot]].concat()));
+                }
+            }
+            seen.insert(key);
         }
     }
     seen
@@ -193,8 +202,10 @@ fn batch<const N: usize>(base: &[([u8; N], u32)], edits: &[([u8; N], u32, bool)]
             expected.remove(&new.path);
         }
     }
+    // The batch is the next commit; the base stays readable at its own.
+    let next = Trie::<_, N>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).at(1);
     let mut tx = db.begin_write().unwrap();
-    let root = trie.apply(&mut tx, old, changes).unwrap();
+    let root = next.apply(&mut tx, old, changes).unwrap();
     tx.commit().unwrap();
     let read = db.begin_read().unwrap();
     let sorted: Vec<_> = expected.values().copied().collect();
@@ -218,14 +229,16 @@ fn batch<const N: usize>(base: &[([u8; N], u32)], edits: &[([u8; N], u32, bool)]
     let mut one_at_a_time = old;
     for &(path, value, present) in edits {
         one_at_a_time = if present {
-            trie.insert(&mut tx, one_at_a_time, leaf(path, value))
+            next.insert(&mut tx, one_at_a_time, leaf(path, value))
         } else {
-            trie.remove(&mut tx, one_at_a_time, &path)
+            next.remove(&mut tx, one_at_a_time, &path)
         }
         .unwrap();
     }
     tx.abort();
-    assert_eq!(root, one_at_a_time);
+    // A net no-op batch keeps the old root's rows; edits that cancel out store
+    // the same branch again at the batch's commit. The content is identical.
+    assert_eq!(root.hash(&HASH), one_at_a_time.hash(&HASH));
 }
 
 proptest! {
@@ -352,8 +365,10 @@ fn deepest<const N: usize>() {
         root = trie.insert(&mut tx, root, *leaf).unwrap();
     }
     let original = root;
+    // Removals are later commits, so the original root stays readable.
+    let later = Trie::<_, N>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).at(1);
     for leaf in &leaves {
-        root = trie.remove(&mut tx, root, &leaf.path).unwrap();
+        root = later.remove(&mut tx, root, &leaf.path).unwrap();
         let remaining = trie.walk(&tx, root).collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(root.hash(&HASH), bulk(&remaining, 0));
     }
@@ -427,8 +442,9 @@ fn snapshots_commit_abort_and_missing_branches() {
     let read = db.begin_read().unwrap();
     assert_eq!(trie.get(&read, root, &a.path).unwrap(), Some(a));
     let mut tx = db.begin_write().unwrap();
-    let aborted = trie.insert(&mut tx, root, leaf(key(3), 3)).unwrap();
+    let aborted = trie.at(1).insert(&mut tx, root, leaf(key(3), 3)).unwrap();
     tx.abort();
+    let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     let latest = db.begin_read().unwrap();
     assert!(matches!(
         trie.get(&latest, aborted, &a.path),
@@ -476,7 +492,11 @@ impl<T: WriteTransaction> WriteTransaction for Counted<T> {
         self.tx.insert(t, k, v)
     }
     fn put(&mut self, t: Table, k: &[u8], v: &[u8]) -> golemdb_storage::Result<()> {
-        panic!("unexpected upsert: {t:?} {k:?} {v:?}")
+        self.writes += 1;
+        if self.fail_write == Some(self.writes) {
+            return Err(injected_error());
+        }
+        self.tx.put(t, k, v)
     }
     fn delete(&mut self, _: Table, _: &[u8]) -> golemdb_storage::Result<bool> {
         panic!("unexpected delete")
@@ -558,11 +578,12 @@ fn edits_off_a_prefix_cost_the_same_at_any_subtrie_size() {
     // An insertion there reads only the root, then writes the root moved one
     // level down with a shorter prefix, and its new parent.
     tx.reads.set(0);
-    let split = trie
+    let next = Trie::<_, 32>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).at(1);
+    let split = next
         .apply(&mut tx, root, [(off.path, Some(off.hash))])
         .unwrap();
     assert_eq!((tx.reads.get(), tx.writes), (1, 2));
-    assert_eq!(split, trie.insert(&mut tx, root, off).unwrap());
+    assert_eq!(split, next.insert(&mut tx, root, off).unwrap());
 }
 
 fn injected_error() -> golemdb_storage::StorageError {
@@ -619,4 +640,47 @@ fn storage_errors_propagate_and_abort_discards_partial_branches() {
             .unwrap(),
         vec![a, b]
     );
+}
+
+#[test]
+fn a_later_write_at_the_same_commit_replaces_the_row() {
+    let db = MemoryStore::new();
+    let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).at(1);
+    let [a, b, c] = [1, 2, 3].map(|id| leaf(key(id), id as u32));
+    let mut tx = db.begin_write().unwrap();
+    let first = trie.insert(&mut tx, RootRef::Leaf(a), b).unwrap();
+    let second = trie.insert(&mut tx, first, c).unwrap();
+    assert_eq!(first.branch_commit(), second.branch_commit());
+    // Both roots live at position (1, []); only the latest stays readable.
+    assert_eq!(trie.get(&tx, second, &a.path).unwrap(), Some(a));
+    assert!(matches!(
+        trie.get(&tx, first, &a.path),
+        Err(MerkleError::HashMismatch)
+    ));
+}
+
+#[test]
+fn aborted_rewrite_of_a_committed_row_leaves_it_intact() {
+    let db = MemoryStore::new();
+    let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
+    let [a, b, c] = [1, 2, 3].map(|id| leaf(key(id), id as u32));
+    let mut tx = db.begin_write().unwrap();
+    let root = trie.insert(&mut tx, RootRef::Leaf(a), b).unwrap();
+    tx.commit().unwrap();
+    // Same commit, same position: the aborted write targets the committed key.
+    let mut tx = db.begin_write().unwrap();
+    let aborted = trie.insert(&mut tx, root, c).unwrap();
+    assert_eq!(aborted.branch_commit(), root.branch_commit());
+    tx.abort();
+    let read = db.begin_read().unwrap();
+    assert_eq!(
+        trie.walk(&read, root)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap(),
+        vec![a, b]
+    );
+    assert!(matches!(
+        trie.get(&read, aborted, &a.path),
+        Err(MerkleError::HashMismatch)
+    ));
 }

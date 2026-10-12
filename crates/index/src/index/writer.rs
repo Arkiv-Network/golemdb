@@ -64,16 +64,19 @@ impl<H: HashProvider> Index<'_, H> {
                 false
             }
         });
-        let mut changed_terms = Vec::new();
+        let (mut changed_terms, mut bitmaps) = (Vec::new(), Vec::new());
         for group in changes.chunk_by(|a, b| a.0 == b.0) {
             let term = &group[0].0;
-            let before = self.bitmap_root(tx, term)?;
+            let before_root = self.bitmap_root(tx, term)?;
+            let before = before_root.map(|root| root.hash(self.hasher));
             self.trie.check(tx, root, term, before)?;
-            let after = self.bitmaps.apply(
+            let after_root = self.bitmaps.apply(
                 tx,
-                before,
+                &term.routing_path(self.hasher),
+                before_root,
                 group.iter().map(|&(_, hi, lo, present)| (hi, lo, present)),
             )?;
+            let after = after_root.map(|root| root.hash(self.hasher));
             if before == after {
                 continue;
             }
@@ -82,6 +85,7 @@ impl<H: HashProvider> Index<'_, H> {
                 before,
                 after,
             });
+            bitmaps.push(after_root);
         }
         // Terms are unique, so each check above saw the original root; one trie
         // update for the whole batch writes each touched branch once.
@@ -92,9 +96,9 @@ impl<H: HashProvider> Index<'_, H> {
                 .iter()
                 .map(|change| (&change.term, change.after)),
         )?;
-        for change in &changed_terms {
-            match change.after {
-                Some(hash) => tx.put(tables::INDEX, change.term.as_bytes(), &hash)?,
+        for (change, bitmap) in changed_terms.iter().zip(bitmaps) {
+            match bitmap {
+                Some(bitmap) => tx.put(tables::INDEX, change.term.as_bytes(), &bitmap.encode())?,
                 None => {
                     tx.delete(tables::INDEX, change.term.as_bytes())?;
                 }

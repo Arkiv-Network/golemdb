@@ -40,11 +40,12 @@ fn round_trip(hasher: impl HashProvider) -> Hash {
         .root;
     tx.commit().unwrap();
     let hash = root.hash(&hasher);
+    let commit = root.branch_commit();
     drop(db);
 
     let db = MdbxStore::open(dir.path()).unwrap();
     let read = db.begin_read().unwrap();
-    let reopened = index.reopen(&read, hash).unwrap();
+    let reopened = index.reopen(&read, hash, commit).unwrap();
     assert_eq!(reopened, root);
     for (i, term) in terms.iter().enumerate() {
         let expected = ids
@@ -81,7 +82,7 @@ fn round_trip(hasher: impl HashProvider) -> Hash {
     tx.commit().unwrap();
     let read = db.begin_read().unwrap();
     assert_eq!(
-        index.reopen(&read, hasher.hash(b"")).unwrap(),
+        index.reopen(&read, hasher.hash(b""), None).unwrap(),
         RootRef::Empty
     );
     for term in &terms {

@@ -135,6 +135,7 @@ fn backend(error: libmdbx::Error) -> StorageError {
     match error {
         libmdbx::Error::MapFull => StorageError::Full,
         libmdbx::Error::KeyExist => StorageError::AlreadyExists,
+        libmdbx::Error::KeyMismatch => StorageError::OutOfOrder,
         error => StorageError::Backend(Box::new(error)),
     }
 }
@@ -255,6 +256,14 @@ impl WriteTransaction for MdbxWriteTransaction<'_> {
     }
     fn insert(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()> {
         self.write(table, key, value, WriteFlags::NO_OVERWRITE)
+    }
+    fn append(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()> {
+        self.write(
+            table,
+            key,
+            value,
+            WriteFlags::APPEND | WriteFlags::NO_OVERWRITE,
+        )
     }
     fn delete(&mut self, table: Table, key: &[u8]) -> Result<bool> {
         table.validate()?;

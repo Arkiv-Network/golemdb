@@ -113,7 +113,7 @@
 //! tx.commit()?;
 //! let read = store.begin_read()?;
 //! assert_eq!(cells.get(&read, &key)?.unwrap().as_str(), Some("ready"));
-//! assert_eq!(cells.reopen(&read, update.root.hash(&hasher))?, update.root);
+//! assert_eq!(cells.reopen(&read, update.root.hash(&hasher), update.root.branch_commit())?, update.root);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 

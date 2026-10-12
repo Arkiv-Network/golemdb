@@ -13,14 +13,18 @@ impl<H: HashProvider> Index<'_, H> {
         &self,
         tx: &impl ReadTransaction,
         hash: Hash,
+        branch_commit: Option<u64>,
     ) -> Result<RootRef<INDEX_TRIE_PATH_BYTES>> {
-        self.trie.reopen(tx, hash)
+        self.trie.reopen(tx, hash, branch_commit)
     }
 
     /// Materialize a term's postings; absent terms return None, never an empty bitmap.
     pub fn bitmap(&self, tx: &impl ReadTransaction, term: &IndexTerm) -> Result<Option<Bitmap>> {
         self.bitmap_root(tx, term)?
-            .map(|hash| self.bitmaps.bitmap(tx, hash))
+            .map(|root| {
+                self.bitmaps
+                    .bitmap(tx, &term.routing_path(self.hasher), root)
+            })
             .transpose()
     }
 

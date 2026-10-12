@@ -7,10 +7,8 @@ use std::{
 };
 
 use golemdb_cells::CellType;
-use golemdb_index::{
-    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, tables,
-};
-use golemdb_merkle::{Hash, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
+use golemdb_index::{INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, tables};
+use golemdb_merkle::{Hash, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie, version_key};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
 
@@ -39,7 +37,20 @@ fn rows(tx: &impl ReadTransaction, table: golemdb_storage::Table) -> Vec<golemdb
 fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Hash> {
     tx.get(tables::INDEX, t.as_bytes())
         .unwrap()
-        .map(|b| b.try_into().unwrap())
+        .map(|b| b[..32].try_into().unwrap())
+}
+
+/// The row of a term's bitmap root: the container of a single-container root,
+/// or the root branch. Index rows hold `hash ‖ commit`, plus the container
+/// path for a single-container root; rows are namespaced by the term.
+fn bitmap_root_row(tx: &impl ReadTransaction, t: &IndexTerm) -> (golemdb_storage::Table, Vec<u8>) {
+    let value = tx.get(tables::INDEX, t.as_bytes()).unwrap().unwrap();
+    let commit = u64::from_be_bytes(value[32..40].try_into().unwrap());
+    let ns = t.routing_path(&HASH);
+    match &value[40..] {
+        [] => (tables::BITMAP_TRIE, version_key(commit, &ns, &[0])),
+        path => (tables::BITMAP_CONTAINER, version_key(commit, &ns, path)),
+    }
 }
 
 // Compare both commitments to a fresh rebuild, not just flat query results.
@@ -65,8 +76,14 @@ fn assert_state(
             .root;
         assert_eq!(root_for(tx, term), root_for(&rebuilt_tx, term));
     }
-    assert_eq!(root, rebuilt_root);
-    assert_eq!(index.reopen(tx, root.hash(&HASH)).unwrap(), root);
+    // Same content; the physical commit depends on each store's write history.
+    assert_eq!(root.hash(&HASH), rebuilt_root.hash(&HASH));
+    assert_eq!(
+        index
+            .reopen(tx, root.hash(&HASH), root.branch_commit())
+            .unwrap(),
+        root
+    );
     let actual_terms = index
         .terms_with_prefix(tx, vec![])
         .unwrap()
@@ -80,10 +97,7 @@ fn assert_state(
         .keys()
         .map(|term| {
             let bitmap = root_for(tx, term).unwrap();
-            LeafRef {
-                path: term.routing_path(&HASH),
-                hash: term.leaf_hash(&bitmap, &HASH),
-            }
+            LeafRef::new(term.routing_path(&HASH), term.leaf_hash(&bitmap, &HASH))
         })
         .collect::<Vec<_>>();
     leaves.sort_by_key(|leaf| leaf.path);
@@ -103,7 +117,11 @@ fn empty_singleton_branches_and_last_posting_removal() {
     let t = term(0);
     assert_eq!(
         index
-            .reopen(&tx, RootRef::<INDEX_TRIE_PATH_BYTES>::Empty.hash(&HASH))
+            .reopen(
+                &tx,
+                RootRef::<INDEX_TRIE_PATH_BYTES>::Empty.hash(&HASH),
+                None
+            )
             .unwrap(),
         RootRef::Empty
     );
@@ -162,7 +180,7 @@ fn empty_singleton_branches_and_last_posting_removal() {
 }
 
 #[test]
-fn duplicate_changes_cancel_and_shared_containers_are_immutable() {
+fn duplicate_changes_cancel_and_equal_terms_keep_separate_rows() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
     let mut tx = db.begin_write().unwrap();
@@ -175,7 +193,8 @@ fn duplicate_changes_cancel_and_shared_containers_are_immutable() {
             [add(&a, 1), add(&a, 1), add(&b, 1)],
         )
         .unwrap();
-    assert_eq!(rows(&tx, tables::BITMAP_CONTAINER).len(), 1);
+    // Identical containers of different terms are separate rows, one per term.
+    assert_eq!(rows(&tx, tables::BITMAP_CONTAINER).len(), 2);
     assert_eq!(root_for(&tx, &a), root_for(&tx, &b));
     let before = root_for(&tx, &a);
     let noop = index
@@ -256,7 +275,9 @@ fn snapshots_reopen_and_abort_keep_all_tables_consistent() {
     tx.commit().unwrap();
     assert_eq!(index.bitmap(&empty, &t).unwrap(), None);
     let old = db.begin_read().unwrap();
-    let singleton = index.reopen(&old, root.hash(&HASH)).unwrap();
+    let singleton = index
+        .reopen(&old, root.hash(&HASH), root.branch_commit())
+        .unwrap();
     let mut tx = db.begin_write().unwrap();
     let update = index
         .apply(&mut tx, singleton, [add(&t, 65536), add(&term(1), 42)])
@@ -300,7 +321,7 @@ fn snapshots_reopen_and_abort_keep_all_tables_consistent() {
             (term(1), BTreeSet::from([42])),
         ]),
     );
-    assert!(index.reopen(&latest, root.hash(&HASH)).is_err()); // old singleton needs old flat state
+    assert!(index.reopen(&latest, root.hash(&HASH), None).is_err()); // old singleton needs old flat state
 }
 
 #[test]
@@ -362,50 +383,36 @@ fn corrupt_missing_and_mismatched_state_is_not_absence() {
         index.apply(&mut tx, RootRef::Empty, [add(&t, 2)]),
         Err(IndexError::RootMismatch)
     ));
-    assert!(index.reopen(&tx, [42; 32]).is_err());
-    assert!(index.reopen(&tx, HASH.hash(&[])).is_err());
-    let bitmap = root_for(&tx, &t).unwrap();
-    let original = tx.get(tables::BITMAP_CONTAINER, &bitmap).unwrap().unwrap();
-    tx.delete(tables::BITMAP_CONTAINER, &bitmap).unwrap();
+    assert!(index.reopen(&tx, [42; 32], None).is_err());
+    assert!(index.reopen(&tx, HASH.hash(&[]), None).is_err());
+    let (table, container) = bitmap_root_row(&tx, &t);
+    assert_eq!(table, tables::BITMAP_CONTAINER);
+    let original = tx.get(table, &container).unwrap().unwrap();
+    tx.delete(table, &container).unwrap();
     assert!(index.bitmap(&tx, &t).is_err());
     assert!(index.apply(&mut tx, root, [add(&t, 2)]).is_err());
-    tx.put(tables::BITMAP_CONTAINER, &bitmap, &[0; 6]).unwrap();
+    tx.put(table, &container, &[0; 6]).unwrap();
     assert!(matches!(
         index.bitmap(&tx, &t),
         Err(IndexError::Corruption(_))
     ));
-    tx.put(tables::BITMAP_CONTAINER, &bitmap, &original)
-        .unwrap();
-    let root = index
+    tx.put(table, &container, &original).unwrap();
+    // The next batch is the next commit, keeping the first commit's rows intact.
+    let root = Index::new(&HASH)
+        .at(1)
         .apply(&mut tx, root, [add(&t, 65536), add(&term(1), 1)])
         .unwrap()
         .root;
     let hash = root.hash(&HASH);
-    tx.delete(tables::INDEX_TRIE, &hash).unwrap();
-    assert!(index.reopen(&tx, hash).is_err()); // multiple flat rows cannot be a singleton
-    let bitmap = root_for(&tx, &t).unwrap();
-    tx.delete(tables::BITMAP_TRIE, &bitmap).unwrap();
+    let root_row = version_key(root.branch_commit().unwrap(), &[], &[0]);
+    tx.delete(tables::INDEX_TRIE, &root_row).unwrap();
+    // A missing branch row is never mistaken for an empty or singleton root.
+    assert!(index.reopen(&tx, hash, root.branch_commit()).is_err());
+    assert!(index.reopen(&tx, hash, None).is_err()); // multiple flat rows cannot be a singleton
+    let (table, branch) = bitmap_root_row(&tx, &t);
+    assert_eq!(table, tables::BITMAP_TRIE);
+    tx.delete(table, &branch).unwrap();
     assert!(index.bitmap(&tx, &t).is_err());
-}
-
-#[test]
-fn immutable_container_conflict_is_rejected_without_overwrite() {
-    let (_dir, db) = fixture::db();
-    let index = Index::new(&HASH);
-    let mut tx = db.begin_write().unwrap();
-    let container = BitmapContainer::from_values(0, [1]).unwrap();
-    let hash = container.leaf_hash(&HASH).unwrap();
-    tx.put(tables::BITMAP_CONTAINER, &hash, b"conflict")
-        .unwrap();
-    assert!(matches!(
-        index.apply(&mut tx, RootRef::Empty, [add(&term(0), 1)]),
-        Err(IndexError::ConflictingContent)
-    ));
-    assert_eq!(
-        tx.get(tables::BITMAP_CONTAINER, &hash).unwrap().unwrap(),
-        b"conflict"
-    );
-    assert!(rows(&tx, tables::INDEX).is_empty());
 }
 
 proptest! {

@@ -8,6 +8,7 @@ const HEAD_KEY: &[u8] = b"head";
 const HEAD_BYTES: usize = 8 + 32 + 32;
 
 /// Durable head metadata shared by genesis opening and branch publication.
+/// The roots' locators live in the `Roots` row for `commit_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Head {
     pub commit_id: CommitId,
