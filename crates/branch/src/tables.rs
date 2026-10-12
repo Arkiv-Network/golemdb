@@ -3,8 +3,9 @@ use golemdb_storage::Table;
 
 /// Uncommitted engine rows: format identifiers and the head.
 pub const SUPERBLOCK: Table = Table("Superblock");
-/// Reference counts of physical trie and bitmap nodes. Derived from the
-/// retained roots, so it can be rebuilt without touching committed state.
+/// Reference counts above one of physical trie and bitmap nodes; a live node
+/// without a row has one. Derived from the retained roots, so it can be
+/// rebuilt without touching committed state.
 pub const NODE_REFS: Table = Table("NodeRefs");
 /// Every table a database's engine state occupies; genesis requires them empty.
 pub const ENGINE: [Table; 8] = [

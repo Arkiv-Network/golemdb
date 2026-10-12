@@ -381,7 +381,7 @@ the exact layouts._
 | `IndexHistory`    | `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue`                   | `commitsList: Roaring64`              | Every commit number that modified a given index term.                                       |
 | `IndexChangeSet`  | `commitNr: u64` ‖ `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue` | `bitmapHash: B256`                    | Pre-image of a term's bitmap root before the change made at `commitNr`.                     |
 | `Superblock`      | `superKey: Bytes`                                                  | `superValue: Bytes`                   | The only uncommitted engine state: format identifiers and the head ([§4](#the-superblock)). |
-| `NodeRefs`        | `kind: u8` ‖ `hashedNode: B256`                                    | `refCount: u64`                       | Derived reference counts of trie nodes and containers; rebuildable (§9).                    |
+| `NodeRefs`        | `kind: u8` ‖ `hashedNode: B256`                                    | `refCount: u64`                       | Derived reference counts above one of trie nodes and containers (§9).                       |
 
 The ten data tables fall into three groups — **primary state and its commitment** (`Cell`,
 `CellTrie`), **indexing** (`Index`, `IndexTrie`, `BitmapTrie`, `BitmapContainer`) and **history**
@@ -2049,9 +2049,9 @@ The price is that a node can no longer be addressed by where it sits: resolving 
 down from the root, and superseded nodes are not deleted by the write that supersedes them, so
 reclaiming them requires garbage collection.
 
-**Current implementation:** `NodeRefs` counts references from retained roots and live parents; a
-commit acquires the new roots before releasing old ones and deletes nodes whose count reaches zero,
-in the head's transaction. Only `retention = 0` is implemented: a commit releases its origin's
+**Current implementation:** `NodeRefs` counts references from retained roots and live parents,
+storing only counts above one, since nearly every node has a single parent. A commit nets the count
+changes, deletes nodes whose count reaches zero, and writes both in the head's transaction. Only `retention = 0` is implemented: a commit releases its origin's
 roots, so `#roots` keeps commitments but not their tries. A retention window
 ([D05](decisions_for_architect.md#7--d05--retention-and-historical-discovery)) will instead release
 the roots of the commit leaving the window, read from `#roots` and `IndexChangeSet`.

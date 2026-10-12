@@ -4,6 +4,8 @@
 //! bitmap roots. `NodeRefs` counts these root references and edges from live
 //! physical parents. Each parent's edges count once, regardless of how many
 //! owners that parent has. A zero count releases children and deletes the node.
+//! Most nodes have exactly one reference, so only counts above one are stored:
+//! a live node without a row has one.
 //!
 //! [`transfer`] first nets every count change in memory: acquired roots and
 //! the children of nodes this commit created gain a reference, released roots
@@ -11,9 +13,10 @@
 //! stored count; a node reaching zero passes the loss to its children. Nodes
 //! whose balance nets to zero, such as siblings that a new branch copies from
 //! the one it replaces, are never read or written. The retention policy in
-//! [`update`] chooses what a commit releases. Only head-only retention is implemented: a commit releases
-//! its origin's roots. A retention window would instead release the roots of
-//! the commit leaving it, read from `#roots` and the index change set.
+//! [`update`] chooses what a commit releases. Only head-only retention is
+//! implemented: a commit releases its origin's roots. A retention window would
+//! instead release the roots of the commit leaving it, read from `#roots` and
+//! the index change set.
 //!
 //! A node reaches zero only when the commit's trie updates replaced it, so
 //! they have already loaded and authenticated it; GC only decodes its edges.
@@ -229,6 +232,7 @@ impl<R: ReadTransaction> Session<'_, '_, R> {
         Ok(())
     }
 
+    /// A created node starts from zero; an existing node without a row has one.
     fn stored_count(&mut self, node: Node) -> Result<u64> {
         if self.created.contains(&node) {
             return Ok(0);
@@ -236,21 +240,17 @@ impl<R: ReadTransaction> Session<'_, '_, R> {
         if let Some(&count) = self.stored.get(&node) {
             return Ok(count);
         }
-        let bytes = self
-            .tx
-            .get(NODE_REFS, &node.key())?
-            .ok_or(BranchError::GarbageCollection(
-                "live node has no reference count",
-            ))?;
-        let count = bytes
-            .try_into()
-            .map(u64::from_be_bytes)
-            .map_err(|_| BranchError::GarbageCollection("reference count must be eight bytes"))?;
-        if count == 0 {
-            return Err(BranchError::GarbageCollection(
-                "stored reference count is zero",
-            ));
-        }
+        let count = match self.tx.get(NODE_REFS, &node.key())? {
+            None => 1,
+            Some(bytes) => bytes
+                .try_into()
+                .map(u64::from_be_bytes)
+                .ok()
+                .filter(|&count| count > 1)
+                .ok_or(BranchError::GarbageCollection(
+                    "stored reference count must be an eight-byte count above one",
+                ))?,
+        };
         self.stored.insert(node, count);
         Ok(count)
     }
@@ -297,18 +297,23 @@ impl<R: ReadTransaction> Session<'_, '_, R> {
             .map(|(&node, &balance)| (node, balance))
             .collect();
         for (node, balance) in changed {
-            if self.dead.contains(&node) {
-                // Both rows were read to reach zero; skip the existence checks.
+            let before = self.stored_count(node)?;
+            // Rows were read to reach zero or to find a count above one;
+            // skip the existence checks.
+            if before > 1 {
                 self.tx.delete_existing(NODE_REFS, &node.key());
+            }
+            if self.dead.contains(&node) {
                 self.tx.delete_existing(node.kind.table(), &node.hash);
                 continue;
             }
-            let count = self
-                .stored_count(node)?
+            let after = before
                 .checked_add_signed(balance)
                 .filter(|&count| count > 0)
                 .ok_or(BranchError::GarbageCollection("reference count underflow"))?;
-            self.tx.put(NODE_REFS, &node.key(), &count.to_be_bytes())?;
+            if after > 1 {
+                self.tx.put(NODE_REFS, &node.key(), &after.to_be_bytes())?;
+            }
         }
         Ok(())
     }

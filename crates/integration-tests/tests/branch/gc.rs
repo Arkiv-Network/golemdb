@@ -98,8 +98,10 @@ fn assert_exact_graph(tx: &impl ReadTransaction, sealed: &SealedCommit) {
                 .collect::<BTreeSet<_>>()
         );
     }
+    // Only counts above one are stored.
     let expected = counts
         .into_iter()
+        .filter(|&(_, count)| count > 1)
         .map(|((kind, hash), count)| {
             (
                 [vec![kind], hash.to_vec()].concat(),

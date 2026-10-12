@@ -56,16 +56,13 @@ fn assert_bounded(db: &MemoryDatabase) {
         index::INDEX_TRIE,
         index::BITMAP_TRIE,
         index::BITMAP_CONTAINER,
-    ]
-    .into_iter()
-    .map(|table| rows(&tx, table).len())
-    .sum::<usize>();
-    assert_eq!(rows(&tx, REFS).len(), physical);
-    assert!(
-        rows(&tx, REFS)
-            .iter()
-            .all(|(_, count)| u64::from_be_bytes(count.as_slice().try_into().unwrap()) > 0)
-    );
+    ];
+    // Only counts above one are stored, each for a live physical row.
+    for (key, count) in rows(&tx, REFS) {
+        assert!(u64::from_be_bytes(count.as_slice().try_into().unwrap()) > 1);
+        let table = physical[key[0] as usize];
+        assert!(tx.get(table, &key[1..]).unwrap().is_some());
+    }
 }
 
 #[test]
@@ -108,10 +105,8 @@ fn shared_bitmap_roots_and_children_survive_until_last_owner_leaves() {
     let tx = db.begin_read().unwrap();
     assert_eq!(rows(&tx, index::BITMAP_TRIE), old_bitmap);
     let ref_key = [vec![2], old_bitmap[0].0.clone()].concat();
-    assert_eq!(
-        tx.get(REFS, &ref_key).unwrap(),
-        Some(1u64.to_be_bytes().to_vec())
-    );
+    // One remaining owner: the count is implicit.
+    assert_eq!(tx.get(REFS, &ref_key).unwrap(), None);
     drop(tx);
     mutate(&branches, &[(64, "b", "y")]);
     let tx = db.begin_read().unwrap();
@@ -143,20 +138,12 @@ fn corrupt_reference_count_aborts_seal_and_keeps_the_branch_open_for_retry() {
         .unwrap();
     let head = read_head_state(&db.begin_read().unwrap()).unwrap();
     let ref_key = [vec![0], head.state_root.to_vec()].concat();
-    let original = db
-        .begin_read()
-        .unwrap()
-        .get(REFS, &ref_key)
-        .unwrap()
-        .unwrap();
-    for corrupt in [Some(vec![0; 8]), Some(vec![1]), None] {
+    // The root has one owner, so its count is implicit; a stored count must
+    // be eight bytes and above one.
+    assert_eq!(db.begin_read().unwrap().get(REFS, &ref_key).unwrap(), None);
+    for corrupt in [vec![0; 8], 1u64.to_be_bytes().to_vec(), vec![1]] {
         let mut tx = db.begin_write().unwrap();
-        match corrupt {
-            Some(bytes) => tx.put(REFS, &ref_key, &bytes).unwrap(),
-            None => {
-                tx.delete(REFS, &ref_key).unwrap();
-            }
-        }
+        tx.put(REFS, &ref_key, &corrupt).unwrap();
         tx.commit().unwrap();
         let before = db.begin_read().unwrap();
         assert!(matches!(
@@ -173,7 +160,7 @@ fn corrupt_reference_count_aborts_seal_and_keeps_the_branch_open_for_retry() {
         }
         assert!(!branches.branch_info(branch).unwrap().sealed);
         let mut tx = db.begin_write().unwrap();
-        tx.put(REFS, &ref_key, &original).unwrap();
+        tx.delete(REFS, &ref_key).unwrap();
         tx.commit().unwrap();
     }
     assert_eq!(branches.commit(branch).unwrap(), head.commit_id + 1);

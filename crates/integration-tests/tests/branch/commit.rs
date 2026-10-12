@@ -1,6 +1,6 @@
 use golemdb_branch::{
     BranchError, Branches,
-    tables::{ENGINE, NODE_REFS, SUPERBLOCK},
+    tables::{ENGINE, SUPERBLOCK},
 };
 use golemdb_cells::{CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, tables};
 use golemdb_index::{Index, IndexTerm};
@@ -179,8 +179,7 @@ enum Fault {
     HeadRead,
     GraphRead,
     HeadWrite,
-    GcWrite,
-    GcDelete,
+    NodeDelete,
     Commit,
     Panic(usize),
 }
@@ -277,9 +276,6 @@ impl<W> ControlledWrite<W> {
 }
 impl<W: WriteTransaction> WriteTransaction for ControlledWrite<W> {
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> golemdb_storage::Result<()> {
-        if matches!(self.fault, Fault::GcWrite) && table == NODE_REFS {
-            return Err(injected());
-        }
         self.mutation(table)?;
         self.inner.put(table, key, value)
     }
@@ -288,7 +284,8 @@ impl<W: WriteTransaction> WriteTransaction for ControlledWrite<W> {
         self.inner.insert(table, key, value)
     }
     fn delete(&mut self, table: Table, key: &[u8]) -> golemdb_storage::Result<bool> {
-        if matches!(self.fault, Fault::GcDelete) && table == NODE_REFS {
+        // GC deletes the replaced cell trie root in the measured commit.
+        if matches!(self.fault, Fault::NodeDelete) && table == tables::CELL_TRIE {
             return Err(injected());
         }
         self.mutation(table)?;
@@ -322,8 +319,7 @@ fn failure_recovery(db: impl Database + Clone + 'static) {
         Fault::Write(1),
         Fault::Write(3),
         Fault::HeadWrite,
-        Fault::GcWrite,
-        Fault::GcDelete,
+        Fault::NodeDelete,
         Fault::Commit,
         Fault::Panic(3),
     ] {
