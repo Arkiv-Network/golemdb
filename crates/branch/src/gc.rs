@@ -5,9 +5,13 @@
 //! physical parents. Each parent's edges count once, regardless of how many
 //! owners that parent has. A zero count releases children and deletes the node.
 //!
-//! [`transfer`] acquires new roots before releasing old ones, so shared nodes
-//! never pass through zero. The retention policy in [`update`] chooses what a
-//! commit releases. Only head-only retention is implemented: a commit releases
+//! [`transfer`] first nets every count change in memory: acquired roots and
+//! the children of nodes this commit created gain a reference, released roots
+//! lose one. Only nodes left with a negative balance are checked against their
+//! stored count; a node reaching zero passes the loss to its children. Nodes
+//! whose balance nets to zero, such as siblings that a new branch copies from
+//! the one it replaces, are never read or written. The retention policy in
+//! [`update`] chooses what a commit releases. Only head-only retention is implemented: a commit releases
 //! its origin's roots. A retention window would instead release the roots of
 //! the commit leaving it, read from `#roots` and the index change set.
 //!
@@ -132,9 +136,10 @@ pub(crate) fn update<R: ReadTransaction>(
     transfer(tx, acquired, released)
 }
 
-/// Acquire, then release, then stage changed counts and deletions in the
-/// buffer. Rows already written to the buffer are new nodes: the only live
-/// nodes allowed without a stored count. Old roots stay readable until then.
+/// Net the count changes of moving from `released` to `acquired`, then stage
+/// changed counts and deletions in the buffer. Rows already written to the
+/// buffer are nodes this commit created: they start from zero, are reachable
+/// from the acquired roots, and are the only live nodes without a stored count.
 pub(crate) fn transfer<R: ReadTransaction>(
     tx: &mut Buffered<'_, R>,
     acquired: Roots,
@@ -156,93 +161,98 @@ pub(crate) fn transfer<R: ReadTransaction>(
     }
     let mut session = Session {
         tx,
-        counts: BTreeMap::new(),
         created,
+        balance: BTreeMap::new(),
+        stored: BTreeMap::new(),
+        dead: BTreeSet::new(),
     };
     for node in acquired.0 {
-        session.retain(node)?;
+        session.add(node, 1)?;
     }
+    for node in session.created.clone() {
+        for child in session.children(node)? {
+            session.add(child, 1)?;
+        }
+    }
+    let mut pending = Vec::new();
     for node in released.0 {
-        session.release(node)?;
+        session.add(node, -1)?;
+        pending.push(node);
+    }
+    // Nodes reach zero only after every gain is known, so shared nodes never do.
+    while let Some(node) = pending.pop() {
+        if session.balance[&node] >= 0 || session.dead.contains(&node) {
+            continue;
+        }
+        let count = session.stored_count(node)?;
+        match count.checked_add_signed(session.balance[&node]) {
+            None => return Err(BranchError::GarbageCollection("reference count underflow")),
+            Some(0) => {
+                session.dead.insert(node);
+                for child in session.children(node)? {
+                    session.add(child, -1)?;
+                    pending.push(child);
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    for node in &session.created {
+        if session
+            .balance
+            .get(node)
+            .is_none_or(|&balance| balance <= 0)
+        {
+            return Err(BranchError::GarbageCollection(
+                "created node is unreachable from the acquired roots",
+            ));
+        }
     }
     session.flush()
 }
 
-struct Counter {
-    before: u64,
-    after: u64,
-}
-
-struct Session<'tx, T> {
-    tx: &'tx mut T,
-    counts: BTreeMap<Node, Counter>,
+struct Session<'tx, 'r, R> {
+    tx: &'tx mut Buffered<'r, R>,
     created: BTreeSet<Node>,
+    /// Net reference change per node; zero entries need no storage access.
+    balance: BTreeMap<Node, i64>,
+    stored: BTreeMap<Node, u64>,
+    dead: BTreeSet<Node>,
 }
 
-impl<T: WriteTransaction> Session<'_, T> {
-    fn counter(&mut self, node: Node) -> Result<&mut Counter> {
-        if !self.counts.contains_key(&node) {
-            let before = self.stored_count(node)?;
-            self.counts.insert(
-                node,
-                Counter {
-                    before,
-                    after: before,
-                },
-            );
-        }
-        Ok(self.counts.get_mut(&node).unwrap())
+impl<R: ReadTransaction> Session<'_, '_, R> {
+    fn add(&mut self, node: Node, change: i64) -> Result<()> {
+        let balance = self.balance.entry(node).or_default();
+        *balance = balance
+            .checked_add(change)
+            .ok_or(BranchError::GarbageCollection("reference count overflow"))?;
+        Ok(())
     }
 
-    fn stored_count(&self, node: Node) -> Result<u64> {
-        match self.tx.get(NODE_REFS, &node.key())? {
-            None if self.created.contains(&node) => Ok(0),
-            None => Err(BranchError::GarbageCollection(
+    fn stored_count(&mut self, node: Node) -> Result<u64> {
+        if self.created.contains(&node) {
+            return Ok(0);
+        }
+        if let Some(&count) = self.stored.get(&node) {
+            return Ok(count);
+        }
+        let bytes = self
+            .tx
+            .get(NODE_REFS, &node.key())?
+            .ok_or(BranchError::GarbageCollection(
                 "live node has no reference count",
-            )),
-            Some(bytes) => {
-                let count = bytes.try_into().map(u64::from_be_bytes).map_err(|_| {
-                    BranchError::GarbageCollection("reference count must be eight bytes")
-                })?;
-                if count == 0 {
-                    return Err(BranchError::GarbageCollection(
-                        "stored reference count is zero",
-                    ));
-                }
-                Ok(count)
-            }
+            ))?;
+        let count = bytes
+            .try_into()
+            .map(u64::from_be_bytes)
+            .map_err(|_| BranchError::GarbageCollection("reference count must be eight bytes"))?;
+        if count == 0 {
+            return Err(BranchError::GarbageCollection(
+                "stored reference count is zero",
+            ));
         }
-    }
-
-    fn retain(&mut self, node: Node) -> Result<()> {
-        let mut pending = vec![node];
-        while let Some(node) = pending.pop() {
-            let counter = self.counter(node)?;
-            let activate = counter.after == 0;
-            counter.after = counter
-                .after
-                .checked_add(1)
-                .ok_or(BranchError::GarbageCollection("reference count overflow"))?;
-            if activate {
-                pending.extend(self.children(node)?);
-            }
-        }
-        Ok(())
-    }
-
-    fn release(&mut self, node: Node) -> Result<()> {
-        let mut pending = vec![node];
-        while let Some(node) = pending.pop() {
-            let counter = self.counter(node)?;
-            counter.after = counter
-                .after
-                .checked_sub(1)
-                .ok_or(BranchError::GarbageCollection("reference count underflow"))?;
-            if counter.after == 0 {
-                pending.extend(self.children(node)?);
-            }
-        }
-        Ok(())
+        self.stored.insert(node, count);
+        Ok(count)
     }
 
     fn children(&self, node: Node) -> Result<Vec<Node>> {
@@ -281,18 +291,24 @@ impl<T: WriteTransaction> Session<'_, T> {
         Ok(children)
     }
 
-    fn flush(self) -> Result<()> {
-        for (node, counter) in self.counts {
-            if counter.before == counter.after {
+    fn flush(mut self) -> Result<()> {
+        let changed: Vec<_> = (self.balance.iter())
+            .filter(|&(_, &balance)| balance != 0)
+            .map(|(&node, &balance)| (node, balance))
+            .collect();
+        for (node, balance) in changed {
+            if self.dead.contains(&node) {
+                // Both rows were read to reach zero; skip the existence checks.
+                self.tx.delete_existing(NODE_REFS, &node.key());
+                self.tx.delete_existing(node.kind.table(), &node.hash);
                 continue;
             }
-            if counter.after == 0 {
-                self.tx.delete(NODE_REFS, &node.key())?;
-                self.tx.delete(node.kind.table(), &node.hash)?;
-            } else {
-                self.tx
-                    .put(NODE_REFS, &node.key(), &counter.after.to_be_bytes())?;
-            }
+            let count = self
+                .stored_count(node)?
+                .checked_add_signed(balance)
+                .filter(|&count| count > 0)
+                .ok_or(BranchError::GarbageCollection("reference count underflow"))?;
+            self.tx.put(NODE_REFS, &node.key(), &count.to_be_bytes())?;
         }
         Ok(())
     }

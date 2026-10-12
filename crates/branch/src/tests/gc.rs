@@ -179,3 +179,77 @@ fn corrupt_reference_count_aborts_seal_and_keeps_the_branch_open_for_retry() {
     assert_eq!(branches.commit(branch).unwrap(), head.commit_id + 1);
     assert_bounded(&db);
 }
+
+// Counts reads of stored reference counts through the seal buffer.
+struct RefReads<R> {
+    tx: R,
+    reads: std::cell::Cell<usize>,
+}
+
+impl<R: ReadTransaction> ReadTransaction for RefReads<R> {
+    type Cursor<'tx>
+        = R::Cursor<'tx>
+    where
+        Self: 'tx;
+    fn get(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Option<Vec<u8>>> {
+        if table == REFS {
+            self.reads.set(self.reads.get() + 1);
+        }
+        self.tx.get(table, key)
+    }
+    fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
+        self.tx.cursor(table, key)
+    }
+}
+
+#[test]
+fn copied_siblings_are_netted_without_reading_their_counts() {
+    let db = database();
+    let branches = Branches::new(db.clone(), HASH).unwrap();
+    let plain = |text: &str| -> CellValue {
+        CellValueRef::new(CellType::Str, text.as_bytes(), false)
+            .unwrap()
+            .into()
+    };
+    let branch = branches.begin().unwrap();
+    branches
+        .write(branch, |cells| {
+            for id in 64..64 + 4096 {
+                cells.put(key(id, "a"), plain("x"));
+            }
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+    branches.commit(branch).unwrap();
+
+    let origin = RefReads {
+        tx: db.begin_read().unwrap(),
+        reads: std::cell::Cell::new(0),
+    };
+    let head = read_head_state(&origin).unwrap();
+    let (cells, index) = (
+        golemdb_cells::Cells::new(&HASH),
+        golemdb_index::Index::new(&HASH),
+    );
+    let cell_root = cells.reopen(&origin, head.state_root).unwrap();
+    let index_root = index.reopen(&origin, head.index_root).unwrap();
+    let mut buffer = crate::buffer::Buffered::new(&origin);
+    let change = golemdb_cells::CellChange::Put {
+        key: key(64 + 7, "a"),
+        value: plain("y"),
+    };
+    let (cells_update, index_update) =
+        crate::state::apply(&mut buffer, &HASH, cell_root, index_root, [change]).unwrap();
+    crate::gc::update(
+        &mut buffer,
+        crate::gc::RETENTION,
+        cell_root,
+        index_root,
+        &cells_update,
+        &index_update,
+    )
+    .unwrap();
+    // The edited path crosses four branches. Each has up to 15 unchanged
+    // siblings whose +1 and -1 cancel; counting them read 47 counts here.
+    assert_eq!(origin.reads.get(), 4);
+}

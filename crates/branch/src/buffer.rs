@@ -29,6 +29,14 @@ impl<'a, R> Buffered<'a, R> {
     pub(crate) fn writes(&self) -> &Writes {
         &self.writes
     }
+
+    /// Stage deleting a row the caller knows exists, without reading it.
+    pub(crate) fn delete_existing(&mut self, table: Table, key: &[u8]) {
+        self.writes
+            .entry(table)
+            .or_default()
+            .insert(key.to_vec(), None);
+    }
 }
 
 fn validate(table: Table) -> Result<()> {
