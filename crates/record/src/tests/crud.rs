@@ -569,3 +569,34 @@ fn committed_cell_reader_keeps_one_snapshot_when_head_advances() {
         text("after", true)
     );
 }
+
+#[test]
+fn committed_reads_by_id_match_get_and_check_the_commit() {
+    let (db, branches, records) = setup();
+    let b = branches.begin().unwrap();
+    records.create(b, KEY, values("Alice")).unwrap();
+    let head = branches.commit(b).unwrap();
+
+    let (tx, at) = crate::committed_snapshot(&db, None).unwrap();
+    assert_eq!(at, head);
+    let cell_reader = golemdb_cells::CellReader::new(&tx);
+    let only_name = [name(b"name")];
+    for projection in [None, Some(&only_name[..]), Some(&[][..])] {
+        assert_eq!(
+            crate::read_committed_by_id(&cell_reader, 64, projection).unwrap(),
+            Some(records.get(ReadTarget::Head, KEY, projection).unwrap())
+        );
+    }
+    assert_eq!(
+        crate::read_committed_by_id(&cell_reader, 65, None).unwrap(),
+        None
+    );
+
+    assert_eq!(crate::committed_snapshot(&db, Some(head)).unwrap().1, head);
+    let older = golemdb_branch::CommitId::new(head.get() - 1);
+    assert!(matches!(
+        crate::committed_snapshot(&db, Some(older)),
+        Err(RecordError::CommitUnavailable { requested, head: got })
+            if requested == older && got == head
+    ));
+}

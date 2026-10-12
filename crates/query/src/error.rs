@@ -1,9 +1,9 @@
 use std::error::Error;
 
-use golemdb_branch::{BranchError, CommitId};
-use golemdb_cells::{CellError, CellName};
+use golemdb_branch::CommitId;
+use golemdb_cells::CellName;
 use golemdb_index::{IndexError, TermError};
-use golemdb_storage::StorageError;
+use golemdb_record::RecordError;
 
 pub type Result<T> = std::result::Result<T, QueryError>;
 
@@ -44,20 +44,15 @@ impl From<IndexError> for QueryError {
     }
 }
 
-impl From<StorageError> for QueryError {
-    fn from(error: StorageError) -> Self {
-        Self::Internal(Box::new(error))
-    }
-}
-
-impl From<CellError> for QueryError {
-    fn from(error: CellError) -> Self {
-        Self::Internal(Box::new(error))
-    }
-}
-
-impl From<BranchError> for QueryError {
-    fn from(error: BranchError) -> Self {
-        Self::Internal(Box::new(error))
+/// A record's own errors are internal to a query, except for an unavailable
+/// commit, which keeps its meaning.
+impl From<RecordError> for QueryError {
+    fn from(error: RecordError) -> Self {
+        match error {
+            RecordError::CommitUnavailable { requested, head } => {
+                Self::CommitUnavailable { requested, head }
+            }
+            error => Self::Internal(Box::new(error)),
+        }
     }
 }
