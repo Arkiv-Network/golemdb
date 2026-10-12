@@ -133,6 +133,12 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
         &self.inner.store
     }
 
+    /// The hash provider shared by this manager. Committed readers use it to
+    /// decode index roots in their own snapshot.
+    pub fn hasher(&self) -> &H {
+        &self.inner.hasher
+    }
+
     /// Open a new independent overlay and its first frame over the current head.
     pub fn begin(&self) -> Result<BranchId> {
         let state = BranchState {

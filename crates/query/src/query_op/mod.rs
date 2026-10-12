@@ -3,14 +3,14 @@
 
 mod budget;
 mod filter;
-mod metering;
+mod metered;
 mod op;
 mod page;
 mod sort;
 
 pub use budget::Budget;
 pub use filter::Filter;
-pub use metering::Metering;
+pub use metered::Metered;
 pub use op::{CountOp, QueryOp};
-pub use page::{QueryPage};
+pub use page::QueryPage;
 pub use sort::{Direction, SortKey};

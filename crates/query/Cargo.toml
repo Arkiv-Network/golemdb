@@ -15,4 +15,5 @@ golemdb-storage.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+golemdb-api.workspace = true
 proptest.workspace = true

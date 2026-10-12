@@ -14,4 +14,3 @@ pub struct QueryPage {
     // /// Where the next page starts; `None` when nothing follows.
     // pub next: Option<Cursor>,
 }
-

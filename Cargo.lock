@@ -587,6 +587,7 @@ dependencies = [
 name = "golemdb-query"
 version = "0.1.0"
 dependencies = [
+ "golemdb-api",
  "golemdb-branch",
  "golemdb-cells",
  "golemdb-index",

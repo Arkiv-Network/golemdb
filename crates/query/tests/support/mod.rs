@@ -1,79 +1,89 @@
-//! A real in-memory index, written the way the engine writes it.
-//!
-//! Terms on the write side come from [`IndexTerm::from_cell`] over attribute
-//! cells, exactly as seal derives them; filters look the same values up
-//! through admission.
+//! A real in-memory database: records are written and committed through the
+//! public API, so the index is built by seal exactly as in production, and
+//! queries read the same store.
 
 #![allow(dead_code)] // Each test crate uses a different subset.
 
-use golemdb_cells::{CellKind, CellValue};
-use golemdb_index::{INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange};
-use golemdb_merkle::{Keccak256Hasher, RootRef};
-use golemdb_query::{Filter, IndexSource, QueryError, evaluate};
-use golemdb_storage::{MemoryStore, Store, WriteTransaction};
+use golemdb_api::{
+    Api, CellLimits, Database, Genesis, HashAlgorithm, OpenConfig, ReadTarget, RecordKey, RecordOp,
+    op,
+};
+use golemdb_branch::Branches;
+use golemdb_cells::{CellNameRef, CellValue};
+use golemdb_merkle::Keccak256Hasher;
+use golemdb_query::{CountOp, Filter, Queries, QueryError, QueryOp};
+use golemdb_storage::MemoryStore;
 use proptest::prelude::*;
 
-const HASHER: Keccak256Hasher = Keccak256Hasher;
-
-/// The term seal derives when a record holds `field = value` as an attribute.
-pub fn written_term(field: &str, value: &CellValue) -> IndexTerm {
-    let attribute = value
-        .clone()
-        .with_kind(CellKind::Attribute)
-        .expect("indexable type");
-    IndexTerm::from_cell(field, attribute.as_view())
-        .expect("valid term")
-        .expect("attribute")
+pub struct TestDb {
+    pub db: Database,
+    pub queries: Queries<MemoryStore, Keccak256Hasher>,
 }
 
-pub fn add(record_id: u64, field: &str, value: &CellValue) -> PostingChange {
-    PostingChange::Add {
-        term: written_term(field, value),
-        record_id,
-    }
-}
-
-pub fn remove(record_id: u64, field: &str, value: &CellValue) -> PostingChange {
-    PostingChange::Remove {
-        term: written_term(field, value),
-        record_id,
-    }
-}
-
-/// A committed index in a [`MemoryStore`].
-pub struct TestIndex {
-    store: MemoryStore,
-    index: Index<'static, Keccak256Hasher>,
-    root: RootRef<INDEX_TRIE_PATH_BYTES>,
-}
-
-impl Default for TestIndex {
+impl Default for TestDb {
     fn default() -> Self {
+        let store = MemoryStore::new();
+        let limits = CellLimits {
+            max_cell_name_len: 32,
+            max_str_len: 4096,
+            max_bytes_len: 64,
+        };
+        let genesis = Genesis::new(HashAlgorithm::Keccak256, limits);
+        let db = Database::from_store(store.clone(), &OpenConfig::new(genesis)).expect("genesis");
+        let branches = Branches::new(store, Keccak256Hasher).expect("initialized head");
         Self {
-            store: MemoryStore::new(),
-            index: Index::new(&HASHER),
-            root: RootRef::Empty,
+            db,
+            queries: Queries::new(branches),
         }
     }
 }
 
-impl TestIndex {
-    /// Apply one batch and commit it.
-    pub fn apply(&mut self, changes: impl IntoIterator<Item = PostingChange>) {
-        let mut tx = self.store.begin_write().expect("write transaction");
-        self.root = self
-            .index
-            .apply(&mut tx, self.root, changes)
-            .expect("index update")
-            .root;
-        tx.commit().expect("commit");
+impl TestDb {
+    /// Create `records` in one branch and commit it.
+    pub fn create(&self, records: impl IntoIterator<Item = RecordOp<op::Create>>) {
+        let branch = self.db.begin().expect("branch");
+        for record in records {
+            self.db.create(branch, record).expect("create");
+        }
+        self.db.commit(branch).expect("commit");
     }
 
-    /// Evaluate `filter` against one committed read snapshot.
-    pub fn evaluate(&self, filter: &Filter) -> Result<Vec<u64>, QueryError> {
-        let tx = self.store.begin_read().expect("read transaction");
-        let ids = evaluate(&IndexSource::new(&self.index, &tx), filter)?;
-        Ok(ids.treemap().iter().collect())
+    /// Keys of the records matching `filter` at the head, in query order.
+    pub fn keys(&self, filter: Filter) -> Result<Vec<RecordKey>, QueryError> {
+        let page = self
+            .queries
+            .query(ReadTarget::Head, QueryOp::filter(filter))
+            .result?;
+        Ok(page.records.into_iter().map(|record| record.key).collect())
+    }
+
+    pub fn count(&self, filter: Filter) -> Result<u64, QueryError> {
+        self.queries
+            .count(ReadTarget::Head, CountOp::filter(filter))
+            .result
+    }
+}
+
+pub fn key(n: u64) -> RecordKey {
+    let mut bytes = [0xab; 32];
+    bytes[24..].copy_from_slice(&n.to_be_bytes());
+    RecordKey(bytes)
+}
+
+/// A record whose cells are all attributes, so all of them are indexed.
+pub fn record(key: RecordKey, attributes: &[(&str, CellValue)]) -> RecordOp<op::Create> {
+    attributes
+        .iter()
+        .fold(RecordOp::create(key), |op, (name, value)| {
+            op.attribute(name, value.clone()).expect("valid attribute")
+        })
+}
+
+/// Raw, so tests can also build names the grammar rejects.
+pub fn eq(field: &str, value: CellValue) -> Filter {
+    Filter::Eq {
+        field: CellNameRef::raw(field.as_bytes()).into(),
+        value,
     }
 }
 
@@ -83,37 +93,6 @@ fn f32_value(value: f32) -> CellValue {
 
 fn f64_value(value: f64) -> CellValue {
     CellValue::from_f64(value).expect("not NaN")
-}
-
-/// Any value of an indexable type. NaN is excluded: it has no `CellValue`.
-pub fn any_value() -> impl Strategy<Value = CellValue> {
-    let f32s = any::<f32>().prop_filter("NaN is no value", |v| !v.is_nan());
-    let f64s = any::<f64>().prop_filter("NaN is no value", |v| !v.is_nan());
-    prop_oneof![
-        any::<bool>().prop_map(CellValue::from_bool),
-        any::<String>().prop_map(|v| CellValue::from_str(&v)),
-        any::<[u8; 4]>().prop_map(CellValue::from_bytes4),
-        any::<[u8; 8]>().prop_map(CellValue::from_bytes8),
-        any::<[u8; 16]>().prop_map(CellValue::from_bytes16),
-        any::<[u8; 20]>().prop_map(CellValue::from_bytes20),
-        any::<[u8; 32]>().prop_map(CellValue::from_bytes32),
-        any::<u32>().prop_map(CellValue::from_u32),
-        any::<u64>().prop_map(CellValue::from_u64),
-        any::<u128>().prop_map(CellValue::from_u128),
-        any::<[u8; 32]>().prop_map(CellValue::from_u256_be),
-        any::<i32>().prop_map(CellValue::from_i32),
-        any::<i64>().prop_map(CellValue::from_i64),
-        any::<i128>().prop_map(CellValue::from_i128),
-        any::<[u8; 32]>().prop_map(CellValue::from_i256_be),
-        any::<i32>().prop_map(CellValue::from_dec32_unscaled),
-        any::<i64>().prop_map(CellValue::from_dec64_unscaled),
-        any::<i128>().prop_map(CellValue::from_dec128_unscaled),
-        any::<[u8; 32]>().prop_map(CellValue::from_dec256_unscaled_be),
-        f32s.prop_map(f32_value),
-        f64s.prop_map(f64_value),
-        any::<i32>().prop_map(CellValue::from_date32),
-        any::<i64>().prop_map(CellValue::from_timestamp64),
-    ]
 }
 
 /// A value from a tiny domain per type, so random records and filters collide.

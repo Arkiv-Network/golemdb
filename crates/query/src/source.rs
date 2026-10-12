@@ -6,20 +6,20 @@ use golemdb_merkle::HashProvider;
 use golemdb_storage::ReadTransaction;
 
 /// Read access to the index's posting lists.
-pub trait PostingSource {
+pub(crate) trait PostingSource {
     /// The record IDs indexed under `term`; empty when the term is absent.
     fn postings(&self, term: &IndexTerm) -> golemdb_index::Result<Bitmap>;
 }
 
 /// [`PostingSource`] over an [`Index`] at one read snapshot. Use one snapshot
 /// for a whole query, so every leaf sees the same state.
-pub struct IndexSource<'a, 'h, H: HashProvider, T: ReadTransaction> {
+pub(crate) struct IndexSource<'a, 'h, H: HashProvider, T: ReadTransaction> {
     index: &'a Index<'h, H>,
     tx: &'a T,
 }
 
 impl<'a, 'h, H: HashProvider, T: ReadTransaction> IndexSource<'a, 'h, H, T> {
-    pub fn new(index: &'a Index<'h, H>, tx: &'a T) -> Self {
+    pub(crate) fn new(index: &'a Index<'h, H>, tx: &'a T) -> Self {
         Self { index, tx }
     }
 }

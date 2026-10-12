@@ -1,21 +1,15 @@
-//! Filter evaluation over any [`PostingSource`].
+//! Plan evaluation over any [`PostingSource`]. Pure; reads only through the
+//! source, so it is testable without storage.
 
 use golemdb_index::Bitmap;
 
-use crate::{Filter, PostingSource, Result, plan::Plan};
+use crate::{Result, plan::Plan, source::PostingSource};
 
-/// The match set of `filter`: the IDs of every matching record, ascending.
-///
-/// Admission validates the whole filter before the first read.
-///
-/// # Errors
-///
-/// [`QueryError::InvalidArgument`](crate::QueryError::InvalidArgument) for a
-/// leaf with no valid index term; [`QueryError::Internal`](crate::QueryError::Internal)
-/// when the source fails.
-pub fn evaluate(source: &impl PostingSource, filter: &Filter) -> Result<Bitmap> {
-    match Plan::try_from(filter)? {
-        Plan::TermRead(term) => Ok(source.postings(&term)?),
+/// The match set of an admitted filter: the IDs of every matching record,
+/// ascending. Fails only when the source does.
+pub(crate) fn match_set(source: &impl PostingSource, plan: &Plan) -> Result<Bitmap> {
+    match plan {
+        Plan::TermRead(term) => Ok(source.postings(term)?),
     }
 }
 
@@ -27,7 +21,7 @@ mod tests {
     use golemdb_index::{BitmapContainer, IndexError, IndexTerm, TermError, path};
 
     use super::*;
-    use crate::QueryError;
+    use crate::{Filter, QueryError};
 
     /// Posting lists in a `BTreeMap`: byte-ordered like the `Index` table.
     #[derive(Default)]
@@ -95,6 +89,11 @@ mod tests {
 
     fn str(value: &str) -> CellValue {
         CellValue::from_str(value)
+    }
+
+    /// Admission, then evaluation: the sequence `query` and `count` follow.
+    fn evaluate(source: &impl PostingSource, filter: &Filter) -> Result<Bitmap> {
+        match_set(source, &Plan::try_from(filter)?)
     }
 
     fn ids(source: &FakeSource, filter: Filter) -> Vec<u64> {
@@ -197,7 +196,8 @@ mod tests {
         let result = evaluate(&FailingSource, &eq("a", CellValue::from_i32(1)));
         assert!(matches!(
             result,
-            Err(QueryError::Internal(IndexError::Corruption("injected")))
+            Err(QueryError::Internal(source))
+                if matches!(source.downcast_ref(), Some(IndexError::Corruption("injected")))
         ));
     }
 }

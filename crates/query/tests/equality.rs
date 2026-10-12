@@ -1,18 +1,17 @@
+//! Filter semantics against a real database: which records an `Eq` leaf
+//! matches, for every indexable type, as records are created, patched and
+//! deleted.
+
 mod support;
 
-use golemdb_cells::{CellNameRef, CellType, CellValue};
-use golemdb_index::{IndexTerm, TermError};
-use golemdb_query::{Filter, QueryError};
-use proptest::prelude::*;
-use support::{TestIndex, add, any_value, remove, small_value, written_term};
+use std::collections::BTreeMap;
 
-/// Raw, so tests can also build names the grammar rejects.
-fn eq(field: &str, value: CellValue) -> Filter {
-    Filter::Eq {
-        field: CellNameRef::raw(field.as_bytes()).into(),
-        value,
-    }
-}
+use golemdb_api::{Api, RecordOp};
+use golemdb_cells::{CellType, CellValue};
+use golemdb_index::TermError;
+use golemdb_query::QueryError;
+use proptest::prelude::*;
+use support::{TestDb, eq, key, record, small_value};
 
 fn f32_value(value: f32) -> CellValue {
     CellValue::from_f32(value).expect("not NaN")
@@ -88,150 +87,138 @@ fn samples() -> Vec<CellValue> {
     ]
 }
 
-/// Record IDs spread over many 48-bit regions, so containers differ.
-fn id(i: usize) -> u64 {
-    i as u64 * 70_001
-}
-
 #[test]
 fn every_type_round_trips_through_the_index() {
     let samples = samples();
-    let mut index = TestIndex::default();
-    index.apply(
+    let test = TestDb::default();
+    test.create(
         samples
             .iter()
             .enumerate()
-            .map(|(i, value)| add(id(i), "f", value)),
+            .map(|(i, value)| record(key(i as u64), &[("f", value.clone())])),
     );
     for (i, value) in samples.iter().enumerate() {
         assert_eq!(
-            index.evaluate(&eq("f", value.clone())).unwrap(),
-            [id(i)],
+            test.keys(eq("f", value.clone())).unwrap(),
+            [key(i as u64)],
             "{value:?}"
         );
+        assert_eq!(test.count(eq("f", value.clone())).unwrap(), 1, "{value:?}");
     }
 }
 
 #[test]
 fn values_never_stored_match_nothing() {
-    let mut index = TestIndex::default();
-    index.apply(samples().iter().map(|value| add(1, "f", value)));
+    let test = TestDb::default();
+    test.create([record(key(1), &[("f", CellValue::from_i32(1))])]);
     for value in [
-        CellValue::from_str("b"),
+        CellValue::from_i32(2),
         CellValue::from_u32(1),
-        CellValue::from_i32(1),
-        CellValue::from_dec32_unscaled(-1),
-        f64_value(1.0),
-        CellValue::from_timestamp64(0),
+        CellValue::from_i64(1),
+        CellValue::from_dec32_unscaled(1),
+        CellValue::from_str("1"),
     ] {
         assert!(
-            index.evaluate(&eq("f", value.clone())).unwrap().is_empty(),
+            test.keys(eq("f", value.clone())).unwrap().is_empty(),
             "{value:?}"
         );
+        assert_eq!(test.count(eq("f", value.clone())).unwrap(), 0, "{value:?}");
     }
     assert!(
-        index
-            .evaluate(&eq("g", CellValue::from_bool(true)))
+        test.keys(eq("g", CellValue::from_i32(1)))
             .unwrap()
             .is_empty()
     );
 }
 
 #[test]
-fn postings_span_container_boundaries() {
-    let ids = [
-        0,
-        1,
-        65_535,
-        65_536,
-        65_537,
-        u64::from(u32::MAX),
-        1 << 32,
-        (1 << 48) - 1,
-        1 << 48,
-        u64::MAX - 1,
-        u64::MAX,
-    ];
+fn only_attributes_are_indexed() {
+    let test = TestDb::default();
+    let blue = CellValue::from_str("blue");
+    test.create([
+        record(key(1), &[("color", blue.clone())]),
+        RecordOp::create(key(2))
+            .field("color", blue.clone())
+            .expect("valid field"),
+    ]);
+    assert_eq!(test.keys(eq("color", blue)).unwrap(), [key(1)]);
+}
+
+#[test]
+fn patched_and_deleted_records_stop_matching() {
+    let test = TestDb::default();
     let blue = CellValue::from_str("blue");
     let red = CellValue::from_str("red");
-    let mut index = TestIndex::default();
-    index.apply(ids.iter().map(|&id| add(id, "color", &blue)));
-    index.apply(ids.iter().map(|&id| add(id ^ 1, "color", &red)));
-    assert_eq!(index.evaluate(&eq("color", blue)).unwrap(), ids);
-    let mut reds: Vec<u64> = ids.iter().map(|id| id ^ 1).collect();
-    reds.sort_unstable();
-    assert_eq!(index.evaluate(&eq("color", red)).unwrap(), reds);
-}
+    test.create((1..=4).map(|n| record(key(n), &[("color", blue.clone())])));
 
-#[test]
-fn removed_postings_stop_matching() {
-    let blue = CellValue::from_str("blue");
-    let mut index = TestIndex::default();
-    index.apply([1, 2, 3, 70_000].map(|id| add(id, "color", &blue)));
-    index.apply([remove(2, "color", &blue)]);
-    assert_eq!(
-        index.evaluate(&eq("color", blue.clone())).unwrap(),
-        [1, 3, 70_000]
-    );
+    let branch = test.db.begin().unwrap();
+    test.db
+        .patch(
+            branch,
+            RecordOp::patch(key(2))
+                .attribute("color", red.clone())
+                .unwrap(),
+        )
+        .unwrap();
+    test.db
+        .patch(branch, RecordOp::patch(key(3)).remove("color").unwrap())
+        .unwrap();
+    test.db.delete(branch, RecordOp::delete(key(4))).unwrap();
+    test.db.commit(branch).unwrap();
 
-    // The last posting going removes the term itself.
-    index.apply([1, 3, 70_000].map(|id| remove(id, "color", &blue)));
-    assert!(
-        index
-            .evaluate(&eq("color", blue.clone()))
-            .unwrap()
-            .is_empty()
-    );
-
-    index.apply([add(9, "color", &blue)]);
-    assert_eq!(index.evaluate(&eq("color", blue)).unwrap(), [9]);
+    assert_eq!(test.keys(eq("color", blue)).unwrap(), [key(1)]);
+    assert_eq!(test.keys(eq("color", red)).unwrap(), [key(2)]);
 }
 
 #[test]
 fn one_record_under_many_terms() {
-    let mut index = TestIndex::default();
-    index.apply([
-        add(9, "a", &CellValue::from_i32(1)),
-        add(9, "ab", &CellValue::from_i32(1)),
-        add(9, "b", &CellValue::from_u32(1)),
-        add(10, "a", &CellValue::from_i32(2)),
+    let test = TestDb::default();
+    test.create([
+        record(
+            key(9),
+            &[
+                ("a", CellValue::from_i32(1)),
+                ("ab", CellValue::from_i32(1)),
+                ("b", CellValue::from_u32(1)),
+            ],
+        ),
+        record(key(10), &[("a", CellValue::from_i32(2))]),
     ]);
     assert_eq!(
-        index.evaluate(&eq("a", CellValue::from_i32(1))).unwrap(),
-        [9]
+        test.keys(eq("a", CellValue::from_i32(1))).unwrap(),
+        [key(9)]
     );
     assert_eq!(
-        index.evaluate(&eq("ab", CellValue::from_i32(1))).unwrap(),
-        [9]
+        test.keys(eq("ab", CellValue::from_i32(1))).unwrap(),
+        [key(9)]
     );
     assert_eq!(
-        index.evaluate(&eq("b", CellValue::from_u32(1))).unwrap(),
-        [9]
+        test.keys(eq("b", CellValue::from_u32(1))).unwrap(),
+        [key(9)]
     );
     assert!(
-        index
-            .evaluate(&eq("b", CellValue::from_i32(1)))
+        test.keys(eq("b", CellValue::from_i32(1)))
             .unwrap()
             .is_empty()
     );
     assert_eq!(
-        index.evaluate(&eq("a", CellValue::from_i32(2))).unwrap(),
-        [10]
+        test.keys(eq("a", CellValue::from_i32(2))).unwrap(),
+        [key(10)]
     );
 }
 
 #[test]
 fn invalid_arguments_are_errors_not_empty_results() {
-    let index = TestIndex::default();
+    let test = TestDb::default();
     assert!(matches!(
-        index.evaluate(&eq("not valid", CellValue::from_i32(1))),
+        test.keys(eq("not valid", CellValue::from_i32(1))),
         Err(QueryError::InvalidArgument {
             source: TermError::InvalidName,
             ..
         })
     ));
     assert!(matches!(
-        index.evaluate(&eq("f", CellValue::from_bytes(b"x"))),
+        test.count(eq("f", CellValue::from_bytes(b"x"))),
         Err(QueryError::InvalidArgument {
             source: TermError::UnsupportedType(CellType::Bytes),
             ..
@@ -245,40 +232,31 @@ fn field() -> impl Strategy<Value = &'static str> {
     prop::sample::select(&FIELDS[..])
 }
 
-/// IDs clustered around container boundaries and spread far apart.
-fn record_id() -> impl Strategy<Value = u64> {
-    prop_oneof![0u64..64, 65_520u64..65_552, any::<u64>()]
-}
-
 proptest! {
-    #[test]
-    fn lookup_terms_equal_written_terms(field in "[a-zA-Z][a-zA-Z0-9_.:-]{0,15}", value in any_value()) {
-        // Filters hold fields; seal indexes attributes. The kind must not matter.
-        let lookup = IndexTerm::for_value(&field, value.as_view()).unwrap();
-        prop_assert_eq!(lookup, written_term(&field, &value));
-    }
+    // Each case builds and commits a whole database.
+    #![proptest_config(ProptestConfig::with_cases(64))]
 
     #[test]
     fn equality_matches_a_model(
-        records in prop::collection::btree_map(
-            record_id(),
+        records in prop::collection::vec(
             prop::collection::btree_map(field(), small_value(), 0..4),
-            0..40,
+            0..24,
         ),
-        queries in prop::collection::vec(
+        filters in prop::collection::vec(
             (field(), small_value(), any::<Option<prop::sample::Index>>()),
-            1..16,
+            1..12,
         ),
     ) {
-        let mut index = TestIndex::default();
-        index.apply(records.iter().flat_map(|(&id, cells)| {
-            cells.iter().map(move |(field, value)| add(id, field, value))
+        let test = TestDb::default();
+        test.create(records.iter().enumerate().map(|(n, cells)| {
+            let cells: Vec<_> = cells.iter().map(|(field, value)| (*field, value.clone())).collect();
+            record(key(n as u64), &cells)
         }));
         let stored: Vec<(&str, &CellValue)> = records
-            .values()
+            .iter()
             .flat_map(|cells| cells.iter().map(|(field, value)| (*field, value)))
             .collect();
-        for (field, value, pick) in queries {
+        for (field, value, pick) in filters {
             // Mostly ask for cells that exist, so matches are not rare.
             let (field, value) = match pick {
                 Some(pick) if !stored.is_empty() => {
@@ -288,14 +266,18 @@ proptest! {
                 Some(_) | None => (field, value),
             };
             // A record matches iff its cell under `field` has the leaf's type
-            // and value. Every generated value is a field, so `CellValue`
-            // equality compares exactly type and stored bytes (-0 is already 0).
-            let expected: Vec<u64> = records
+            // and value. Records are created in order, so record IDs, and
+            // with them the query order, follow `n`.
+            let expected: Vec<_> = records
                 .iter()
-                .filter(|(_, cells)| cells.get(field) == Some(&value))
-                .map(|(&id, _)| id)
+                .enumerate()
+                .filter(|(_, cells): &(usize, &BTreeMap<&str, CellValue>)| {
+                    cells.get(field) == Some(&value)
+                })
+                .map(|(n, _)| key(n as u64))
                 .collect();
-            prop_assert_eq!(index.evaluate(&eq(field, value)).unwrap(), expected);
+            prop_assert_eq!(test.count(eq(field, value.clone())).unwrap(), expected.len() as u64);
+            prop_assert_eq!(test.keys(eq(field, value)).unwrap(), expected);
         }
     }
 }

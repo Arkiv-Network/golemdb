@@ -1,49 +1,57 @@
-//! Query evaluation over the transactional index.
+//! Queries over committed state: [`Queries::query`] and [`Queries::count`].
 //!
-//! A query's [`Filter`] is plain data the caller builds; [`evaluate`] resolves
-//! it to its match set, the IDs of the matching records. Leaves are typed:
-//! `amount = CellValue::from_i32(100)` reads only the `i32` run of `amount`,
-//! so a cell of another type under the same name is treated as absent.
+//! A [`QueryOp`] or [`CountOp`] is plain data the caller builds around a
+//! [`Filter`]. Leaves are typed: `amount = CellValue::from_i32(100)` reads only
+//! the `i32` run of `amount`, so a cell of another type under the same name is
+//! treated as absent. Only attribute cells are indexed, so only they match.
 //!
-//! Admission validates the whole filter before any state read. All index
-//! reads then go through [`PostingSource`]. [`IndexSource`] adapts an
-//! [`Index`](golemdb_index::Index) at one read snapshot; the evaluation itself
-//! never touches storage.
+//! The target is checked first, then the whole request is admitted before any
+//! state read; the filter's match set and the returned records are then read
+//! from one storage snapshot. Filter evaluation itself never touches storage:
+//! it reads the index through a private seam, so it is unit-tested with a fake.
 //!
 //! ```
-//! use golemdb_cells::{CellNameRef, CellType, CellValue};
-//! use golemdb_index::{Index, IndexTerm, PostingChange};
-//! use golemdb_merkle::{Keccak256Hasher, RootRef};
-//! use golemdb_query::{Filter, IndexSource, evaluate};
-//! use golemdb_storage::{MemoryStore, Store, WriteTransaction};
+//! use golemdb_api::{
+//!     Api, CellLimits, CellValue, Database, Genesis, HashAlgorithm, OpenConfig, ReadTarget,
+//!     RecordKey, RecordOp,
+//! };
+//! use golemdb_branch::Branches;
+//! use golemdb_cells::CellNameRef;
+//! use golemdb_merkle::Keccak256Hasher;
+//! use golemdb_query::{Filter, Queries, QueryOp};
+//! use golemdb_storage::MemoryStore;
 //!
+//! // A database writes and commits; queries read the same store.
 //! let store = MemoryStore::new();
-//! let hasher = Keccak256Hasher;
-//! let index = Index::new(&hasher);
-//! let term = IndexTerm::new("color", CellType::Str, b"blue")?;
-//! let mut tx = store.begin_write()?;
-//! index.apply(&mut tx, RootRef::Empty, [
-//!     PostingChange::Add { term, record_id: 42 },
-//! ])?;
-//! tx.commit()?;
+//! let limits = CellLimits { max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 64 };
+//! let genesis = Genesis::new(HashAlgorithm::Keccak256, limits);
+//! let db = Database::from_store(store.clone(), &OpenConfig::new(genesis))?;
+//! let queries = Queries::new(Branches::new(store, Keccak256Hasher)?);
 //!
-//! let read = store.begin_read()?;
+//! let key = RecordKey([1; 32]);
+//! let branch = db.begin()?;
+//! db.create(
+//!     branch,
+//!     RecordOp::create(key).attribute("color", CellValue::from_str("blue"))?,
+//! )?;
+//! db.commit(branch)?;
+//!
 //! let filter = Filter::Eq {
 //!     field: CellNameRef::parse_user(b"color", 32)?.into(),
 //!     value: CellValue::from_str("blue"),
 //! };
-//! let ids = evaluate(&IndexSource::new(&index, &read), &filter)?;
-//! assert_eq!(ids.treemap().iter().collect::<Vec<_>>(), [42]);
+//! let page = queries.query(ReadTarget::Head, QueryOp::filter(filter)).result?;
+//! assert_eq!(page.records, [db.get(ReadTarget::Head, RecordOp::get(key))?]);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 mod error;
 mod eval;
 mod plan;
+mod queries;
 mod query_op;
 mod source;
 
 pub use error::{QueryError, Result};
-pub use eval::evaluate;
-pub use query_op::{Budget, CountOp, Direction, Filter, Metering, QueryOp, QueryPage, SortKey};
-pub use source::{IndexSource, PostingSource};
+pub use queries::Queries;
+pub use query_op::{Budget, CountOp, Direction, Filter, Metered, QueryOp, QueryPage, SortKey};
