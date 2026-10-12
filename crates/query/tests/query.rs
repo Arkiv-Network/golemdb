@@ -3,8 +3,8 @@
 mod support;
 
 use golemdb_api::{Api, BranchId, CommitId, ReadTarget, RecordOp};
+use golemdb_api::{Budget, CountOp, QueryError, QueryOp, SortKey};
 use golemdb_cells::{CellType, CellValue, Width};
-use golemdb_query::{Budget, CountOp, QueryError, QueryOp, SortKey};
 use support::{TestDb, eq, key, record};
 
 fn blue() -> CellValue {
@@ -31,7 +31,7 @@ fn colors() -> TestDb {
 fn records_are_returned_as_get_returns_them() {
     let test = colors();
     let page = test
-        .queries
+        .db
         .query(ReadTarget::Head, QueryOp::filter(eq("color", blue())))
         .result
         .unwrap();
@@ -57,7 +57,7 @@ fn records_come_in_creation_order() {
 fn projection_selects_cells_as_get_does() {
     let test = colors();
     let op = QueryOp::filter(eq("color", blue())).only(["size", "note", "missing"]);
-    let page = test.queries.query(ReadTarget::Head, op).result.unwrap();
+    let page = test.db.query(ReadTarget::Head, op).result.unwrap();
     let get = |n| {
         let op = RecordOp::get(key(n)).only(["size", "note", "missing"]);
         test.db.get(ReadTarget::Head, op).unwrap()
@@ -65,7 +65,7 @@ fn projection_selects_cells_as_get_does() {
     assert_eq!(page.records, [get(1), get(3)]);
 
     let empty = QueryOp::filter(eq("color", blue())).only(Vec::<&str>::new());
-    let page = test.queries.query(ReadTarget::Head, empty).result.unwrap();
+    let page = test.db.query(ReadTarget::Head, empty).result.unwrap();
     assert!(page.records.iter().all(|record| record.cells.is_empty()));
     assert_eq!(page.records.len(), 2);
 }
@@ -73,7 +73,7 @@ fn projection_selects_cells_as_get_does() {
 #[test]
 fn total_matched_only_when_asked() {
     let test = colors();
-    let query = |op| test.queries.query(ReadTarget::Head, op).result.unwrap();
+    let query = |op| test.db.query(ReadTarget::Head, op).result.unwrap();
     assert_eq!(
         query(QueryOp::filter(eq("color", blue()))).total_matched,
         None
@@ -88,7 +88,7 @@ fn pages_report_the_commit_they_read() {
     test.create([record(key(4), &[("color", blue())])]);
     let head = test.db.head().unwrap();
     let page = test
-        .queries
+        .db
         .query(ReadTarget::Head, QueryOp::filter(eq("color", blue())))
         .result
         .unwrap();
@@ -101,14 +101,10 @@ fn the_head_commit_can_be_named() {
     let test = colors();
     let head = test.db.head().unwrap();
     let op = QueryOp::filter(eq("color", blue()));
-    let page = test
-        .queries
-        .query(ReadTarget::Commit(head), op)
-        .result
-        .unwrap();
+    let page = test.db.query(ReadTarget::Commit(head), op).result.unwrap();
     assert_eq!(page.evaluated_at, head);
     let count = test
-        .queries
+        .db
         .count(
             ReadTarget::Commit(head),
             CountOp::filter(eq("color", blue())),
@@ -124,7 +120,7 @@ fn other_commits_are_unavailable() {
     let head = test.db.head().unwrap();
     let older = CommitId::new(head.get() - 1);
     let result = test
-        .queries
+        .db
         .query(
             ReadTarget::Commit(older),
             QueryOp::filter(eq("color", blue())),
@@ -145,12 +141,12 @@ fn branches_are_not_queried() {
         ReadTarget::Branch(BranchId::new(u64::MAX)),
     ] {
         let query = test
-            .queries
+            .db
             .query(target, QueryOp::filter(eq("color", blue())))
             .result;
         assert!(matches!(query, Err(QueryError::InvalidQuery { .. })));
         let count = test
-            .queries
+            .db
             .count(target, CountOp::filter(eq("color", blue())))
             .result;
         assert!(matches!(count, Err(QueryError::InvalidQuery { .. })));
@@ -178,7 +174,7 @@ fn a_target_error_comes_before_admission() {
     let branch = test.db.begin().unwrap();
     let invalid = eq("not valid", blue());
     let result = test
-        .queries
+        .db
         .query(ReadTarget::Branch(branch), QueryOp::filter(invalid))
         .result;
     assert!(matches!(result, Err(QueryError::InvalidQuery { .. })));
@@ -196,7 +192,7 @@ fn unbuilt_parts_are_not_implemented() {
         (filter().limit(1), "query: limit"),
         (filter().offset(1), "query: offset"),
     ] {
-        let result = test.queries.query(ReadTarget::Head, op).result;
+        let result = test.db.query(ReadTarget::Head, op).result;
         assert!(
             matches!(result, Err(QueryError::NotImplemented { operation }) if operation == part),
             "{part}"
@@ -208,10 +204,10 @@ fn unbuilt_parts_are_not_implemented() {
 fn the_budget_is_accepted_but_not_enforced_yet() {
     let test = colors();
     let op = QueryOp::filter(eq("color", blue())).budget(Budget::Limited(0));
-    let page = test.queries.query(ReadTarget::Head, op).result.unwrap();
+    let page = test.db.query(ReadTarget::Head, op).result.unwrap();
     assert_eq!(page.records.len(), 2);
     let op = CountOp::filter(eq("color", blue())).budget(Budget::Limited(0));
-    assert_eq!(test.queries.count(ReadTarget::Head, op).result.unwrap(), 2);
+    assert_eq!(test.db.count(ReadTarget::Head, op).result.unwrap(), 2);
 }
 
 #[test]

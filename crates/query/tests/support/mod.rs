@@ -1,39 +1,30 @@
-//! A real in-memory database: records are written and committed through the
-//! public API, so the index is built by seal exactly as in production, and
-//! queries read the same store.
+//! A real in-memory database, used only through the public API: records are
+//! written and committed, so the index is built by seal exactly as in
+//! production, and then queried.
 
 #![allow(dead_code)] // Each test crate uses a different subset.
 
 use golemdb_api::{
-    Api, CellLimits, Database, Genesis, HashAlgorithm, OpenConfig, ReadTarget, RecordKey, RecordOp,
-    op,
+    Api, CellLimits, CountOp, Database, Filter, Genesis, HashAlgorithm, QueryError, QueryOp,
+    ReadTarget, RecordKey, RecordOp, op,
 };
-use golemdb_branch::Branches;
 use golemdb_cells::{CellNameRef, CellValue};
-use golemdb_merkle::Keccak256Hasher;
-use golemdb_query::{CountOp, Filter, Queries, QueryError, QueryOp};
-use golemdb_storage::MemoryStore;
 use proptest::prelude::*;
 
 pub struct TestDb {
     pub db: Database,
-    pub queries: Queries<MemoryStore, Keccak256Hasher>,
 }
 
 impl Default for TestDb {
     fn default() -> Self {
-        let store = MemoryStore::new();
         let limits = CellLimits {
             max_cell_name_len: 32,
             max_str_len: 4096,
             max_bytes_len: 64,
         };
         let genesis = Genesis::new(HashAlgorithm::Keccak256, limits);
-        let db = Database::from_store(store.clone(), &OpenConfig::new(genesis)).expect("genesis");
-        let branches = Branches::new(store, Keccak256Hasher).expect("initialized head");
         Self {
-            db,
-            queries: Queries::new(branches),
+            db: Database::open_memory(&genesis).expect("genesis"),
         }
     }
 }
@@ -51,14 +42,14 @@ impl TestDb {
     /// Keys of the records matching `filter` at the head, in query order.
     pub fn keys(&self, filter: Filter) -> Result<Vec<RecordKey>, QueryError> {
         let page = self
-            .queries
+            .db
             .query(ReadTarget::Head, QueryOp::filter(filter))
             .result?;
         Ok(page.records.into_iter().map(|record| record.key).collect())
     }
 
     pub fn count(&self, filter: Filter) -> Result<u64, QueryError> {
-        self.queries
+        self.db
             .count(ReadTarget::Head, CountOp::filter(filter))
             .result
     }

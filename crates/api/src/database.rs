@@ -3,13 +3,15 @@ use std::sync::Arc;
 
 use golemdb_branch::Branches;
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher};
+use golemdb_query::Queries;
 use golemdb_record::Records;
 use golemdb_storage::Store;
 
 use crate::{
-    Api, ApiError, BranchId, BranchInfo, CommitId, Genesis, HashAlgorithm, ImmutableDataAddress,
-    ImmutableDataKey, ImmutableDataOrdinal, ImmutableDataRow, OpenConfig, OpenInfo, OpenResult,
-    ReadTarget, Record, RecordKey, RecordOp, Result, SealInfo, op,
+    Api, ApiError, BranchId, BranchInfo, CommitId, CountOp, Genesis, HashAlgorithm,
+    ImmutableDataAddress, ImmutableDataKey, ImmutableDataOrdinal, ImmutableDataRow, Metered,
+    OpenConfig, OpenInfo, OpenResult, QueryOp, QueryPage, ReadTarget, Record, RecordKey, RecordOp,
+    Result, SealInfo, op,
 };
 
 /// Cloneable public database handle. Clones share one engine and branch registry;
@@ -102,6 +104,12 @@ impl Api for Database {
     fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()> {
         self.inner.delete(branch, operation)
     }
+    fn query(&self, target: ReadTarget, operation: QueryOp) -> Metered<QueryPage> {
+        self.inner.query(target, operation)
+    }
+    fn count(&self, target: ReadTarget, operation: CountOp) -> Metered<u64> {
+        self.inner.count(target, operation)
+    }
     fn head(&self) -> Result<CommitId> {
         self.inner.head()
     }
@@ -159,18 +167,24 @@ impl Api for Database {
     }
 }
 
-/// Both layers reference the same branch registry. Business rules, locking, and
-/// transaction boundaries remain in record and branch, not in this adapter.
+/// All layers reference the same branch registry. Business rules, locking, and
+/// transaction boundaries remain in record, query and branch, not in this adapter.
 struct Inner<S, H> {
     branches: Branches<S, H>,
     records: Records<S, H>,
+    queries: Queries<S, H>,
 }
 
 impl<S: Store, H: HashProvider> Inner<S, H> {
     fn new(store: S, hasher: H) -> OpenResult<Self> {
         let branches = Branches::new(store, hasher)?;
         let records = Records::new(branches.clone());
-        Ok(Self { branches, records })
+        let queries = Queries::new(branches.clone());
+        Ok(Self {
+            branches,
+            records,
+            queries,
+        })
     }
 }
 
@@ -192,6 +206,12 @@ impl<S: Store, H: HashProvider> Api for Inner<S, H> {
         self.records
             .delete(branch, operation.record_key())
             .map_err(Into::into)
+    }
+    fn query(&self, target: ReadTarget, operation: QueryOp) -> Metered<QueryPage> {
+        self.queries.query(target, operation)
+    }
+    fn count(&self, target: ReadTarget, operation: CountOp) -> Metered<u64> {
+        self.queries.count(target, operation)
     }
     fn head(&self) -> Result<CommitId> {
         self.branches.head().map_err(Into::into)

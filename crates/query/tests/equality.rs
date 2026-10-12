@@ -6,10 +6,9 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use golemdb_api::{Api, RecordOp};
+use golemdb_api::{Api, QueryError, RecordOp};
 use golemdb_cells::{CellType, CellValue};
 use golemdb_index::TermError;
-use golemdb_query::QueryError;
 use proptest::prelude::*;
 use support::{TestDb, eq, key, record, small_value};
 

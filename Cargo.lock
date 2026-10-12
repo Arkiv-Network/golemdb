@@ -508,6 +508,7 @@ dependencies = [
  "golemdb-cells",
  "golemdb-index",
  "golemdb-merkle",
+ "golemdb-query",
  "golemdb-record",
  "golemdb-storage",
  "golemdb-storage-mdbx",
