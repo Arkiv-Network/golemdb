@@ -1,6 +1,6 @@
 # API priorities
 
-Where to spend effort on the Golem DB API over the next weeks, and why. A working document for
+Where to spend effort on the GolemDB API over the next weeks, and why. A working document for
 discussion, not a spec.
 
 Status: draft, 2026-10-09.
@@ -64,7 +64,7 @@ and reported by the database call as `InvalidArgument`, naming the step. This is
 metering spec asks for: D2 charges input errors found while building a request as admission. A host
 translating untrusted input, such as Arkiv, then gets every input error the same way, an error
 together with a receipt, and has one place to charge. With fail-fast steps, builder errors would
-happen in the host's code before Golem DB is called, with no receipt.
+happen in the host's code before GolemDB is called, with no receipt.
 
 ## Priority 2: remaining format changes and small fixes
 

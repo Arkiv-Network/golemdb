@@ -120,7 +120,7 @@ The metering layer itself (property 7 in §1) is out of scope here: it is specif
 - **[11. Commit Immutable-Data Segments](#11-commit-immutable-data-segments)**
   - [Why Cells Are the Wrong Shape](#why-cells-are-the-wrong-shape)
   - [The Model](#the-model) · [On-Disk Form](#on-disk-form)
-  - [Writing Against a Sealed Commit](#writing-against-a-sealed-commit)
+  - [Appending to a Branch](#appending-to-a-branch)
   - [The System Segment](#the-system-segment)
   - [Operations](#operations)
   - [Genesis Declaration](#genesis-declaration)
@@ -2797,20 +2797,30 @@ The intended implementation is **reth's NippyJar**, the format behind its static
 
 > **Open — are columns typed?** Moved to [Open Questions](#open-questions), D17.
 
-### Writing Against a Sealed Commit
+### Appending to a Branch
 
-Immutable-data rows are appended in the window `seal` opens ([§10](#sealing-a-branch)) — after the roots
-are computed, before anything is durable:
+Immutable-data rows can be appended to a branch at any time before `commit`: while the branch is
+open, alongside record writes, and after `seal`, when its state is frozen
+([§10](#sealing-a-branch)):
 
 ```
-begin(at?)  → BranchHandle       mutable overlay
-  … writes, checkpoints, rollbacks …
-seal(b)     → SealedCommit       overlay frozen; roots computed; nothing durable
-  … immutable_data_append(b, seg, row) …    may reference stateRoot
+begin(at?)  → BranchHandle       open: record writes and appends, checkpoints, rollbacks
+seal(b)     → SealedCommit       state frozen, roots computed, nothing durable
+  … immutable_data_append(b, seg, key?, row) …    appends only; may reference stateRoot
 commit(b)   → CommitId           fsync segments, MDBX txn, head advances
 ```
 
-Three properties of that window are load-bearing here. The head does not move until `commit`, so a
+- **Before `seal`,** an append belongs to the current frame like any write. `rollback()` drops the
+  rows the undone frame staged: a checkpoint records each segment's count of staged rows, and
+  rollback truncates the staged run to it. Rows are staged, not written, so no pre-image is needed,
+  and rollback stays uncharged.
+- **After `seal`,** only appends are allowed. This is what lets a row contain the root of its own
+  commit, which `seal` computes, such as a block header carrying the state root. Rows are outside
+  the commitment, so appending them never changes the sealed roots.
+- **Staged rows are not readable** until `commit`: `immutable_data_get` and the other reads see
+  committed rows only.
+
+Three properties of the window between `seal` and `commit` are load-bearing here. The head does not move until `commit`, so a
 crash between the two loses only the window. A sealed branch that loses the first-committer-wins race
 takes its staged rows with it. And `commit` without a prior `seal` implies one, so a caller storing
 no immutable data never sees the split.
@@ -2827,7 +2837,7 @@ This is load-bearing rather than an optimisation. Several branches may be sealed
 
 - **The ordinal `immutable_data_append` returns is provisional** — `mark + i`, valid only if this branch commits. Consistent with how branch handles already behave: a branch that loses the race was never real.
 - **A losing branch leaves no trace in the segment file.** Truncation is therefore only ever needed for crash recovery and `rewind`, never to clean up after a lost race.
-- **A commit's immutable-data rows are held in memory between `seal` and `commit`**, which bounds how much one commit can carry by RAM rather than by disk.
+- **A commit's immutable-data rows are held in memory until `commit`**, which bounds how much one commit can carry by RAM rather than by disk.
 
 ### The System Segment
 
@@ -2902,7 +2912,7 @@ That is deliberate. A `one-per-commit` declaration would be marginally faster �
 
 | op                        | signature                      | notes                                   |
 | ------------------------- | ------------------------------ | --------------------------------------- |
-| `immutable_data_append`   | `(b, seg, key?, row) → ordinal` | sealed branch only; staged, provisional |
+| `immutable_data_append`   | `(b, seg, key?, row) → ordinal` | open or sealed branch; staged, provisional |
 | `immutable_data_get`      | `(seg, ordinal \| key) → row`  |                                         |
 | `immutable_data_range_of` | `(seg, commitNr) → [from, to)` | reads the system segment                |
 | `immutable_data_rows_of`  | `(seg, commitNr) → [row]`      | the whole run, one contiguous read      |

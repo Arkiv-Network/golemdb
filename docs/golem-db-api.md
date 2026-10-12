@@ -754,7 +754,8 @@ and computes `StateRoot` and `IndexRoot`, without opening a store writer. The `c
 returns is provisional, since another branch may still win. A repeated seal returns the cached
 result after checking the head again. A failed seal leaves the branch open and unchanged.
 
-A sealed branch rejects writes, `checkpoint` and `rollback` with `Sealed`. `get`,
+A sealed branch rejects record writes, `checkpoint` and `rollback` with `Sealed`; immutable-data
+appends remain allowed. `get`,
 `branch_info`, `commit` and `discard` remain available.
 
 **Commit.** One store writer; the head is checked again inside it before any row is written;
@@ -788,8 +789,12 @@ pub enum ImmutableDataAddress { Ordinal(ImmutableDataOrdinal), Key(ImmutableData
 
 Intended contract, as documented on the trait:
 
-- `immutable_data_append(branch, segment, key, row)` stages a row on a **sealed** branch and
-  returns a provisional ordinal. A key, if given, enters the segment's key index at commit,
+- `immutable_data_append(branch, segment, key, row)` stages a row on an **open or sealed**
+  branch and returns a provisional ordinal. Before `seal`, a rollback drops the rows staged in
+  the undone frame; after `seal`, appends are the only writes allowed, so a row can contain the
+  commit's own state root. Staged rows are readable only after `commit` (design §11,
+  [Appending to a Branch](golem-db-design.md#appending-to-a-branch)). Both implementations still
+  document "sealed branch only" on the trait. A key, if given, enters the segment's key index at commit,
   together with the row. Keeping keys unique is the host's job: a repeated key points the
   index at the newest row, older rows stay readable by ordinal, and an append never fails
   because of its key (design §11, [Row keys](golem-db-design.md#row-keys)).
@@ -821,7 +826,7 @@ internal failures keep their causes as sources.
 | `InvalidArgument { message, source }` | a builder problem, or a name or value over a genesis limit |
 | `HandleInvalid` | an unknown, consumed or stale branch handle, on any call including `commit` |
 | `Conflict` | reserved for an optimistic-concurrency mismatch, should record versioning be added ([Open items](#open-items)); not raised today |
-| `Sealed` | a write, checkpoint or rollback on a sealed branch; the handle stays valid |
+| `Sealed` | a record write, checkpoint or rollback on a sealed branch; the handle stays valid |
 | `NoFrameToRollback` | rollback with every frame already rolled back |
 | `CommitUnavailable { requested, head }` | `get` on a commit other than the head |
 | `StoreFull` | the store reached its size cap; the commit wrote nothing. Environmental, not deterministic: it must never become part of a result other nodes see |

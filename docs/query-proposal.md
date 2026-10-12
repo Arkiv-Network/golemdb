@@ -11,10 +11,10 @@ crate `golemdb-query`; see [Staging](#staging).
 
 ### Principles
 
-1. **No query optimizer in v1.** Golem DB does not choose how to run a query. The caller knows its
+1. **No query optimizer in v1.** GolemDB does not choose how to run a query. The caller knows its
    data and optimizes by how it writes the query; a host or SDK may rewrite a query before
    submitting it, off the consensus path.
-2. **Golem DB executes the query as written.** The written query is the execution plan.
+2. **GolemDB executes the query as written.** The written query is the execution plan.
 3. **Query execution is deterministic.** Every node reaches the same result, the same cost and the
    same stopping point.
 4. **Every query runs against a budget.** No query obtains more work than its budget pays for.
