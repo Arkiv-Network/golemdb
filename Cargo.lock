@@ -513,7 +513,7 @@ dependencies = [
  "golemdb-storage-mdbx",
  "serde",
  "serde-saphyr",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]

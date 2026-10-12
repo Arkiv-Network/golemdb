@@ -14,19 +14,19 @@
 //! use golemdb_index::{Index, IndexTerm, PostingChange};
 //! use golemdb_merkle::{Keccak256Hasher, RootRef};
 //! use golemdb_query::{IndexSource, Predicate, Query, execute};
-//! use golemdb_storage::{Database, MemoryDatabase, WriteTransaction};
+//! use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 //!
-//! let db = MemoryDatabase::new();
+//! let store = MemoryStore::new();
 //! let hasher = Keccak256Hasher;
 //! let index = Index::new(&hasher);
 //! let term = IndexTerm::new("color", CellType::Str, b"blue")?;
-//! let mut tx = db.begin_write()?;
+//! let mut tx = store.begin_write()?;
 //! index.apply(&mut tx, RootRef::Empty, [
 //!     PostingChange::Add { term, record_id: 42 },
 //! ])?;
 //! tx.commit()?;
 //!
-//! let read = db.begin_read()?;
+//! let read = store.begin_read()?;
 //! let query = Query::from(Predicate::eq("color", "blue"));
 //! let ids = execute(&IndexSource::new(&index, &read), &query)?;
 //! assert_eq!(ids.iter().collect::<Vec<_>>(), [42]);

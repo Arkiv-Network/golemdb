@@ -3,7 +3,7 @@ mod support;
 use golemdb_index::TermError;
 use golemdb_query::{Predicate, QueryError, Value};
 use proptest::prelude::*;
-use support::{Store, add, any_value, remove, small_value, written_term};
+use support::{TestIndex, add, any_value, remove, small_value, written_term};
 
 fn eq(field: &str, value: Value) -> Predicate {
     Predicate::eq(field, value)
@@ -83,8 +83,8 @@ fn id(i: usize) -> u64 {
 #[test]
 fn every_type_round_trips_through_the_index() {
     let samples = samples();
-    let mut store = Store::default();
-    store.apply(
+    let mut index = TestIndex::default();
+    index.apply(
         samples
             .iter()
             .enumerate()
@@ -92,7 +92,7 @@ fn every_type_round_trips_through_the_index() {
     );
     for (i, value) in samples.iter().enumerate() {
         assert_eq!(
-            store.query(eq("f", value.clone())).unwrap(),
+            index.query(eq("f", value.clone())).unwrap(),
             [id(i)],
             "{value:?}"
         );
@@ -101,8 +101,8 @@ fn every_type_round_trips_through_the_index() {
 
 #[test]
 fn values_never_stored_match_nothing() {
-    let mut store = Store::default();
-    store.apply(samples().iter().map(|value| add(1, "f", value)));
+    let mut index = TestIndex::default();
+    index.apply(samples().iter().map(|value| add(1, "f", value)));
     for value in [
         Value::Str("b".into()),
         Value::U32(1),
@@ -112,11 +112,11 @@ fn values_never_stored_match_nothing() {
         Value::Timestamp64(0),
     ] {
         assert!(
-            store.query(eq("f", value.clone())).unwrap().is_empty(),
+            index.query(eq("f", value.clone())).unwrap().is_empty(),
             "{value:?}"
         );
     }
-    assert!(store.query(eq("g", Value::Bool(true))).unwrap().is_empty());
+    assert!(index.query(eq("g", Value::Bool(true))).unwrap().is_empty());
 }
 
 #[test]
@@ -136,62 +136,62 @@ fn postings_span_container_boundaries() {
     ];
     let blue = Value::from("blue");
     let red = Value::from("red");
-    let mut store = Store::default();
-    store.apply(ids.iter().map(|&id| add(id, "color", &blue)));
-    store.apply(ids.iter().map(|&id| add(id ^ 1, "color", &red)));
-    assert_eq!(store.query(eq("color", blue)).unwrap(), ids);
+    let mut index = TestIndex::default();
+    index.apply(ids.iter().map(|&id| add(id, "color", &blue)));
+    index.apply(ids.iter().map(|&id| add(id ^ 1, "color", &red)));
+    assert_eq!(index.query(eq("color", blue)).unwrap(), ids);
     let mut reds: Vec<u64> = ids.iter().map(|id| id ^ 1).collect();
     reds.sort_unstable();
-    assert_eq!(store.query(eq("color", red)).unwrap(), reds);
+    assert_eq!(index.query(eq("color", red)).unwrap(), reds);
 }
 
 #[test]
 fn removed_postings_stop_matching() {
     let blue = Value::from("blue");
-    let mut store = Store::default();
-    store.apply([1, 2, 3, 70_000].map(|id| add(id, "color", &blue)));
-    store.apply([remove(2, "color", &blue)]);
+    let mut index = TestIndex::default();
+    index.apply([1, 2, 3, 70_000].map(|id| add(id, "color", &blue)));
+    index.apply([remove(2, "color", &blue)]);
     assert_eq!(
-        store.query(eq("color", blue.clone())).unwrap(),
+        index.query(eq("color", blue.clone())).unwrap(),
         [1, 3, 70_000]
     );
 
     // The last posting going removes the term itself.
-    store.apply([1, 3, 70_000].map(|id| remove(id, "color", &blue)));
-    assert!(store.query(eq("color", blue.clone())).unwrap().is_empty());
+    index.apply([1, 3, 70_000].map(|id| remove(id, "color", &blue)));
+    assert!(index.query(eq("color", blue.clone())).unwrap().is_empty());
 
-    store.apply([add(9, "color", &blue)]);
-    assert_eq!(store.query(eq("color", blue)).unwrap(), [9]);
+    index.apply([add(9, "color", &blue)]);
+    assert_eq!(index.query(eq("color", blue)).unwrap(), [9]);
 }
 
 #[test]
 fn one_record_under_many_terms() {
-    let mut store = Store::default();
-    store.apply([
+    let mut index = TestIndex::default();
+    index.apply([
         add(9, "a", &Value::I32(1)),
         add(9, "ab", &Value::I32(1)),
         add(9, "b", &Value::U32(1)),
         add(10, "a", &Value::I32(2)),
     ]);
-    assert_eq!(store.query(eq("a", Value::I32(1))).unwrap(), [9]);
-    assert_eq!(store.query(eq("ab", Value::I32(1))).unwrap(), [9]);
-    assert_eq!(store.query(eq("b", Value::U32(1))).unwrap(), [9]);
-    assert!(store.query(eq("b", Value::I32(1))).unwrap().is_empty());
-    assert_eq!(store.query(eq("a", Value::I32(2))).unwrap(), [10]);
+    assert_eq!(index.query(eq("a", Value::I32(1))).unwrap(), [9]);
+    assert_eq!(index.query(eq("ab", Value::I32(1))).unwrap(), [9]);
+    assert_eq!(index.query(eq("b", Value::U32(1))).unwrap(), [9]);
+    assert!(index.query(eq("b", Value::I32(1))).unwrap().is_empty());
+    assert_eq!(index.query(eq("a", Value::I32(2))).unwrap(), [10]);
 }
 
 #[test]
 fn invalid_predicates_are_errors_not_empty_results() {
-    let store = Store::default();
+    let index = TestIndex::default();
     assert!(matches!(
-        store.query(eq("not valid", Value::I32(1))),
+        index.query(eq("not valid", Value::I32(1))),
         Err(QueryError::InvalidPredicate {
             source: TermError::InvalidName,
             ..
         })
     ));
     assert!(matches!(
-        store.query(eq("f", Value::F32(f32::NAN))),
+        index.query(eq("f", Value::F32(f32::NAN))),
         Err(QueryError::InvalidPredicate {
             source: TermError::NaN,
             ..
@@ -228,8 +228,8 @@ proptest! {
             1..16,
         ),
     ) {
-        let mut store = Store::default();
-        store.apply(records.iter().flat_map(|(&id, cells)| {
+        let mut index = TestIndex::default();
+        index.apply(records.iter().flat_map(|(&id, cells)| {
             cells.iter().map(move |(field, value)| add(id, field, value))
         }));
         let stored: Vec<(&str, &Value)> = records
@@ -252,7 +252,7 @@ proptest! {
                 .filter(|(_, cells)| cells.get(field) == Some(&value))
                 .map(|(&id, _)| id)
                 .collect();
-            prop_assert_eq!(store.query(eq(field, value)).unwrap(), expected);
+            prop_assert_eq!(index.query(eq(field, value)).unwrap(), expected);
         }
     }
 }

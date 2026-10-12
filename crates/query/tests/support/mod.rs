@@ -10,7 +10,7 @@ use golemdb_cells::{CellValue, CellValueRef, encode_float, flip_sign};
 use golemdb_index::{INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange};
 use golemdb_merkle::{Keccak256Hasher, RootRef};
 use golemdb_query::{IndexSource, Query, QueryError, Value, execute};
-use golemdb_storage::{Database, MemoryDatabase, WriteTransaction};
+use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 use proptest::prelude::*;
 
 const HASHER: Keccak256Hasher = Keccak256Hasher;
@@ -64,27 +64,27 @@ pub fn remove(record_id: u64, field: &str, value: &Value) -> PostingChange {
     }
 }
 
-/// A committed index in a [`MemoryDatabase`].
-pub struct Store {
-    db: MemoryDatabase,
+/// A committed index in a [`MemoryStore`].
+pub struct TestIndex {
+    store: MemoryStore,
     index: Index<'static, Keccak256Hasher>,
     root: RootRef<INDEX_TRIE_PATH_BYTES>,
 }
 
-impl Default for Store {
+impl Default for TestIndex {
     fn default() -> Self {
         Self {
-            db: MemoryDatabase::new(),
+            store: MemoryStore::new(),
             index: Index::new(&HASHER),
             root: RootRef::Empty,
         }
     }
 }
 
-impl Store {
+impl TestIndex {
     /// Apply one batch and commit it.
     pub fn apply(&mut self, changes: impl IntoIterator<Item = PostingChange>) {
-        let mut tx = self.db.begin_write().expect("write transaction");
+        let mut tx = self.store.begin_write().expect("write transaction");
         self.root = self
             .index
             .apply(&mut tx, self.root, changes)
@@ -95,7 +95,7 @@ impl Store {
 
     /// Run `query` against one committed read snapshot.
     pub fn query(&self, query: impl Into<Query>) -> Result<Vec<u64>, QueryError> {
-        let tx = self.db.begin_read().expect("read transaction");
+        let tx = self.store.begin_read().expect("read transaction");
         let ids = execute(&IndexSource::new(&self.index, &tx), &query.into())?;
         Ok(ids.iter().collect())
     }
