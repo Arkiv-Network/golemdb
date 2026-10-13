@@ -2,6 +2,7 @@ use std::error::Error;
 
 use golemdb_branch::BranchError;
 use golemdb_cells::{CellNameError, CellValueParseError};
+use golemdb_query::QueryError;
 use golemdb_record::RecordError;
 
 use crate::CommitId;
@@ -27,6 +28,9 @@ pub enum ApiError {
         #[source]
         source: Option<Box<dyn Error + Send + Sync>>,
     },
+    /// A query that cannot run as written, e.g. one targeting a branch.
+    #[error("invalid query: {reason}")]
+    InvalidQuery { reason: &'static str },
     #[error("branch handle is unknown, consumed, or invalidated")]
     HandleInvalid,
     #[error("commit lost the publication race")]
@@ -93,6 +97,24 @@ impl From<RecordError> for ApiError {
             }
             RecordError::Branch(error) => error.into(),
             error => Self::internal(error),
+        }
+    }
+}
+
+impl From<QueryError> for ApiError {
+    fn from(error: QueryError) -> Self {
+        match error {
+            QueryError::InvalidArgument { field, source } => Self::InvalidArgument {
+                message: format!("invalid filter on cell `{field}`"),
+                source: Some(Box::new(source)),
+            },
+            QueryError::InvalidQuery { reason } => Self::InvalidQuery { reason },
+            QueryError::NotImplemented { operation } => Self::NotImplemented { operation },
+            QueryError::CommitUnavailable { requested, head } => {
+                Self::CommitUnavailable { requested, head }
+            }
+            QueryError::Internal(source) if store_full(source.as_ref()) => Self::StoreFull,
+            QueryError::Internal(source) => Self::Internal { source },
         }
     }
 }

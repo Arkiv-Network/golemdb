@@ -40,7 +40,7 @@
 //!     field: CellNameRef::parse_user(b"color", 32)?.into(),
 //!     value: CellValue::from_str("blue"),
 //! };
-//! let page = queries.query(ReadTarget::Head, QueryOp::filter(filter)).result?;
+//! let page = queries.query(ReadTarget::Head, QueryOp::filter(filter))?;
 //! assert_eq!(page.records, [db.get(ReadTarget::Head, RecordOp::get(key))?]);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -54,4 +54,4 @@ mod source;
 
 pub use error::{QueryError, Result};
 pub use queries::Queries;
-pub use query_op::{Budget, CountOp, Direction, Filter, Metered, QueryOp, QueryPage, SortKey};
+pub use query_op::{Budget, CountOp, Direction, Filter, QueryOp, QueryPage, SortKey};

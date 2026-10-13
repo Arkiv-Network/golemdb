@@ -60,7 +60,7 @@ pub use types::SealInfo;
 pub use golemdb_branch::{BranchId, BranchInfo, CommitId};
 pub use golemdb_cells::{CellKind, CellName, CellNameRef, CellType, CellValue, FloatWidth, Width};
 pub use golemdb_query::{
-    Budget, CountOp, Direction, Filter, Metered, QueryError, QueryOp, QueryPage, SortKey,
+    Budget, CountOp, Direction, Filter, QueryError, QueryOp, QueryPage, SortKey,
 };
 pub use golemdb_record::{ReadTarget, Record, RecordKey};
 
@@ -87,11 +87,11 @@ pub trait Api {
     /// projected as `get` projects. Matching and materialization share one
     /// snapshot. Branch targets are invalid; explicit non-head commits are not
     /// yet supported; sort, limit and offset return NotImplemented.
-    fn query(&self, target: ReadTarget, operation: QueryOp) -> Metered<QueryPage>;
+    fn query(&self, target: ReadTarget, operation: QueryOp) -> Result<QueryPage>;
 
     /// The number of committed records matching the operation's filter, under
     /// the same target rules as `query`.
-    fn count(&self, target: ReadTarget, operation: CountOp) -> Metered<u64>;
+    fn count(&self, target: ReadTarget, operation: CountOp) -> Result<u64>;
 
     // Branch lifecycle. IDs are valid only for their issuing engine.
     fn head(&self) -> Result<CommitId>;

@@ -12,7 +12,7 @@ use golemdb_record::{ReadTarget, committed_snapshot, read_committed_by_id};
 use golemdb_storage::Store;
 
 use crate::{
-    CountOp, Filter, Metered, QueryError, QueryOp, QueryPage, Result, eval::match_set, plan::Plan,
+    CountOp, Filter, QueryError, QueryOp, QueryPage, Result, eval::match_set, plan::Plan,
     source::IndexSource,
 };
 
@@ -38,17 +38,13 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
     /// The records matching `op`'s filter, in record ID order, projected as
     /// `get` projects. Sort, limit and offset return `NotImplemented` for now,
     /// and the budget is not enforced yet.
-    pub fn query(&self, target: ReadTarget, op: QueryOp) -> Metered<QueryPage> {
-        Metered {
-            result: self.run_query(target, op),
-        }
+    pub fn query(&self, target: ReadTarget, op: QueryOp) -> Result<QueryPage> {
+        self.run_query(target, op)
     }
 
     /// The size of the filter's match set. The budget is not enforced yet.
-    pub fn count(&self, target: ReadTarget, op: CountOp) -> Metered<u64> {
-        Metered {
-            result: self.run_count(target, op),
-        }
+    pub fn count(&self, target: ReadTarget, op: CountOp) -> Result<u64> {
+        self.run_count(target, op)
     }
 
     fn run_query(&self, target: ReadTarget, op: QueryOp) -> Result<QueryPage> {

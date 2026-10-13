@@ -5,7 +5,7 @@
 #![allow(dead_code)] // Each test crate uses a different subset.
 
 use golemdb_api::{
-    Api, CellLimits, CountOp, Database, Filter, Genesis, HashAlgorithm, QueryError, QueryOp,
+    Api, ApiError, CellLimits, CountOp, Database, Filter, Genesis, HashAlgorithm, QueryOp,
     ReadTarget, RecordKey, RecordOp, op,
 };
 use golemdb_cells::{CellNameRef, CellValue};
@@ -40,18 +40,13 @@ impl TestDb {
     }
 
     /// Keys of the records matching `filter` at the head, in query order.
-    pub fn keys(&self, filter: Filter) -> Result<Vec<RecordKey>, QueryError> {
-        let page = self
-            .db
-            .query(ReadTarget::Head, QueryOp::filter(filter))
-            .result?;
+    pub fn keys(&self, filter: Filter) -> Result<Vec<RecordKey>, ApiError> {
+        let page = self.db.query(ReadTarget::Head, QueryOp::filter(filter))?;
         Ok(page.records.into_iter().map(|record| record.key).collect())
     }
 
-    pub fn count(&self, filter: Filter) -> Result<u64, QueryError> {
-        self.db
-            .count(ReadTarget::Head, CountOp::filter(filter))
-            .result
+    pub fn count(&self, filter: Filter) -> Result<u64, ApiError> {
+        self.db.count(ReadTarget::Head, CountOp::filter(filter))
     }
 }
 

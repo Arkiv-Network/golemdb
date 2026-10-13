@@ -6,7 +6,7 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use golemdb_api::{Api, QueryError, RecordOp};
+use golemdb_api::{Api, ApiError, RecordOp};
 use golemdb_cells::{CellType, CellValue};
 use golemdb_index::TermError;
 use proptest::prelude::*;
@@ -209,20 +209,24 @@ fn one_record_under_many_terms() {
 #[test]
 fn invalid_arguments_are_errors_not_empty_results() {
     let test = TestDb::default();
-    assert!(matches!(
-        test.keys(eq("not valid", CellValue::from_i32(1))),
-        Err(QueryError::InvalidArgument {
-            source: TermError::InvalidName,
+    let cause = |result: Result<_, ApiError>| match result {
+        Err(ApiError::InvalidArgument {
+            source: Some(source),
             ..
-        })
-    ));
-    assert!(matches!(
-        test.count(eq("f", CellValue::from_bytes(b"x"))),
-        Err(QueryError::InvalidArgument {
-            source: TermError::UnsupportedType(CellType::Bytes),
-            ..
-        })
-    ));
+        }) => source.downcast_ref::<TermError>().copied(),
+        _ => None,
+    };
+    assert_eq!(
+        cause(test.keys(eq("not valid", CellValue::from_i32(1)))),
+        Some(TermError::InvalidName)
+    );
+    assert_eq!(
+        cause(
+            test.count(eq("f", CellValue::from_bytes(b"x")))
+                .map(|_| vec![])
+        ),
+        Some(TermError::UnsupportedType(CellType::Bytes))
+    );
 }
 
 const FIELDS: [&str; 3] = ["a", "ab", "b"];
