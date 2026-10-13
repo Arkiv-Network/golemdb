@@ -177,6 +177,39 @@ fn materializes_across_roaring_partition_boundaries() {
     assert_eq!(union.len(), 11);
 }
 
+/// A bitmap of `ids`, assembled from containers as storage would.
+fn bitmap_of(ids: impl IntoIterator<Item = u64>) -> Bitmap {
+    let mut chunks: BTreeMap<u64, Vec<u16>> = BTreeMap::new();
+    for id in ids {
+        let (hi, lo) = path::split(id);
+        chunks.entry(hi).or_default().push(lo);
+    }
+    Bitmap::from_containers(
+        chunks
+            .into_iter()
+            .map(|(p, v)| BitmapContainer::from_values(p, v).unwrap()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn union_merges_overlapping_and_disjoint_containers() {
+    let mut union = bitmap_of([1, 2, 1 << 40]);
+    union |= bitmap_of([2, 3, u64::MAX]);
+    assert_eq!(union, bitmap_of([1, 2, 3, 1 << 40, u64::MAX]));
+}
+
+#[test]
+fn union_with_the_empty_bitmap_is_identity() {
+    let ids = bitmap_of([7, 1 << 32]);
+    let mut left = Bitmap::default();
+    left |= ids.clone();
+    assert_eq!(left, ids);
+    let mut right = ids.clone();
+    right |= Bitmap::default();
+    assert_eq!(right, ids);
+}
+
 #[test]
 fn assembly_rejects_ambiguous_input_and_omits_empties() {
     assert!(matches!(
@@ -209,6 +242,16 @@ proptest! {
         let bitmap = Bitmap::from_containers(chunks.into_iter().map(|(p,v)| BitmapContainer::from_values(p,v).unwrap())).unwrap();
         let expected: BTreeSet<_> = ids.into_iter().collect();
         prop_assert_eq!(bitmap.treemap().iter().collect::<BTreeSet<_>>(), expected);
+    }
+
+    #[test]
+    fn union_is_set_union(
+        a in prop::collection::vec(any::<u64>(), 0..100),
+        b in prop::collection::vec(any::<u64>(), 0..100),
+    ) {
+        let mut union = bitmap_of(a.iter().copied());
+        union |= bitmap_of(b.iter().copied());
+        prop_assert_eq!(union, bitmap_of(a.into_iter().chain(b)));
     }
 
     #[test]

@@ -81,44 +81,71 @@ fn f64_value(value: f64) -> CellValue {
     CellValue::from_f64(value).expect("not NaN")
 }
 
+/// Raw, so tests can also build names the grammar rejects.
+pub fn is_in(field: &str, values: impl IntoIterator<Item = CellValue>) -> Filter {
+    Filter::In {
+        field: CellNameRef::raw(field.as_bytes()).into(),
+        values: values.into_iter().collect(),
+    }
+}
+
+/// Number of types [`typed_value`] picks from.
+const TYPES: u8 = 23;
+
 /// A value from a tiny domain per type, so random records and filters collide.
-/// `n` in `-2..=2` picks the value; the same `n` across types gives values
-/// whose native bits often coincide, which typed leaves must tell apart.
 pub fn small_value() -> impl Strategy<Value = CellValue> {
-    (0u8..23, -2i8..=2).prop_map(|(kind, n)| {
-        let wide = i128::from(n);
-        let byte = n as u8;
-        let mut word = [0u8; 32];
-        word[31] = byte;
-        let float = [f64::NEG_INFINITY, -1.5, -0.0, 0.0, f64::INFINITY][(n + 2) as usize];
-        match kind {
-            0 => CellValue::from_bool(n > 0),
-            1 => CellValue::from_str(["", "a", "ab", "é", "b"][(n + 2) as usize]),
-            2 => CellValue::from_bytes4([byte; 4]),
-            3 => CellValue::from_bytes8([byte; 8]),
-            4 => CellValue::from_bytes16([byte; 16]),
-            5 => CellValue::from_bytes20([byte; 20]),
-            6 => CellValue::from_bytes32(word),
-            7 => CellValue::from_u32(byte.into()),
-            8 => CellValue::from_u64(byte.into()),
-            9 => CellValue::from_u128(byte.into()),
-            10 => CellValue::from_u256_be(word),
-            11 => CellValue::from_i32(n.into()),
-            12 => CellValue::from_i64(n.into()),
-            13 => CellValue::from_i128(wide),
-            14 => {
-                let mut v = [if n < 0 { 0xff } else { 0 }; 32];
-                v[16..].copy_from_slice(&wide.to_be_bytes());
-                CellValue::from_i256_be(v)
-            }
-            15 => CellValue::from_dec32_unscaled(n.into()),
-            16 => CellValue::from_dec64_unscaled(n.into()),
-            17 => CellValue::from_dec128_unscaled(wide),
-            18 => CellValue::from_dec256_unscaled_be(word),
-            19 => f32_value(float as f32),
-            20 => f64_value(float),
-            21 => CellValue::from_date32(n.into()),
-            _ => CellValue::from_timestamp64(n.into()),
-        }
+    (0..TYPES, -2i8..=2).prop_map(|(ty, n)| typed_value(ty, n))
+}
+
+/// `len` values of one random type, from [`small_value`]'s domain, so
+/// duplicates are common.
+pub fn small_values_of_one_type(
+    len: std::ops::Range<usize>,
+) -> impl Strategy<Value = Vec<CellValue>> {
+    (0..TYPES).prop_flat_map(move |ty| {
+        prop::collection::vec(
+            (-2i8..=2).prop_map(move |n| typed_value(ty, n)),
+            len.clone(),
+        )
     })
+}
+
+/// Type `ty` (`0..TYPES`), value `n` in `-2..=2`. The same `n` across types
+/// gives values whose native bits often coincide, which typed leaves must
+/// tell apart.
+fn typed_value(ty: u8, n: i8) -> CellValue {
+    let wide = i128::from(n);
+    let byte = n as u8;
+    let mut word = [0u8; 32];
+    word[31] = byte;
+    let float = [f64::NEG_INFINITY, -1.5, -0.0, 0.0, f64::INFINITY][(n + 2) as usize];
+    match ty {
+        0 => CellValue::from_bool(n > 0),
+        1 => CellValue::from_str(["", "a", "ab", "é", "b"][(n + 2) as usize]),
+        2 => CellValue::from_bytes4([byte; 4]),
+        3 => CellValue::from_bytes8([byte; 8]),
+        4 => CellValue::from_bytes16([byte; 16]),
+        5 => CellValue::from_bytes20([byte; 20]),
+        6 => CellValue::from_bytes32(word),
+        7 => CellValue::from_u32(byte.into()),
+        8 => CellValue::from_u64(byte.into()),
+        9 => CellValue::from_u128(byte.into()),
+        10 => CellValue::from_u256_be(word),
+        11 => CellValue::from_i32(n.into()),
+        12 => CellValue::from_i64(n.into()),
+        13 => CellValue::from_i128(wide),
+        14 => {
+            let mut v = [if n < 0 { 0xff } else { 0 }; 32];
+            v[16..].copy_from_slice(&wide.to_be_bytes());
+            CellValue::from_i256_be(v)
+        }
+        15 => CellValue::from_dec32_unscaled(n.into()),
+        16 => CellValue::from_dec64_unscaled(n.into()),
+        17 => CellValue::from_dec128_unscaled(wide),
+        18 => CellValue::from_dec256_unscaled_be(word),
+        19 => f32_value(float as f32),
+        20 => f64_value(float),
+        21 => CellValue::from_date32(n.into()),
+        _ => CellValue::from_timestamp64(n.into()),
+    }
 }

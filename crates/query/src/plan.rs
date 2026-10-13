@@ -2,6 +2,8 @@
 //! before any state read and resolves its leaves to the index work they need.
 //! Pure; no storage access.
 
+use std::collections::BTreeSet;
+
 use golemdb_cells::{CellName, CellValue};
 use golemdb_index::{IndexTerm, TermError};
 
@@ -12,18 +14,47 @@ use crate::{Filter, QueryError, Result};
 pub(crate) enum Plan {
     /// One term read: the postings of one exact term.
     TermRead(IndexTerm),
+    /// One term read per term, in the set's order (ascending term key, as
+    /// the proposal requires; `IndexTerm` orders by its bytes), each term
+    /// once: the union of their postings.
+    TermReads(BTreeSet<IndexTerm>),
 }
 
 impl TryFrom<&Filter> for Plan {
     type Error = QueryError;
 
     /// Admission: fails with [`QueryError::InvalidArgument`] on a leaf with no
-    /// valid index term.
+    /// valid index term, and with [`QueryError::InvalidQuery`] on a malformed
+    /// leaf (an empty `In`, or one whose values differ in type).
     fn try_from(filter: &Filter) -> Result<Self> {
         match filter {
             Filter::Eq { field, value } => Ok(Self::TermRead(term(field, value)?)),
+            Filter::In { field, values } => Ok(Self::TermReads(terms(field, values)?)),
         }
     }
+}
+
+/// The terms of `field IN values`, sorted by key and deduplicated. Each value
+/// is checked as an `Eq` leaf's would be, then the list's shape.
+fn terms(field: &CellName, values: &[CellValue]) -> Result<BTreeSet<IndexTerm>> {
+    let terms = values
+        .iter()
+        .map(|value| term(field, value))
+        .collect::<Result<BTreeSet<_>>>()?;
+    let [first, rest @ ..] = values else {
+        return Err(QueryError::InvalidQuery {
+            reason: "`In` needs at least one value",
+        });
+    };
+    if rest
+        .iter()
+        .any(|value| value.cell_type() != first.cell_type())
+    {
+        return Err(QueryError::InvalidQuery {
+            reason: "`In` values must all have one type",
+        });
+    }
+    Ok(terms)
 }
 
 /// The term `field = value` is indexed under. The name is decoded as the
@@ -84,6 +115,79 @@ mod tests {
             result,
             Err(QueryError::InvalidArgument {
                 source: TermError::UnsupportedType(CellType::Bytes),
+                ..
+            })
+        ));
+    }
+
+    fn in_terms(values: &[CellValue]) -> Result<BTreeSet<IndexTerm>> {
+        terms(&CellNameRef::raw(b"f").into(), values)
+    }
+
+    fn term_of(value: &CellValue) -> IndexTerm {
+        IndexTerm::for_value("f", value.as_view()).expect("valid term")
+    }
+
+    #[test]
+    fn in_terms_are_sorted_by_key_and_deduplicated() {
+        // The set iterates, and so is read, in term key order, not native
+        // order: -1 sorts before 1 once the sign bit is flipped, and "ab"
+        // sorts before "b".
+        let (minus, plus) = (CellValue::from_i32(-1), CellValue::from_i32(1));
+        let got = in_terms(&[plus.clone(), minus.clone(), plus.clone()]).expect("valid In");
+        assert!(
+            got.iter().eq([&term_of(&minus), &term_of(&plus)]),
+            "{got:?}"
+        );
+
+        let (ab, b) = (CellValue::from_str("ab"), CellValue::from_str("b"));
+        let got = in_terms(&[b.clone(), ab.clone(), b.clone(), ab.clone()]).expect("valid In");
+        assert!(got.iter().eq([&term_of(&ab), &term_of(&b)]), "{got:?}");
+    }
+
+    #[test]
+    fn in_with_one_value_reads_the_eq_term() {
+        let value = CellValue::from_u64(9);
+        assert_eq!(
+            in_terms(std::slice::from_ref(&value)).expect("valid In"),
+            BTreeSet::from([term_of(&value)])
+        );
+    }
+
+    #[test]
+    fn malformed_in_is_an_invalid_query() {
+        for values in [
+            vec![],
+            vec![CellValue::from_i32(1), CellValue::from_i64(1)],
+            vec![
+                CellValue::from_u32(1),
+                CellValue::from_u32(2),
+                CellValue::from_dec32_unscaled(3),
+            ],
+        ] {
+            assert!(
+                matches!(in_terms(&values), Err(QueryError::InvalidQuery { .. })),
+                "{values:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn in_values_are_checked_as_eq_values() {
+        let result = in_terms(&[CellValue::from_str("x"), CellValue::from_bytes(b"x")]);
+        assert!(matches!(
+            result,
+            Err(QueryError::InvalidArgument {
+                source: TermError::UnsupportedType(CellType::Bytes),
+                ..
+            })
+        ));
+        let field: CellName = CellNameRef::raw(b"1bad").into();
+        let result = terms(&field, &[CellValue::from_u32(1)]);
+        assert!(matches!(
+            result,
+            Err(QueryError::InvalidArgument {
+                source: TermError::InvalidName,
                 ..
             })
         ));

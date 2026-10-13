@@ -13,7 +13,12 @@ use golemdb_cells::{CellName, CellValue};
 pub enum Filter {
     /// The cell holds exactly `value`, with its type.
     Eq { field: CellName, value: CellValue },
-    // In     { field: CellName, values: Vec<CellValue> },      // one type
+    /// The cell holds one of `values`. The values must be non-empty and of
+    /// one type; a value given twice is read once.
+    In {
+        field: CellName,
+        values: Vec<CellValue>,
+    },
     // Range  { field: CellName, lower: Bound<CellValue>, upper: Bound<CellValue> },
     // Prefix { field: CellName, prefix: CellValue },           // str, bytesN
     // Exists { field: CellName, ty: CellType },
