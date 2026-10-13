@@ -1,4 +1,4 @@
-use crate::{DEFAULT_MAX_MAP_SIZE, DEFAULT_PAGE_SIZE, MdbxStore, MdbxOptions};
+use crate::{DEFAULT_MAX_MAP_SIZE, DEFAULT_PAGE_SIZE, MdbxOptions, MdbxStore};
 
 const KIB: usize = 1024;
 const MIB: usize = 1024 * KIB;
