@@ -32,12 +32,6 @@ pub enum QueryError {
     Internal(#[source] Box<dyn Error + Send + Sync>),
 }
 
-impl QueryError {
-    pub(crate) fn corruption(message: &'static str) -> Self {
-        Self::Internal(message.into())
-    }
-}
-
 impl From<IndexError> for QueryError {
     fn from(error: IndexError) -> Self {
         Self::Internal(Box::new(error))

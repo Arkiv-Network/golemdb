@@ -3,9 +3,7 @@
 //! Steps never fail. A missing budget, an invalid name, a cap exceeded, or
 //! both `after` and `offset` are reported by the call that runs the request.
 
-use std::collections::BTreeSet;
-
-use golemdb_cells::{CellName, CellNameRef};
+use golemdb_cells::CellName;
 
 use crate::{Budget, Filter, SortKey};
 
@@ -53,14 +51,7 @@ impl QueryOp {
         I: IntoIterator<Item = N>,
         N: AsRef<[u8]>,
     {
-        self.projection = Some(
-            names
-                .into_iter()
-                .map(|name| CellName::from(CellNameRef::raw(name.as_ref())))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-        );
+        self.projection = Some(CellName::projection(names));
         self
     }
 
@@ -110,7 +101,7 @@ impl CountOp {
 
 #[cfg(test)]
 mod tests {
-    use golemdb_cells::{CellType, CellValue, Width};
+    use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
 
     use super::*;
 

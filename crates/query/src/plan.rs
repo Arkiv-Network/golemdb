@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use golemdb_cells::{CellName, CellValue};
-use golemdb_index::{IndexTerm, TermError};
+use golemdb_index::IndexTerm;
 
 use crate::{Filter, QueryError, Result};
 
@@ -34,13 +34,10 @@ impl TryFrom<&Filter> for Plan {
     }
 }
 
-/// The terms of `field IN values`, sorted by key and deduplicated. Each value
-/// is checked as an `Eq` leaf's would be, then the list's shape.
+/// The terms of `field IN values`, sorted by key and deduplicated. The list's
+/// shape is checked first, without building a term, then each value as an
+/// `Eq` leaf's would be.
 fn terms(field: &CellName, values: &[CellValue]) -> Result<BTreeSet<IndexTerm>> {
-    let terms = values
-        .iter()
-        .map(|value| term(field, value))
-        .collect::<Result<BTreeSet<_>>>()?;
     let [first, rest @ ..] = values else {
         return Err(QueryError::InvalidQuery {
             reason: "`In` needs at least one value",
@@ -54,25 +51,24 @@ fn terms(field: &CellName, values: &[CellValue]) -> Result<BTreeSet<IndexTerm>> 
             reason: "`In` values must all have one type",
         });
     }
-    Ok(terms)
+    values.iter().map(|value| term(field, value)).collect()
 }
 
-/// The term `field = value` is indexed under. The name is decoded as the
-/// write path decodes it, and the value's stored bytes are the term's, so
+/// The term `field = value` is indexed under, built as seal builds it, so
 /// queries and writes share one encoding.
 fn term(field: &CellName, value: &CellValue) -> Result<IndexTerm> {
-    std::str::from_utf8(field.as_bytes())
-        .map_err(|_| TermError::InvalidName)
-        .and_then(|name| IndexTerm::for_value(name, value.as_view()))
-        .map_err(|source| QueryError::InvalidArgument {
+    IndexTerm::for_cell_name(field.as_view(), value.as_view()).map_err(|source| {
+        QueryError::InvalidArgument {
             field: field.clone(),
             source,
-        })
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use golemdb_cells::{CellNameRef, CellType};
+    use golemdb_index::TermError;
 
     use super::*;
 
@@ -173,8 +169,20 @@ mod tests {
     }
 
     #[test]
-    fn in_values_are_checked_as_eq_values() {
+    fn in_shape_is_checked_before_any_value() {
+        // A bytes value has no term, but the mixed types are reported first.
         let result = in_terms(&[CellValue::from_str("x"), CellValue::from_bytes(b"x")]);
+        assert!(matches!(result, Err(QueryError::InvalidQuery { .. })));
+        let field: CellName = CellNameRef::raw(b"1bad").into();
+        assert!(matches!(
+            terms(&field, &[]),
+            Err(QueryError::InvalidQuery { .. })
+        ));
+    }
+
+    #[test]
+    fn in_values_are_checked_as_eq_values() {
+        let result = in_terms(&[CellValue::from_bytes(b"x"), CellValue::from_bytes(b"y")]);
         assert!(matches!(
             result,
             Err(QueryError::InvalidArgument {

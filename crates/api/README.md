@@ -434,10 +434,10 @@ the future behavior, including pruning and rewind of key bindings.
 
 All four iterations are implemented: typed cells, the facade contract and builders,
 atomic opening/genesis, and a cloneable `Database` with shared branch state.
-Queries support equality filters with full or projected records and `count`; sort,
-limit and offset return `ApiError::NotImplemented`, and a branch target returns
-`ApiError::InvalidQuery`. Query budgets are accepted but not enforced. Cost receipts, generated keys, OCC, and transport
-serialization are deferred.
+Queries support `Eq` and `In` filters with full or projected records, and `count`.
+Sort, limit and offset return `ApiError::NotImplemented`, and a branch target
+returns `ApiError::InvalidQuery`. Query budgets are accepted but not enforced. Cost
+receipts, generated keys, OCC, and transport serialization are deferred.
 
 The [consumer test](src/tests/consumer.rs) demonstrates a single facade mock and
 commit failure injection behind `Arc<dyn Api + Send + Sync>`. Use scripted mocks

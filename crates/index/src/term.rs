@@ -1,5 +1,5 @@
 use crate::INDEX_LEAF_DOMAIN;
-use golemdb_cells::{CellType, CellValueParseError, CellValueRef, FloatWidth};
+use golemdb_cells::{CellNameRef, CellType, CellValueParseError, CellValueRef, FloatWidth};
 use golemdb_merkle::{Hash, HashProvider};
 use std::{error::Error, fmt};
 
@@ -69,6 +69,17 @@ impl IndexTerm {
         let mut bytes = Self::prefix(name, value.cell_type())?;
         bytes.extend_from_slice(value.value());
         Ok(Self(bytes))
+    }
+
+    /// [`Self::for_value`] for a stored cell name. Names are raw bytes; one
+    /// that is not UTF-8 is [`TermError::InvalidName`], like any name outside
+    /// the grammar. Seal and queries both build terms through here.
+    pub fn for_cell_name(
+        name: CellNameRef<'_>,
+        value: CellValueRef<'_>,
+    ) -> Result<Self, TermError> {
+        let name = std::str::from_utf8(name.as_bytes()).map_err(|_| TermError::InvalidName)?;
+        Self::for_value(name, value)
     }
 
     /// Prefix that confines range/prefix scans to one attribute name and type.
@@ -353,6 +364,22 @@ mod tests {
         assert_eq!(
             IndexTerm::for_value("Price", CellValue::from_bytes(b"x").as_view()),
             Err(TermError::UnsupportedType(CellType::Bytes))
+        );
+    }
+
+    #[test]
+    fn for_cell_name_decodes_the_name_then_is_for_value() {
+        let value = CellValue::from_u32(7);
+        for name in ["Price", "$owner", "1bad", "#key"] {
+            assert_eq!(
+                IndexTerm::for_cell_name(CellNameRef::raw(name.as_bytes()), value.as_view()),
+                IndexTerm::for_value(name, value.as_view()),
+                "{name:?}"
+            );
+        }
+        assert_eq!(
+            IndexTerm::for_cell_name(CellNameRef::raw(&[0xff]), value.as_view()),
+            Err(TermError::InvalidName)
         );
     }
 }

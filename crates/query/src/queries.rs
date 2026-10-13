@@ -1,8 +1,14 @@
 //! [`Queries`]: `query` and `count` over committed state.
 //!
-//! Checks run in the proposal's order: the target first, at no cost; then
-//! admission, validating the request before any state read; then the reads,
-//! all in one storage snapshot.
+//! Checks run in this order:
+//!
+//! 1. `query` only: the parts not built yet (sort, limit, offset) are
+//!    rejected as `NotImplemented`.
+//! 2. A branch target is rejected, without reading state.
+//! 3. Admission validates the whole request, still without reading state.
+//! 4. One storage snapshot is opened. Opening it reads the head, so a `Commit`
+//!    target other than the head fails here, after admission. All reads then
+//!    use this snapshot.
 
 use golemdb_branch::{Branches, CommitId};
 use golemdb_cells::CellReader;
@@ -81,11 +87,8 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
         let records = matches
             .treemap()
             .iter()
-            .map(|id| {
-                read_committed_by_id(&cells, id, projection.as_deref())?
-                    .ok_or_else(|| QueryError::corruption("indexed record has no #key"))
-            })
-            .collect::<Result<_>>()?;
+            .map(|id| read_committed_by_id(&cells, id, projection.as_deref()))
+            .collect::<golemdb_record::Result<_>>()?;
         Ok(QueryPage {
             records,
             total_matched: with_total.then(|| matches.treemap().len()),
@@ -99,8 +102,9 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
     }
 
     /// Shared by `query` and `count`: reject a branch target, admit `filter`,
-    /// then evaluate it in one snapshot at the target commit. The snapshot is
-    /// returned so the caller can keep reading the same state.
+    /// then open one snapshot, check the requested commit against its head,
+    /// and evaluate `filter` there. The snapshot is returned so the caller can
+    /// keep reading the same state.
     fn evaluate(&self, target: ReadTarget, filter: &Filter) -> Result<Evaluation<S::Read<'_>>> {
         let requested = match target {
             ReadTarget::Head => None,

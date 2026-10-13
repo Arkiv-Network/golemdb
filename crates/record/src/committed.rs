@@ -26,22 +26,23 @@ pub fn committed_snapshot<S: Store>(
 
 /// The committed record `id`, as `get` returns it: every cell including
 /// `#key`, or only the projected cells, with missing ones omitted. The key
-/// comes from the record's own `#key` cell; `None` when there is none.
+/// comes from the record's own `#key` cell.
+///
+/// For engine readers that already know `id` names a live record, such as a
+/// query taking IDs from the index. Unlike `get`, it does not check the key's
+/// binding back to `id`. A record with no valid `#key` is
+/// [`RecordError::CorruptState`].
 pub fn read_committed_by_id<R: ReadTransaction>(
     cell_reader: &CellReader<'_, R>,
     id: u64,
     projection: Option<&[CellName]>,
-) -> Result<Option<Record>> {
-    let Some(identity) = cell_reader.get(&CellKey::new(id, reserved::KEY))? else {
-        return Ok(None);
-    };
-    let key = identity
-        .as_bytes32()
-        .filter(|_| !identity.is_indexable())
-        .map(RecordKey)
-        .ok_or(RecordError::CorruptState("invalid #key"))?;
+) -> Result<Record> {
+    let identity = cell_reader
+        .get(&CellKey::new(id, reserved::KEY))?
+        .ok_or(RecordError::CorruptState("record has no #key"))?;
+    let key = state::identity_key(&identity).ok_or(RecordError::CorruptState("invalid #key"))?;
     let cells = read_cells(cell_reader, id, projection)?;
-    Ok(Some(Record { key, cells }))
+    Ok(Record { key, cells })
 }
 
 /// The committed record bound to `key`, after checking the binding against

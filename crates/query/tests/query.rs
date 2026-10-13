@@ -4,7 +4,13 @@ mod support;
 
 use golemdb_api::{Api, BranchId, CommitId, ReadTarget, RecordOp};
 use golemdb_api::{ApiError, Budget, CountOp, QueryOp, SortKey};
-use golemdb_cells::{CellType, CellValue, Width};
+use golemdb_api::{CellLimits, Database, Genesis, HashAlgorithm, OpenConfig};
+use golemdb_branch::{BranchError, Branches};
+use golemdb_cells::system::FIRST_USER_RECORD_ID;
+use golemdb_cells::{CellKey, CellType, CellValue, Width, reserved};
+use golemdb_merkle::Keccak256Hasher;
+use golemdb_record::RecordError;
+use golemdb_storage::MemoryStore;
 use support::{TestDb, eq, key, record};
 
 fn blue() -> CellValue {
@@ -211,4 +217,53 @@ fn count_is_the_size_of_the_match_set() {
         0
     );
     assert_eq!(test.count(eq("size", CellValue::from_u32(3))).unwrap(), 1);
+}
+
+#[test]
+fn a_non_head_commit_is_checked_after_admission() {
+    let test = colors();
+    let head = test.db.head().unwrap();
+    let older = ReadTarget::Commit(CommitId::new(head.get() - 1));
+    let invalid = || eq("not valid", blue());
+    let query = test.db.query(older, QueryOp::filter(invalid()));
+    assert!(matches!(query, Err(ApiError::InvalidArgument { .. })));
+    let count = test.db.count(older, CountOp::filter(invalid()));
+    assert!(matches!(count, Err(ApiError::InvalidArgument { .. })));
+}
+
+#[test]
+fn an_indexed_record_without_its_key_is_internal_corruption() {
+    let store = MemoryStore::new();
+    let limits = CellLimits {
+        max_cell_name_len: 32,
+        max_str_len: 64,
+        max_bytes_len: 64,
+    };
+    let config = OpenConfig::new(Genesis::new(HashAlgorithm::Keccak256, limits));
+    let db = Database::from_store(store.clone(), &config).unwrap();
+    let branch = db.begin().unwrap();
+    db.create(branch, record(key(1), &[("color", blue())]))
+        .unwrap();
+    db.commit(branch).unwrap();
+
+    // Corrupt the committed state below the facade: the record keeps its
+    // indexed attribute but loses its `#key` cell.
+    let branches = Branches::new(store, Keccak256Hasher).unwrap();
+    let corrupt = branches.begin().unwrap();
+    branches
+        .write(corrupt, |cell_writer| {
+            cell_writer.delete(CellKey::new(FIRST_USER_RECORD_ID, reserved::KEY));
+            Ok::<_, BranchError>(())
+        })
+        .unwrap();
+    branches.commit(corrupt).unwrap();
+
+    let result = db.query(ReadTarget::Head, QueryOp::filter(eq("color", blue())));
+    let Err(ApiError::Internal { source }) = result else {
+        panic!("expected Internal, got {result:?}");
+    };
+    assert!(matches!(
+        source.downcast_ref::<RecordError>(),
+        Some(RecordError::CorruptState(_))
+    ));
 }

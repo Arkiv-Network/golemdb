@@ -584,13 +584,9 @@ fn committed_reads_by_id_match_get_and_check_the_commit() {
     for projection in [None, Some(&only_name[..]), Some(&[][..])] {
         assert_eq!(
             crate::read_committed_by_id(&cell_reader, 64, projection).unwrap(),
-            Some(records.get(ReadTarget::Head, KEY, projection).unwrap())
+            records.get(ReadTarget::Head, KEY, projection).unwrap()
         );
     }
-    assert_eq!(
-        crate::read_committed_by_id(&cell_reader, 65, None).unwrap(),
-        None
-    );
 
     assert_eq!(crate::committed_snapshot(&db, Some(head)).unwrap().1, head);
     let older = golemdb_branch::CommitId::new(head.get() - 1);
@@ -598,5 +594,47 @@ fn committed_reads_by_id_match_get_and_check_the_commit() {
         crate::committed_snapshot(&db, Some(older)),
         Err(RecordError::CommitUnavailable { requested, head: got })
             if requested == older && got == head
+    ));
+}
+
+/// Callers pass IDs they know are live, so a record without a valid `#key`
+/// is corrupt state, never an absent record.
+#[test]
+fn committed_reads_by_id_reject_a_missing_or_invalid_key_cell() {
+    let key_cell = CellKey::new(64, reserved::KEY);
+    for bad in [
+        None,
+        Some(text("not a key", false)),
+        Some(field(CellType::FixedBytes(Width::W16), &[0x42; 16])),
+    ] {
+        let (db, branches, records) = setup();
+        let b = branches.begin().unwrap();
+        records.create(b, KEY, values("Alice")).unwrap();
+        branches
+            .write(b, |cell_writer| {
+                match bad.clone() {
+                    Some(value) => cell_writer.put(key_cell.clone(), value),
+                    None => cell_writer.delete(key_cell.clone()),
+                }
+                Ok::<_, RecordError>(())
+            })
+            .unwrap();
+        branches.commit(b).unwrap();
+
+        let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
+        let cell_reader = golemdb_cells::CellReader::new(&tx);
+        assert!(
+            matches!(
+                crate::read_committed_by_id(&cell_reader, 64, None),
+                Err(RecordError::CorruptState(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    let (db, _, _) = setup();
+    let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
+    assert!(matches!(
+        crate::read_committed_by_id(&golemdb_cells::CellReader::new(&tx), 64, None),
+        Err(RecordError::CorruptState("record has no #key"))
     ));
 }
