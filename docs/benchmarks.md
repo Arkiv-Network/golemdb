@@ -12,6 +12,7 @@ cargo bench -p golemdb-cells --bench cells
 cargo bench -p golemdb-merkle --bench merkle
 cargo bench -p golemdb-index --bench index
 cargo bench -p golemdb-index --bench index --features mdbx
+cargo bench -p golemdb-integration-tests --bench batch
 ```
 
 Full runs include many cases and can take several minutes. Select a group or
@@ -21,6 +22,9 @@ case using the filter after `--`:
 cargo bench -p golemdb-merkle --bench merkle -- 'merkle/trie/keccak-256/path_bytes=6/replace'
 cargo bench -p golemdb-index --bench index -- 'index/keccak-256/memory/chunks=64/apply_only/one_posting'
 cargo bench -p golemdb-index --bench index --features mdbx -- 'transaction_begin_apply_durable_commit'
+cargo bench -p golemdb-integration-tests --bench batch -- 'seal/create'
+cargo bench -p golemdb-integration-tests --bench batch -- 'commit/'
+GOLEMDB_BENCH_RECORDS=100000 cargo bench -p golemdb-integration-tests --bench batch
 ```
 
 Compile without running, or execute every fixture once without collecting timing
@@ -38,6 +42,45 @@ then after the change use `--baseline before`. Keep machine, build settings and
 background load comparable. CI compiles the suites; timing regressions are not
 automatic pass/fail gates.
 
+### Checking a change for regressions
+
+Run the batch benchmark before and after your change. It ends with a summary that
+lists each case's time and whether it got slower or faster than in the previous run,
+then the bytes each commit case writes per commit:
+
+```
+Summary for 10000 records, compared with the previous run:
+  seal/create       25.3 ms   no change
+  commit/patch      15.4 ms   19% slower
+
+Bytes written per commit, compared with the previous run:
+  commit/patch      5.63 MiB  2.1% more
+```
+
+Times are CPU time, so waiting for the disk hardly affects them. They still vary
+with CPU speed and other load, and runs of identical code can differ by ~10%, so
+changes under 10% count as no change. Process CPU time adds up all threads, so
+if seal or commit ever runs on several threads, a change that makes them faster
+can show as no change or slower. The lines above the summary are Criterion's
+detail: each time is shown as a 95% confidence interval (low, estimate, high),
+which covers only the variation within that run.
+
+Bytes written are counted over 10 commits made before timing starts, so the same
+code writes the same bytes in every run, and any change is real. They catch a
+change in write amplification even when it hardly moves the times. They count
+what the process passes to the OS, before the filesystem and the disk add their
+own writes, and are reported on Linux only.
+
+Each run is compared with the previous one. For a careful comparison, save the run
+without your change under a name and compare runs with your change against it.
+Make both runs back to back, since times on the same machine can drift by ~10%
+over a day:
+
+```sh
+cargo bench -p golemdb-integration-tests --bench batch -- --save-baseline before
+cargo bench -p golemdb-integration-tests --bench batch -- --baseline before
+```
+
 ## Cases
 
 | Group | Workload |
@@ -48,6 +91,13 @@ automatic pass/fail gates.
 | `index/term` | String term construction, strict decoding and routing hash at 16/256/1024 value bytes |
 | `index/<algorithm>/memory` and optional `index/<algorithm>/mdbx` | Materialization, four-term prefix scans, and posting batches at 64/256 containers per term |
 | `index/<algorithm>/mdbx/transaction_begin_apply_durable_commit` | One posting change including writer acquisition and durable commit |
+| `<N> records/seal/{create,patch,delete,mixed}` and `<N> records/commit/{patch,mixed}` | Sealing or committing a 200-operation batch through the public `Api`, on MDBX with N preloaded records |
+
+Batch cases run on N preloaded records (`GOLEMDB_BENCH_RECORDS`, default 10,000).
+Each case's batch is 200 creates, 200 patches or 200 deletes, or 70 creates, 60
+patches and 70 deletes, so a regression shows which operation it affects. The
+record shape is described in `golemdb_integration_tests::workload`. To add a
+case, add a line to `CASES` in `benches/batch.rs`.
 
 Trie paths are either clustered (zero leading bytes and a unique four-byte suffix)
 or spread (hash-derived leading bytes and the same unique suffix). Both widths
@@ -82,9 +132,22 @@ suite; the first index performance suite focuses on additions.
   transaction, applies one posting change and commits. Environment teardown and
   temporary-directory cleanup happen outside timing. It measures an isolated
   commit after seeding, not sustained ingestion or cold-disk throughput.
+- Batch cases time only the `seal` or `commit` call, in CPU time; building and
+  executing the batch happen outside timing. Commit times therefore leave out
+  waiting for the disk. `seal` cases share one database and discard their batch.
+  Each `commit` case gets its own database, whose record count stays at N while
+  the file grows with every commit, so commits get slower as a case runs.
+  Criterion picks how many iterations to run from their elapsed time, which
+  includes waiting for the disk, so the number of commits, and with it the commit
+  time, can vary between runs. A longer `--measurement-time` runs more commits
+  and gives higher commit times, so compare only runs made with the same
+  settings. Each commit case first makes the 10 commits that count bytes written.
+  The suite uses 1 s of warm-up and 2 s of measurement per case, about 30 s in
+  total; `--warm-up-time` and `--measurement-time` override them.
 
 These suites collect timings, not allocation counts, database-size growth or
-physical I/O statistics. Existing storage-work tests count logical reads/writes.
+physical I/O statistics; the batch suite also reports bytes written per commit.
+Existing storage-work tests count logical reads/writes.
 Future binary/256-way trie experiments should reuse the logical workloads but
 add storage/proof-size measurements alongside timing comparisons.
 
