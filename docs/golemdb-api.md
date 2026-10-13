@@ -1,6 +1,6 @@
-# Golem DB — API
+# GolemDB — API
 
-The Rust interface Golem DB presents to the layer above it (crate `golemdb-api`): **what a caller
+The Rust interface GolemDB presents to the layer above it (crate `golemdb-api`): **what a caller
 can say and what comes back.** Its shape was worked out in an experimental implementation on
 branch `matthiaszimmermann/feat/record-ops` (revision `cb323d8`), and the sections up to
 [Errors](#errors) are precise enough to reproduce that experiment: signatures, rules, check order,
@@ -17,9 +17,9 @@ changed and why.
 
 Related documents:
 
-- [golem-db-design.md](golem-db-design.md): data model, reserved records, commitment, branches.
+- [golemdb-design.md](golemdb-design.md): data model, reserved records, commitment, branches.
   Cited as _design §n_.
-- [golem-db-metering.md](golem-db-metering.md): costs, budgets, receipts. Cited as _metering Dn_.
+- [golemdb-metering.md](golemdb-metering.md): costs, budgets, receipts. Cited as _metering Dn_.
   Metering is not implemented: every cost is 0 and budgets are not enforced.
 
 ## Contents
@@ -56,7 +56,7 @@ applied in the experiment; `feature/golem-db-api` follows most of them, except `
 
 | Word | Means | Why this word |
 | --- | --- | --- |
-| **GolemDB** | the product, in prose | One word, like RocksDB, FoundationDB, SurrealDB. Pending product sign-off; this document still writes "Golem DB" until then. |
+| **GolemDB** | the product, in prose | One word, like RocksDB, FoundationDB, SurrealDB. Renamed from "Golem DB". |
 | **`golemdb`** | the product as an identifier: packages (`golemdb-api`, used as `golemdb_api`), domain tags (`"golemdb/genesis/v1"`), and the repo after its rename | Rust package names are lowercase; a one-word product gets a one-word prefix. |
 | **database** | what a caller opens and talks to: the `Database` handle and everything behind it | It is what users of any embedded database call the thing they open. Reserving it for that frees "store" for the layer below. |
 | **store** | the transactional key/value layer underneath: the `Store` trait | Matches the package `golemdb-storage`. Previously this layer was also called `Database`, so two different "databases" were public. |
@@ -793,11 +793,11 @@ Intended contract, as documented on the trait:
   branch and returns a provisional ordinal. Before `seal`, a rollback drops the rows staged in
   the undone frame; after `seal`, appends are the only writes allowed, so a row can contain the
   commit's own state root. Staged rows are readable only after `commit` (design §11,
-  [Appending to a Branch](golem-db-design.md#appending-to-a-branch)). Both implementations still
+  [Appending to a Branch](golemdb-design.md#appending-to-a-branch)). Both implementations still
   document "sealed branch only" on the trait. A key, if given, enters the segment's key index at commit,
   together with the row. Keeping keys unique is the host's job: a repeated key points the
   index at the newest row, older rows stay readable by ordinal, and an append never fails
-  because of its key (design §11, [Row keys](golem-db-design.md#row-keys)).
+  because of its key (design §11, [Row keys](golemdb-design.md#row-keys)).
 - `immutable_data_get(segment, address)` reads a committed row by ordinal or by key.
 - `immutable_data_range_of(segment, commit)` returns the half-open ordinal range the commit
   appended.
@@ -898,7 +898,7 @@ fn immutable_data_rows_of(&self, segment: &str, commit: CommitId, budget: Budget
 ```
 
 Row keys stay, with newest-wins lookup and no uniqueness check (design §11,
-[Row keys](golem-db-design.md#row-keys)). The doc comment on `feature/golem-db-api`'s
+[Row keys](golemdb-design.md#row-keys)). The doc comment on `feature/golem-db-api`'s
 `immutable_data_append` says "unique segment-local key"; it should say that uniqueness is the
 host's job.
 
@@ -955,7 +955,7 @@ Every new genesis cell above changes the genesis identity when added.
   the resulting root before it accepts the header. It is **not incremental and not O(1)**: the
   database merkleizes once at commit, so the call runs one pass over the branch's net touched
   set. `commit` may reuse the result. Whether repeated calls are metered is
-  [open](#open-items). → _design [§10](golem-db-design.md#the-in-memory-overlay)_
+  [open](#open-items). → _design [§10](golemdb-design.md#the-in-memory-overlay)_
 
 ### Query
 
@@ -1006,7 +1006,7 @@ _whether_ you get results, never _which_.
 
 Sorting orders the set the filter selected; it never changes which records are returned.
 Multi-key ordering is native: `sort` is an ordered list of `(name, type, direction)` terms.
-Creation order is a well-defined deterministic order. → _design [§12](golem-db-design.md#12-sorting)_
+Creation order is a well-defined deterministic order. → _design [§12](golemdb-design.md#12-sorting)_
 
 #### Paging
 
@@ -1045,7 +1045,7 @@ No page is ever internally wrong under either mechanism; only the sequence can b
 **Sorting on an immutable cell makes live paging anomaly-free.** Pinning adds one read per
 resolved value, roughly doubling a query's read count, and does not grow with age. Each page is
 a new call for pricing: pinning the data does not pin the prices (metering D9).
-→ _design [§13](golem-db-design.md#pinned-and-live)_
+→ _design [§13](golemdb-design.md#pinned-and-live)_
 
 **The cursor** is opaque; the query is resubmitted alongside it.
 
@@ -1068,7 +1068,7 @@ Two normative rules for implementations that keep a warm sequence:
 - **Cost is the canonical execution, warm or cold.** The receipt reports filter evaluation,
   sorting and materialization regardless of what was short-circuited.
 
-→ _design [§13](golem-db-design.md#the-cursor-and-the-warm-node)_
+→ _design [§13](golemdb-design.md#the-cursor-and-the-warm-node)_
 
 #### `count`: count matches without materializing records
 
@@ -1083,7 +1083,7 @@ Two normative rules for implementations that keep a warm sequence:
 ### Cost guarantees and estimation
 
 Cost is **consensus-visible**: it decides `OutOfBudget`, which decides whether a call returns
-results. [Metering](golem-db-metering.md) defines the cost model; a caller may rely on these
+results. [Metering](golemdb-metering.md) defines the cost model; a caller may rely on these
 guarantees:
 
 1. **Deterministic:** identical on every implementation, machine and version for the same
@@ -1099,7 +1099,7 @@ estimate returns the full planned cost without applying the mutations, consuming
 counters. A host-authorized `Unlimited` estimate still validates and uses checked arithmetic. An
 estimate is valid only for the inspected state and schedule; a multi-operation simulation that
 needs earlier writes visible to later ones runs in a disposable branch. Host resource controls
-are in [metering D8](golem-db-metering.md#shared-planner-and-arkiv-usage-contexts).
+are in [metering D8](golemdb-metering.md#shared-planner-and-arkiv-usage-contexts).
 
 **Deletion is not prepaid at creation.** A host whose records expire, where expiry rather than a
 caller triggers the delete, prepays deletion in its own pricing, using the bound of metering D5.
@@ -1118,7 +1118,7 @@ to a party holding nothing but the root.
 
 The call's signature is not pinned: it needs a target commit and the item to prove (record key
 and cell name, or an index term), and returns the node path plus the root it verifies against.
-Non-inclusion proofs follow the same shape. → _design [§8](golem-db-design.md#8-state-commitment-and-global-root)_
+Non-inclusion proofs follow the same shape. → _design [§8](golemdb-design.md#8-state-commitment-and-global-root)_
 
 ### Introspection
 
@@ -1167,13 +1167,13 @@ rules, not who may call the API.
 > affects outcomes in blockchain mode. Model activations must be coordinated by the chain
 > specification.
 
-→ _design [§4](golem-db-design.md#meteringmodel-recordid-32), [metering D9](golem-db-metering.md#d9-cost-schedules)_
+→ _design [§4](golemdb-design.md#meteringmodel-recordid-32), [metering D9](golemdb-metering.md#d9-cost-schedules)_
 
 ### Cell types: index classes and custom types
 
 - Each type has an **index class**: `none`, `eq`, `eq+range` or `eq+prefix`. A query predicate the
   class does not support is `InvalidQuery`. The classes are part of the type grid of
-  _design [§3](golem-db-design.md#the-type-grid)_.
+  _design [§3](golemdb-design.md#the-type-grid)_.
 - Type IDs 1–63 are defined by this spec, append-only: a new core type is a spec release. IDs
   64–127 are **custom types**, registered as deployment configuration, never at run time. A
   registration specifies `id`, `name`, `width`, index class, codec and encoding, plus conformance

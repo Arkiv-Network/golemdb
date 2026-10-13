@@ -1,6 +1,6 @@
-# Golem DB Design — Change Register
+# GolemDB Design — Change Register
 
-Single place where the three reviews of `golem-db-design.md` (revision `3748e29`, tag
+Single place where the three reviews of `golemdb-design.md` (revision `3748e29`, tag
 `design-review-2026-09-24`) converge. The reviews are evidence and are not edited; this register
 is the working record.
 
@@ -107,8 +107,7 @@ Filled by F17.
 |---|---|---|---|---|
 | T01 | open | Verify against reth's source that NippyJar is an append-only columnar container with per-column `zstd`/`zstd-dict`/`lz4` compression, an offset list for random access by row, and a side configuration file; and that it permits single-row decode | §11 On-Disk Form; standing caveat on reth claims in `arkiv-execution-client.md` | design.md §11 |
 | T02 | open | Verify against reth's source that static files are appended and fsynced before the MDBX transaction commits, and truncated to the last committed mark on startup | §11 Rejected Alternatives; same caveat | design.md §11 |
-| T03 | open | Regenerate `golem-db-design-short.md` from scratch off the final design text (after Phase 3 and the Phase 5 checks): same chapter structure, decisions only, plus the product-decisions list (S15). Until then the short document lags this one and must not be cited as current | Triage 2026-09-25; programme Phase 3 step 14 |  |
-| T07 | open | With the GitHub repo rename to `golemfactory/golemdb` (after P10): rename `docs/golem-db-*.md` → `docs/golemdb-*.md` and update every link to them; replace `golem-db` in READMEs; rename the `.devcontainer` volumes (`golem-db-target` etc.) | P10; implementation-review.md N2 | naming-migration.md section 8 |
+| T03 | open | Regenerate `golemdb-design-short.md` from scratch off the final design text (after Phase 3 and the Phase 5 checks): same chapter structure, decisions only, plus the product-decisions list (S15). Until then the short document lags this one and must not be cited as current | Triage 2026-09-25; programme Phase 3 step 14 |  |
 
 ## Closed
 
@@ -120,7 +119,7 @@ with the v2 adoption; see the triage log).
 
 | ID | Kind | Change | Sources | Closed by | Landed in |
 |---|---|---|---|---|---|
-| F01 | K1 | Repoint the three API links to `golem-db-api.md`; one-line precedence statement (design vs. API) | A-D01 | Links resolve; kind-bit, branch ops, sort tie-break agree between the two files | design.md §1 |
+| F01 | K1 | Repoint the three API links to `golemdb-api.md`; one-line precedence statement (design vs. API) | A-D01 | Links resolve; kind-bit, branch ops, sort tie-break agree between the two files | design.md §1 |
 | F02 | K1 | Figure 5: remove unary branch `MID1`; third leaf attaches to root slot 1; root `tree_mask` = `0x0001`; fix Figure 6 | A-D03 | Fixture built from the three paths yields the drawn masks | design.md §6 Figures 5, 6 |
 | F03 | K1 | Shard start ordinal = `mark(S−1)`, not `mark(S)`; marks are absolute high-water values | A-D08 | Nonempty boundary-commit example; Astra C3 passes | design.md §11 The Model, The System Segment |
 | F04 | K1 | §4 prose: record 0's key is `#params`, not `#alloc` | A-D14 | Text matches catalogue | design.md §4 Common properties |
@@ -130,7 +129,7 @@ with the v2 adoption; see the triage log).
 | F08 | K1 | Figure 10: failed op applies nothing (call-level atomicity); frame rollback undoes earlier successful ops | F-A2, A-D05.2 | Figure agrees with property 7 | design.md §10 Figure 10, caption, point 3 |
 | F09 | K1 | Commit step 8: `#alloc` value already in the state hashed at step 6; step 8 persists it | F-Heph3, A-D05 | Nine steps consistent with §4 | design.md §10 Committing a Branch, steps 4, 7, 8 |
 | F10 | K1 | §4 catalogue ↔ §11: add `#rootIndex` (id 4), `#shardSpan`, `#immutableDataSegments` with codecs, or mark §11 additions as proposed | F-A6, A-D12 | One catalogue, no orphan additions | design.md §4 catalogue, `#params` table |
-| F11 | K1 | §11 cross-reference "[golem-db-design.md §4]" → in-document anchor | F-Ariadne | Link resolves | design.md §11 What This Assumes of the Schema |
+| F11 | K1 | §11 cross-reference "[golemdb-design.md §4]" → in-document anchor | F-Ariadne | Link resolves | design.md §11 What This Assumes of the Schema |
 | F12 | K1 | Rename "Bitemporality" → "Point-in-time history"; one sentence: one time axis (commit), no valid time | R8, A-D14, F-Sam | Term gone | design.md §7 title and first paragraph; 13 references |
 | F13 | K1 | "Kind and type fixed per record" → "per record, per write" (retyping allowed, per API) | A-Maya/Sam | Agrees with API retyping rule | design.md §3 Cell Kinds and Types; §5; §12 |
 | F14 | K1 | Label `WHERE …` / `FIND RECORDS …` as illustrative pseudo-syntax | F-D14, A-D14 | Label present | design.md §5 Notation callout; §7 example fence |
@@ -149,8 +148,8 @@ with the v2 adoption; see the triage log).
 | F27 | K1 | §4: record 2 is touched at every commit, record 1 only at commits that create a record | Reconciliation R9 (A1 sign-off) | Text agrees with commit steps 4–8 | design.md §4 ordering of system records |
 | F28 | K1 | §11 "Outside the commitment": rows never enter the state trie; whether a per-commit digest does, and who commits it, is open | Reconciliation R10 (A4 sign-off) | §11 agrees with the §4 catalogue (record 5) and D19 | design.md §11 Why Cells Are the Wrong Shape |
 | F29 | K1 | Status by Chapter, §4: add D09 (`#immutableDataSegments` layout) and D19 (record 5), both cited in the §4 body | Spot check 2026-09-30 (S03 acceptance) | Every ID cited in a chapter body is on its status line | design.md Status by Chapter |
-| F30 | K1 | `[API]` `rewind` is not in v1: API op table marks it so, and "Reorgs use `rewind`" becomes "a commit cannot be undone; a host commits only blocks it will not reorg". Design: §10 status line, §11 mechanism marked "not in v1", D02 row | Spot check 2026-09-30 (F01 acceptance: branch ops agree); D02 | Branch ops agree between API and design | golem-db-api.md Commits, Operations; design.md §10 status, §11 System Segment and Operations, Open Questions D02 |
-| D18 | K2 | Second-engine contract: is the §4 reserved-record layout part of the commitment contract or a Golem DB choice? | F-Athena | Statement in normative appendix (S05), plus one sentence in design §1 or §8: met, the statement opens design Appendix A (2026-10-01). Decision: A, by requirement (DI-2, NF-8, via P07); B withdrawn. decisions_for_architect.md #15 (**normative, by requirement** DI-2/NF-8; alternative withdrawn) | design.md Appendix A Normative Surface; §8 Which Tables Are Under Commitment |
+| F30 | K1 | `[API]` `rewind` is not in v1: API op table marks it so, and "Reorgs use `rewind`" becomes "a commit cannot be undone; a host commits only blocks it will not reorg". Design: §10 status line, §11 mechanism marked "not in v1", D02 row | Spot check 2026-09-30 (F01 acceptance: branch ops agree); D02 | Branch ops agree between API and design | golemdb-api.md Commits, Operations; design.md §10 status, §11 System Segment and Operations, Open Questions D02 |
+| D18 | K2 | Second-engine contract: is the §4 reserved-record layout part of the commitment contract or a GolemDB choice? | F-Athena | Statement in normative appendix (S05), plus one sentence in design §1 or §8: met, the statement opens design Appendix A (2026-10-01). Decision: A, by requirement (DI-2, NF-8, via P07); B withdrawn. decisions_for_architect.md #15 (**normative, by requirement** DI-2/NF-8; alternative withdrawn) | design.md Appendix A Normative Surface; §8 Which Tables Are Under Commitment |
 | D08 | K2 | `#recordKeys` on delete: binding survives (§4) or is removed (§10) | F-Heph | **A** (removed), 2026-10-10: implemented; §4 *Historised re-creation* now agrees with §10 | design.md §4 `#recordKeys`; API `delete`; metering Record Model |
 | D10 | K2 | Metering shape and activation semantics at `A`; minimum install→activation window; incomplete weights | F-B9, A-D09, R16 | Decided 2026-10-10: 10.2-A (priced at branch base), 10.3 `#minActivationDelay`, 10.4 missing weights are unpriced with warn logs, names fixed per model version; timeline in the brief | metering D8, D9; design §4 `#params` and lifecycle rules; API *Administration* |
 | D15 | K2 | Stale handle: `Conflict` on commit vs `HandleInvalid` elsewhere | F-Heph | **B**, 2026-10-10: `HandleInvalid` on every call, `commit` included; `Conflict` reserved for a version mismatch. Implementation to follow | API *Branches*, errors; design §10; metering D2, D8 |
@@ -158,6 +157,8 @@ with the v2 adoption; see the triage log).
 | S16 | K3 | Vocabulary: database / store / reserved; "engine" dropped from the API and metering specs; `EngineAssigned` → `Generated`; `machineId` → `nodeId`; design line 3 and "MDBX database environment" fixed. Design-wide "engine" pass deferred | implementation-review.md Part 0 (N7, N8, N10) | naming-migration.md section 9 checks pass, 2026-10-10, except deliberate mentions: the API glossary explains why "engine" is gone, and the API's change table names `EngineAssigned` as the previous spec's term | API spec (whole); metering D8; design intro, §1 |
 | F31 | K1 | `[API]` `StoreFull` in the shared error set: a full store surfaces at `commit`, writes nothing, and is environmental | implementation-review.md N16 | The API's error table lists `StoreFull`, 2026-10-10 | API *Errors*, *Branches* |
 | T04 | task | Port the "Empty user records are legal" paragraph into design.md §3 | Reconciliation 2026-09-30 | Found already present, 2026-10-10 | design.md §3 Record Identity |
+| T07 | task | Rename `docs/golem-db-*.md` → `docs/golemdb-*.md` and update every link to them; replace `golem-db` in READMEs. Done ahead of the repo rename; the `.devcontainer` part moved to T08 | P10; implementation-review.md N2 | No `golem-db-*.md` file or link left in `docs/`; no `golem-db` in READMEs, 2026-10-13 | `docs/golemdb-{api,design,metering}.md`; README.md |
+| T08 | task | Repoint the `github.com/golemfactory/golem-db` links in `crates/index/src/lib.rs` to the renamed repo, which also moved to the Arkiv-Network org: `github.com/Arkiv-Network/golemdb`. Split from T07; the `.devcontainer` volumes were renamed to `golemdb-*` on 2026-10-13 | T07; P10; implementation-review.md N2 | No `golemfactory/golem-db` link left in `crates/`, 2026-10-13 | `crates/index/src/lib.rs`; `.devcontainer/devcontainer.json` |
 | S02 | K3 | Reader statement and reading routes (G1) | F-Icarus, A-D12/Sam/Marcus | First screen of the overview | design.md "Who Should Read This, and How" |
 | S03 | K3 | Status register per chapter: `settled / proposed / open / depends-on-metering`; §1 "settled" → "design record; status per chapter" (G1) | F-B7, A-D12, R33 | Every chapter has a line; every `Open —` box listed | design.md "Status by Chapter" |
 | S04 | K3 | Glossary; de-overload: trie "branch node" → "interior node"; unqualified "node" = machine; "commit" vs "commitment" (G5) | F-B8, R31 | grep counts; glossary before §1 | design.md Glossary (before §1); 27 rename edits; "branch node" 11→1 (the glossary's own mention), "sub-branch" 3→0 |
@@ -171,6 +172,15 @@ with the v2 adoption; see the triage log).
 | P07 | K4 | Is a second conformant engine a goal? (decides whether D18 is contract or choice) | F-Athena, A-Marcus | decided: **yes, by requirement** (swappability; NF-8 commitment vectors; DI-2 engine state under the root) — so the §4 layout is *normative*, the opposite of the programme's default. D18 = A. Text landed with D18, 2026-10-01 | design.md Appendix A Normative Surface |
 
 ## Triage log
+
+- **2026-10-13 (repo rename).** The GitHub repository is renamed `golem-db` → `golemdb` and moved
+  from `golemfactory` to the Arkiv-Network org: `github.com/Arkiv-Network/golemdb`. The four design
+  links in `crates/index/src/lib.rs` point there; T08 closed.
+
+- **2026-10-13 (doc rename).** `docs/golem-db-*.md` renamed to `docs/golemdb-*.md` with every link
+  updated, ahead of the repo rename; T07 closed for that part and the READMEs. The `.devcontainer`
+  volumes renamed to `golemdb-*` the same day; the repository URL in code waits for the repo
+  rename: new row T08.
 
 - **2026-10-10 (spec consolidation).** Spec work landed directly on
   `matthiaszimmermann/docs/refine-metering`, outside the one-row-per-PR rule, and is recorded here:
@@ -228,7 +238,7 @@ with the v2 adoption; see the triage log).
   segment set) and **F16** (ABCI 2.0 mapping). All accepted. The comparison produced fix rows
   F19–F28, landed together as G6 in the adoption PR rather than in PRs of at most five, since
   they are one-hunk consistency fixes to the same text. **Arkiv stores all of its state and block
-  data in Golem DB** (confirmed 2026-09-30), so §11 is on Arkiv's critical path: new row D20
+  data in GolemDB** (confirmed 2026-09-30), so §11 is on Arkiv's critical path: new row D20
   (lookups by hash), and a proposed priority raise for T01, T02, D03, D05, D17 and D19, not yet
   applied to their rows. The metering branch's §3 paragraph is outside both texts: T04.
   A spot check of the rows marked done found two gaps, now fixed: §4's status line missed D09 and

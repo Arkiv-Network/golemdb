@@ -1,7 +1,7 @@
 # Query API proposal
 
 **Temporary working document.** It records the outcome of the query discussion of 2026-10-10 to
-2026-10-12, so that the *Query* part of [golem-db-api.md](golem-db-api.md), which still assumes an
+2026-10-12, so that the *Query* part of [golemdb-api.md](golemdb-api.md), which still assumes an
 ordered DNF, can be replaced by what follows. Delete this file once the API spec and D01 carry it.
 
 **Starting point:** branch `francesco/query` (revision `de4be83`, "Query equality - first draft"),
@@ -22,7 +22,7 @@ crate `golemdb-query`; see [Staging](#staging).
    first step the remaining budget cannot pay for.
 
 Principles 1 and 2 are two sides of one decision: with no optimizer, the query's form must be the
-plan. Principles 3 to 5 apply the metering spec to reads ([metering](golem-db-metering.md) R1, R3,
+plan. Principles 3 to 5 apply the metering spec to reads ([metering](golemdb-metering.md) R1, R3,
 R5, R7 and D6: reads are counted, not modeled, and abort when they cross their budget).
 
 ### Requirements
@@ -261,13 +261,13 @@ A first cut (MVP): `Eq`, `In`, `Range`, `And`, materialization, `limit` / `offse
 
 ## To do when folding this in
 
-- `golem-db-api.md`: replace *Specified, not yet implemented → Query* with the call, the tree, the
+- `golemdb-api.md`: replace *Specified, not yet implemented → Query* with the call, the tree, the
   execution rules, the caps and the errors; update *Further errors* (`LimitExceeded` now names the
   three caps).
 - `decisions_for_architect.md` and `CHANGES.md` D01: record the switch to a tree.
 - `decisions_for_architect.md` D09 item 9.13: replace the DNF caps (`#maxFilterGroups`,
   `#maxPredicatesPerGroup`) with `#maxQueryDepth`, `#maxQueryLimit`, `#maxSortKeys`.
-- `golem-db-design.md` §4 `#params` table: add the three caps.
-- `golem-db-metering.md` D6: charge set combinations per bitmap container.
+- `golemdb-design.md` §4 `#params` table: add the three caps.
+- `golemdb-metering.md` D6: charge set combinations per bitmap container.
 - `api-priorities.md`: add the query MVP to the 2-week scope.
 - Delete this file.

@@ -1,4 +1,4 @@
-# Golem DB Metering
+# GolemDB Metering
 
 Status: draft for discussion, 2026-10-09. How Arkiv turns these costs into fees is in a separate document.
 
@@ -10,12 +10,12 @@ Status: draft for discussion, 2026-10-09. How Arkiv turns these costs into fees 
   - Writes: [D2. Write Cost Model](#d2-write-cost-model) · [D3. Modeled Trie Depth](#d3-write-metering-and-modeled-trie-depth) · [D4. Storage and Size Counting](#d4-storage-and-size-counting) · [D5. Record Shape and Deletion Bound](#d5-record-shape-and-deletion-bound)
   - Reads: [D6. Read Metering](#d6-read-metering)
 - **Immutable log:** [D7. Immutable-Log Metering](#d7-immutable-log-metering)
-- **Cross-cutting:** [D8. Budget, Rollback and Commit](#d8-budget-rollback-and-commit) · [D9. Cost Schedules](#d9-cost-schedules) · [D10. Golem DB Weights](#d10-golem-db-weights)
+- **Cross-cutting:** [D8. Budget, Rollback and Commit](#d8-budget-rollback-and-commit) · [D9. Cost Schedules](#d9-cost-schedules) · [D10. GolemDB Weights](#d10-golemdb-weights)
 - **Illustration and open points:** [Worked Example](#worked-example-create-patch-delete) · [Open Questions](#open-questions)
 
 ## Why
 
-Golem DB is a shared resource: anyone who pays can make every node compute and store. Metering sets that price, with four aims:
+GolemDB is a shared resource: anyone who pays can make every node compute and store. Metering sets that price, with four aims:
 
 - **Decentralization:** full-node requirements stay bounded, so community members can run one on normal hardware. Archival nodes are out of scope.
 - **Security:** no cheap attacks; no caller obtains more work or storage than they pay for.
@@ -33,12 +33,12 @@ Example attacks prevented:
 
 ## Principle
 
-- **Golem DB** assesses what each call costs in compute and storage, with no notion of time. Like Ethereum's `SSTORE`, storage is a one-off cost. Full nodes keep a fixed history window, so that cost covers the write and its bounded history.
+- **GolemDB** assesses what each call costs in compute and storage, with no notion of time. Like Ethereum's `SSTORE`, storage is a one-off cost. Full nodes keep a fixed history window, so that cost covers the write and its bounded history.
 - **A host** such as Arkiv builds its own pricing on top, for example adding duration to storage.
 
 ## Scope
 
-Metering of Golem DB's read and write calls: the cost model, receipts, budgets and cost schedules. How a host turns costs into fees is out of scope.
+Metering of GolemDB's read and write calls: the cost model, receipts, budgets and cost schedules. How a host turns costs into fees is out of scope.
 
 ## TODO: Review Findings
 
@@ -52,7 +52,7 @@ unsuccessful lookups or charge checkpoints. Implementations could disagree on co
 abort points even when they return the same successful results.
 
 D6 also promises a budgeted index-ordered bulk-deletion scan that has no API definition.
-The [design rejects index-ordered emission](golem-db-design.md#the-alternative-index-ordered-emission)
+The [design rejects index-ordered emission](golemdb-design.md#the-alternative-index-ordered-emission)
 for general query sorting; a specialized purge scan needs a separate contract, not an
 implicit change to `query`.
 
@@ -90,23 +90,23 @@ Budget:
 Coverage and reporting:
 
 - **R8:** every read and write call (`create`, `get`, `patch`, `delete`, `query`, `count`) is metered for compute, and writes also for storage. So are the immutable-log calls (`immutable_data_append`, `immutable_data_get`, `immutable_data_range_of`, `immutable_data_rows_of`; D7).
-- **R9:** every receipt reports the call's cost and the commit that priced it (`priced_at`). Details of cell and index data added and removed by write calls (D4) are opt-in per call on a transport, which keeps receipts small; every implementation must support the option and return the details when requested. An in-process API may return them with every receipt, as the [Rust API](golem-db-api.md#receipts) does.
+- **R9:** every receipt reports the call's cost and the commit that priced it (`priced_at`). Details of cell and index data added and removed by write calls (D4) are opt-in per call on a transport, which keeps receipts small; every implementation must support the option and return the details when requested. An in-process API may return them with every receipt, as the [Rust API](golemdb-api.md#receipts) does.
 - **R10:** every user record has a maximum deletion cost, computable at any time from its shape and the current schedule. Actual deletion may cost less.
 
 Cost schedules:
 
 - **R11:** a cost schedule is a metering model plus its weights. The model (cost structure (D2) and counting rules) is code identified by a version; weights are committed data, one price per weight name.
-- **R12:** weights are adjustable at runtime through admin writes, without upgrading Golem DB, taking effect only at a committed head boundary. Branch calls use the schedule captured at their base commit; calls without a branch capture the schedule at the current head on admission. This applies to reads of historical data as well as current data. Calls are never re-priced in flight (D9).
+- **R12:** weights are adjustable at runtime through admin writes, without upgrading GolemDB, taking effect only at a committed head boundary. Branch calls use the schedule captured at their base commit; calls without a branch capture the schedule at the current head on admission. This applies to reads of historical data as well as current data. Calls are never re-priced in flight (D9).
 
 ## Record Model
 
-Golem DB holds three kinds of records ([design §4](golem-db-design.md#record-classes-and-the-reserved-catalogue)):
+GolemDB holds three kinds of records ([design §4](golemdb-design.md#record-classes-and-the-reserved-catalogue)):
 
-- **System records** (`#` record key prefix) hold Golem DB's own configuration and state, e.g. immutable deployment parameters (`#params`), and key bindings (`#recordKeys`).
-System records are created at genesis and only Golem DB business logic is allowed to touch cells of these records. 
-- **Admin records** (`@` record key prefix) are initially created at genesis. All changes need to go through Golem DB's admin (metering) API, which validates and stores them. 
-Golem DB cost schedules and weights (`@meteringModel`, `@modelWeight`) which should be allowed to change through Golem DB's admin (metering) API.
-- **User records** are managed by the application that uses Golem DB, for example Arkiv's entities and accounts. The write calls metered in D2 act on user records.
+- **System records** (`#` record key prefix) hold GolemDB's own configuration and state, e.g. immutable deployment parameters (`#params`), and key bindings (`#recordKeys`).
+System records are created at genesis and only GolemDB business logic is allowed to touch cells of these records. 
+- **Admin records** (`@` record key prefix) are initially created at genesis. All changes need to go through GolemDB's admin (metering) API, which validates and stores them. 
+GolemDB cost schedules and weights (`@meteringModel`, `@modelWeight`) which should be allowed to change through GolemDB's admin (metering) API.
+- **User records** are managed by the application that uses GolemDB, for example Arkiv's entities and accounts. The write calls metered in D2 act on user records.
 
 A record is implemented as a flat list of cells. Each cell is a key-value pair:
 
@@ -127,12 +127,12 @@ only `delete` removes it and its binding from live state.
 Empty records are not free: creating one pays admission, record-base and the three
 system-cell creates (binding, `#key`, `#meta`), with no user-cell or index operations.
 Deleting an empty record pays the corresponding admission, record-base and system-cell
-deletion costs. A host may impose stricter content requirements without Golem DB doing so.
+deletion costs. A host may impose stricter content requirements without GolemDB doing so.
 
 The reverse mapping, record key → record ID, lives in the system record `#recordKeys`: one binding cell per live record, keyed by the 32-byte record key, holding the record ID.
 
 - `create` adds the binding; `delete` removes it. The removed binding stays in history for the retention window.
-- A deleted key can be re-created; it gets a fresh binding and a new record ID. A host that must prevent key reuse enforces it above Golem DB, for example through derived keys.
+- A deleted key can be re-created; it gets a fresh binding and a new record ID. A host that must prevent key reuse enforces it above GolemDB, for example through derived keys.
 - "No record with key K" is a non-inclusion proof of the binding.
 - `#recordKeys` grows with the number of live records. Per-record caps (D5) apply to user records only.
 
@@ -140,7 +140,7 @@ The reverse mapping, record key → record ID, lives in the system record `#reco
 
 `#meta` holds four counters over a record's user cells; its layout, maintenance and the
 record completeness proofs it enables are in
-[design §3](golem-db-design.md#record-shape-the-meta-cell). Metering needs it because a
+[design §3](golemdb-design.md#record-shape-the-meta-cell). Metering needs it because a
 `patch` reads only the cells it touches, and the no-probe rule (R3) forbids reading the
 rest just to price or validate the call.
 
@@ -150,7 +150,7 @@ rest just to price or validate the call.
 | indexed cells | indexed-cell cap check (D2 step 5); deletion bound (D5) |
 | cell bytes, index bytes | host storage accounting: Arkiv's `extend` prices the bytes an entity keeps stored times the blocks added to its lifetime (goal 4) |
 
-Sizes follow D4. Golem DB's own pricing does not use the byte counters. Maintaining
+Sizes follow D4. GolemDB's own pricing does not use the byte counters. Maintaining
 `#meta` is charged as a system cell operation (D2); reading it is an ordinary `get` of
 the cell, alone or with the full record, and is metered as a read (D6). The database-wide counters that set the modeled trie depth are
 separate (D3).
@@ -159,7 +159,7 @@ separate (D3).
 
 Meets R1, R5.
 
-Cost is computed over Golem DB's logical schema.
+Cost is computed over GolemDB's logical schema.
 The logical schema includes cell rows, index terms, posting-list containers, trie paths. It does not consider lower level items such as concrete MDBX pages. Physical page-level work depends on each node's current physical history: open read transactions, compaction and configuration change which pages a write touches. Two honest instances might well disagree on those.
 
 Consequences:
@@ -248,7 +248,7 @@ Rejected input is not free. If the budget cannot fund even the admission base, n
 admission work is performed and `spent` is zero. No record, cell or index charge is
 collected unless its step is reached. Validation order and byte-counting rules must be
 deterministic; checking a declared length is distinct from inspecting payload bytes.
-Transport decoding and allocation before the Golem DB call remain host responsibilities.
+Transport decoding and allocation before the GolemDB call remain host responsibilities.
 Input errors that a typed API detects while the request is built, such as an invalid
 name passed to a builder, count as admission: they are charged as the admission work
 that would detect them, though they are reported when the call is made.
@@ -350,12 +350,12 @@ Trie work is deferred to commit and runs once over the branch's net changes, so 
 
 In D2, these modeled path rewrites are the depth terms of every cell and index operation.
 
-**Global counters.** This model requires Golem DB to track two database-wide counters, the cells `#liveCells` and `#indexTerms` of [`#alloc`](golem-db-design.md#alloc-recordid-1):
+**Global counters.** This model requires GolemDB to track two database-wide counters, the cells `#liveCells` and `#indexTerms` of [`#alloc`](golemdb-design.md#alloc-recordid-1):
 
 - **Live cells:** the number of `CellTrie` leaves, across all record classes: user cells, `#key` and `#meta` cells, bindings, root history, weights, and the counters themselves.
 - **Distinct index terms:** the number of `IndexTrie` leaves.
 
-Their only purpose is to determine the modeled trie depth. They differ from the per-record counts in [`#meta`](#the-meta-cell), which cover one record's user cells and serve caps, deletion bounds and the host. The counters are committed state, so every node derives the same depth, also after a restart. Golem DB updates them once per commit from the branch's net changes, as host-funded commit overhead (D8).
+Their only purpose is to determine the modeled trie depth. They differ from the per-record counts in [`#meta`](#the-meta-cell), which cover one record's user cells and serve caps, deletion bounds and the host. The counters are committed state, so every node derives the same depth, also after a restart. GolemDB updates them once per commit from the branch's net changes, as host-funded commit overhead (D8).
 
 The modeled depth is derived from these counters by a pinned table. Tries are 16-ary, so depth grows as ⌈log₁₆ N⌉:
 
@@ -377,7 +377,7 @@ Depth is capped at 7. ⌈log₁₆ N⌉ would reach 8 only above 16⁷ (≈268M)
 Modeled depths approximate typical path work, not maximum depth. Calibration must
 verify sufficient pricing margins for path-depth variation, growth within a branch,
 and posting-list updates. The depth cap limits charged depth, not supported database
-size or actual trie depth. The [design's depth bounds](golem-db-design.md#depth-bounds-and-future-optimization-paths)
+size or actual trie depth. The [design's depth bounds](golemdb-design.md#depth-bounds-and-future-optimization-paths)
 are 64 for cell/index tries and 12 for posting-list tries; these bounds and measured
 workloads inform verification rather than implying that current weights already cover
 every case.
@@ -391,12 +391,12 @@ Meets R8, R9.
 The write byte weights assume that every value is eventually copied into history. The
 copy happens once, whatever the retention window; residency does not. The weights are
 calibrated for residency of `#minRetention` commits, the minimum history every node of a
-deployment keeps ([design §4 `#params`](golem-db-design.md#params-recordid-0)). A
+deployment keeps ([design §4 `#params`](golemdb-design.md#params-recordid-0)). A
 deployment with a longer `#minRetention` therefore has higher weights; a node that
 retains more history than `#minRetention` does so at its own cost. Either way, all
 nodes of a deployment charge the same.
 
-**Size per record, names included.** Golem DB stores cell names in full in every cell key and every index term key. Size is counted per record, never shared:
+**Size per record, names included.** GolemDB stores cell names in full in every cell key and every index term key. Size is counted per record, never shared:
 
 - A cell counts `8 + |name|` bytes for its key (ID prefix and name) and `1 + |value|` bytes for its value (type tag and value).
 - An index entry counts `|name| + 2 + |value|` bytes: its term key, name ‖ `0x00` ‖ type tag ‖ value.
@@ -422,7 +422,7 @@ Every leave costs the same, whether or not it empties the term (D2), and deleted
 - The cell and indexed-cell counts come from [`#meta`](#the-meta-cell), updated atomically with every count change; every successful patch pays for its read, and for its update when a count changes (D2).
 - Stores counts, not cost: counts are exact and independent of weights and D3 depth. The maximum deletion cost is computed from them at current weights and depth. Actual deletion may cost less, for example after the database shrinks.
 - System cells are not counted in `#meta`; their deletes are fixed-size system cell operations (D2).
-- Golem DB's ceilings are deployment parameters in `#params`, fixed at genesis: `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`, and the caps on cells and indexed cells per user record, `#maxRecordCells` and `#maxRecordIndexedCells`. System and admin records are exempt from the cell caps; they are never deleted, so they need no deletion bound.
+- GolemDB's ceilings are deployment parameters in `#params`, fixed at genesis: `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`, and the caps on cells and indexed cells per user record, `#maxRecordCells` and `#maxRecordIndexedCells`. System and admin records are exempt from the cell caps; they are never deleted, so they need no deletion bound.
 - After every `create` and `patch`, the record's resulting counts must stay within the caps. The plan phase checks this (D2); a violation fails the call and writes nothing.
 - The cell caps bound a record's maximum deletion cost; the length ceilings bound the size of each write.
 - Caps are on counts and lengths rather than cost, so a weight increase cannot push existing records over a limit.
@@ -439,14 +439,14 @@ Reads are counted, not modeled: nothing on the read path is deferred, so cost ac
 - Resolving an item at a past commit is a flat surcharge, independent of how far back.
 - Range scans charge every index term stepped over, so ranges over attributes with many distinct values pay for their width.
 - Reading `#meta` is a `get` of one cell; the full record includes it. The `id_of` and `key_of` accessors, to be specified with the proof API, are fixed-size point reads with a flat charge: `id_of` is one key resolution (`key_resolve`), `key_of` one cell read (`cell_read`).
-- Golem DB provides a budgeted, index-ordered scan for bulk deletion, such as a host's expiry purge ([mapping §6](arkiv-golem-db-mapping.md#purge-before-transactions)).
+- GolemDB provides a budgeted, index-ordered scan for bulk deletion, such as a host's expiry purge ([mapping §6](arkiv-golem-db-mapping.md#purge-before-transactions)).
 
 ## D7. Immutable-Log Metering
 
 Meets R2, R5, R7, R8.
 
-The immutable log is Golem DB's second storage structure: append-only, ordinal-addressed
-segments attached to commits ([design §11](golem-db-design.md#11-commit-immutable-data-segments)).
+The immutable log is GolemDB's second storage structure: append-only, ordinal-addressed
+segments attached to commits ([design §11](golemdb-design.md#11-commit-immutable-data-segments)).
 It shares nothing with D2: an append reads no state and touches no trie, index or cell
 history. Each append and read is attributable to one call, so it is metered per call,
 unlike commit overhead (D8).
@@ -469,13 +469,13 @@ read cost       = rows read × w_imm_read_base + bytes read × bytes_read
   `immutable_data_range_of` reads one system-segment row and no segment bytes.
 - Every immutable-log call returns its result together with a receipt, like the record
   calls.
-- Optional per-segment row keys ([design §11](golem-db-design.md#row-keys)) add one key-index
+- Optional per-segment row keys ([design §11](golemdb-design.md#row-keys)) add one key-index
   write to each keyed append, with no uniqueness check, and one key resolution to each read by
   key. Their weights follow once the index layout is specified.
 
 **Who pays is the host's decision.** A deployment has two options:
 
-1. **Positive weights.** Golem DB reports the cost; the host passes it on to its clients
+1. **Positive weights.** GolemDB reports the cost; the host passes it on to its clients
    or absorbs it. Even when absorbing it, the host gets a deterministic measure of the
    append work, for example to bound a block's resources.
 2. **Zero weights.** The host funds the immutable log outright, for example because its
@@ -515,7 +515,7 @@ The host funds commit-level database overhead outside record-call budgets and re
 the `#roots` insertion, persistence of the final `#alloc` value when changed, the
 update of the global counters (D3), their
 history/change-set and trie work, and Superblock head and commit-transaction maintenance
-([design](golem-db-design.md#genesis-and-roots-as-cells)). This applies to every commit,
+([design](golemdb-design.md#genesis-and-roots-as-cells)). This applies to every commit,
 including empty and admin commits; it does not depend on collecting record-call charges.
 
 Record-call charges still cover their own cell and index mutations, per-record system
@@ -525,7 +525,7 @@ ID allocation, not the final committed allocator update.
 
 For Arkiv, this overhead belongs to the host's block-processing resource budget. The
 host controls commit admission and frequency and bears the overhead even for an empty
-block. How it funds or recovers that cost is host policy, not part of Golem DB's
+block. How it funds or recovers that cost is host policy, not part of GolemDB's
 per-record pricing schedule.
 
 ### Shared Planner and Arkiv Usage Contexts
@@ -543,13 +543,13 @@ still apply. There is no separate estimation algorithm or force-completion flag.
 Arkiv uses this planner in two contexts:
 
 1. **Transaction execution and validation.** Arkiv supplies `Limited(remaining_budget)`
-  in Golem DB cost units. Planning can abort early; only a successful plan is applied.
+  in GolemDB cost units. Planning can abort early; only a successful plan is applied.
   The operation is charged its total cost once, with planning charges already included,
   or its `spent` cost on failure. A caller cannot select unlimited consensus execution
   by requesting an estimate.
 2. **`eth_estimateGas` service.** Arkiv may supply `Unlimited` to calculate the full
-  Golem DB write cost without applying the plan. This is a host-authorized estimation
-  facility, not a promise of free or budget-bounded work by Golem DB. Arkiv remains
+  GolemDB write cost without applying the plan. This is a host-authorized estimation
+  facility, not a promise of free or budget-bounded work by GolemDB. Arkiv remains
   responsible for its gas conversion and non-database costs. A multi-operation estimate
   that needs earlier writes visible to later ones must simulate them in a disposable
   branch; inspecting every operation against the unchanged initial state is insufficient.
@@ -567,8 +567,8 @@ Meets R11, R12.
 
 **Head is authoritative.** A **pricing snapshot** is the active metering model version
 together with its complete weight set, as committed at a given head; every call computes
-its costs from exactly one snapshot, named by `priced_at`. Golem DB always knows its current committed `commitNr` from
-the [Superblock head](golem-db-design.md#the-superblock). It holds the active model and
+its costs from exactly one snapshot, named by `priced_at`. GolemDB always knows its current committed `commitNr` from
+the [Superblock head](golemdb-design.md#the-superblock). It holds the active model and
 its complete weight set in memory as a snapshot associated with that committed state.
 At startup or whenever this snapshot is unavailable, reconstruct it from the committed
 `@meteringModel` and `@modelWeight` records at head: select the greatest model version
@@ -585,26 +585,26 @@ active snapshot. After recovery or rewind, rebuild or revalidate the snapshot ag
 the restored committed state; a commit number alone is not sufficient cache identity
 if that number can be reused after a rewind.
 
-- **Model = code.** Cost structure, counting rules, byte definitions and expected weight names, identified by `modelVersion` ([design §4](golem-db-design.md#meteringmodel-recordid-32)). D2's structure, D3's depth table and D4's counting are model changes: a new version.
-- **Weights = data.** One `u64` per weight name per model version, stored in `@modelWeight` and versioned by Golem DB's own history.
+- **Model = code.** Cost structure, counting rules, byte definitions and expected weight names, identified by `modelVersion` ([design §4](golemdb-design.md#meteringmodel-recordid-32)). D2's structure, D3's depth table and D4's counting are model changes: a new version.
+- **Weights = data.** One `u64` per weight name per model version, stored in `@modelWeight` and versioned by GolemDB's own history.
 - **Install, then activate.** A new model version is installed with its weights and an activation commit `A ≥ head + 1 + #minActivationDelay`. At most one model is pending. Nodes not yet running the new version's code cannot know its weight names, so install checks only what every node can: the version is newer, `A` is within bounds, the cells are well-formed. Typos are the admin tool's job: it runs the new code and must reject unknown or missing weight names before it sends the install.
 - **Missing weights are unpriced.** If, at activation, the active model's code expects a weight that has no value, that weight is **unpriced**: any call whose cost needs it fails with `OutOfBudget{spent, required: None}`, also under `Unlimited`, exactly like an arithmetic overflow (D8). This fails safe (R4): the affected operations are unavailable until fixed, never free. Nothing halts and nothing splits, since every node prices from the same committed weights, and the admin repairs it with a weight patch, which is unmetered. Weight names the code does not declare are ignored at activation.
 - **Unknown names are rejected where every node can check.** A weight patch on the **active** model naming a weight its code does not declare is reverted with `InvalidArgument`: every node runs that code, so the verdict is deterministic. Writes to a pending version are checked for form only.
-- **Warn logs.** Golem DB writes a warn-level log entry, for operators' observability, at activation for every missing weight and every ignored name, and on every call that fails because a weight is unpriced, naming the weight. These are node logs, not consensus output.
-- **Minimum activation delay.** `#minActivationDelay` (`u32`, commits) is a genesis parameter in `#params` ([design §4](golem-db-design.md#params-recordid-0)). It guarantees every node operator a window between a model's install and its activation in which to upgrade to code that implements it. Without it, `A > head` would allow installing at head 99 with activation 100, leaving no window. For Arkiv, a value of about a day of blocks.
+- **Warn logs.** GolemDB writes a warn-level log entry, for operators' observability, at activation for every missing weight and every ignored name, and on every call that fails because a weight is unpriced, naming the weight. These are node logs, not consensus output.
+- **Minimum activation delay.** `#minActivationDelay` (`u32`, commits) is a genesis parameter in `#params` ([design §4](golemdb-design.md#params-recordid-0)). It guarantees every node operator a window between a model's install and its activation in which to upgrade to code that implements it. Without it, `A > head` would allow installing at head 99 with activation 100, leaving no window. For Arkiv, a value of about a day of blocks.
 - **Patch the active model.** A weight change staged while head is H takes effect only after the commit containing it succeeds and head becomes H+1. It cannot change pricing mid-branch or before persistence; a failed or discarded change has no effect.
 - **Capture pricing once.** Branch calls retain the pricing snapshot from their base commit; stale branches remain subject to the existing invalidation rules. Calls without a branch capture the current head's snapshot at admission. `priced_at` records that pricing commit, not the data commit being read. A call already in progress keeps its captured snapshot even if head advances.
 - **Historical data does not select historical prices.** A read targeting an old commit uses the same current pricing snapshot as a current-data read admitted at the same head. Each query page is a new call: pinning the data commit does not pin the pricing schedule across pages.
 - **Pre-paid work is not re-priced.** Work paid in advance keeps the schedule of the call that paid it: term removal (`w_idx_term_create`), copying bytes into history (write byte weights) and record-induced deferred commit work. Host-funded block/commit overhead is separate (D8). Re-pricing prepaid work after a weight change is impractical; if weights rise, the later work is underpaid, bounded to one term removal per term and one copy per byte. Accepted. The same holds for a host that collects a record's deletion cost in advance, as Arkiv does for expiry: the D5 bound is computed at the weights and depth current when it is collected.
-- **Authorization is the host's.** Golem DB validates the lifecycle; the host decides who may change weights. A host that changes weights inside its own commits needs branch-scoped admin calls ([mapping §8](arkiv-golem-db-mapping.md#branch-scoped-administration-required-api-extension)).
+- **Authorization is the host's.** GolemDB validates the lifecycle; the host decides who may change weights. A host that changes weights inside its own commits needs branch-scoped admin calls ([mapping §8](arkiv-golem-db-mapping.md#branch-scoped-administration-required-api-extension)).
 
 For example, a model with activation commit 100 becomes active when committed head
 reaches 100. Branch work based on head 99 that produces commit 100 still uses the old
 schedule. Calls admitted at head 100, including reads of commit 20, use the new schedule
-and report `priced_at: 100`. This is a Golem DB committed-head boundary, not an implicit
+and report `priced_at: 100`. This is a GolemDB committed-head boundary, not an implicit
 rule to switch prices before executing a host block numbered 100.
 
-## D10. Golem DB Weights
+## D10. GolemDB Weights
 
 | Weight | Used for | Calibrated from [architecture §10](golem-db-architecture.md#structural-op-classes) op classes |
 | --- | --- | --- |
@@ -746,5 +746,5 @@ Receipt: 3 cells deleted, 2 index leaves; 171 cell bytes and 41 index bytes dele
 ## Open Questions
 
 1. **Is the D3 depth table worth it?** Realistic depths span 4–7 nodes, more likely 4–6. Is that range worth the extra code and a more complex pricing story for users, compared with one fixed depth folded into the weights?
-2. **Depth table as code or weights?** [Design §4](golem-db-design.md#meteringmodel-recordid-32) expresses tunable constants such as a modeled depth as named weights. Should D3's thresholds and depths be weights, tunable without a new model version?
+2. **Depth table as code or weights?** [Design §4](golemdb-design.md#meteringmodel-recordid-32) expresses tunable constants such as a modeled depth as named weights. Should D3's thresholds and depths be weights, tunable without a new model version?
 3. **Value of `#minRetention`.** How many commits must every node retain? It bounds full-node storage and sets the history residency that the write byte weights and the history part of `w_cell[op]` are calibrated for (D4).

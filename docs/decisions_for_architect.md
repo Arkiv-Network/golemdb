@@ -3,20 +3,20 @@
 Spec decisions raised by the design change programme (`CHANGES.md`, kind K2), written so that a
 reviewer who has not followed the programme can judge each one from this file alone. One entry per
 decision. An entry moves from **proposed** to **decided** when the architect records a choice below;
-the spec text then lands in `golem-db-design.md` and the entry's *Outcome* is filled in.
+the spec text then lands in `golemdb-design.md` and the entry's *Outcome* is filled in.
 
 Each entry has the same shape: the question as the current text leaves it, with citations · the
 serious alternatives with their trade-offs · a recommendation and its rationale · what would change
 the recommendation · the fixture or trace that closes the decision.
 
-Conventions: `§n` refers to `golem-db-design.md`; "API" to `golem-db-api.md`, both in this
+Conventions: `§n` refers to `golemdb-design.md`; "API" to `golemdb-api.md`, both in this
 directory.
 
 ## Index
 
 Status values: **waiting** (brief written, architect's choice pending) · **decided** (Outcome
 recorded; spec text pending) · **done** (spec text landed, register row closed). `[API]` marks a
-decision whose recommendation changes `golem-db-api.md`. "Blocks" lists what cannot proceed until
+decision whose recommendation changes `golemdb-api.md`. "Blocks" lists what cannot proceed until
 the decision lands. **#** is the suggested order of decision — dependencies first — and is stable:
 a new decision takes the next free integer; entries below appear in this order and carry it in
 their heading.
@@ -389,7 +389,7 @@ posting(p):
 ```
 
 - **Typed predicates at the bitmap level.** A literal names `(cellKey, typeTag, value…)`; its `Index`
-  key range lies entirely inside one type's run ([§5](golem-db-design.md#structural-index-key-formulation)), so a cell
+  key range lies entirely inside one type's run ([§5](golemdb-design.md#structural-index-key-formulation)), so a cell
   of another type under the same name is simply not in any posting list the literal touches — the
   API's "treated as absent" falls out of the key layout.
 - **Range and prefix are unions.** The cursor visits every term in the key range in ascending order;
@@ -472,7 +472,7 @@ which is precisely the adversarial input invariant 6 warns of.
 | Metering complexity | count terms and containers | count terms and containers; the container set is the pruned one |
 
 **Recommendation: B.** The two-tier index exists so that work scales with containers touched
-([§5](golem-db-design.md#why-the-posting-list-gets-a-second-tier)); charging for containers a correct evaluator never
+([§5](golemdb-design.md#why-the-posting-list-gets-a-second-tier)); charging for containers a correct evaluator never
 needs to open would contradict that rationale and make the API's "main optimization lever" claim
 false. The rule is one sentence: *canonical evaluation descends a term's `BitmapTrie` only into
 regions the running intermediate occupies; the first positive literal of each group has no
@@ -1078,7 +1078,7 @@ costs.
 
 ### What would change the recommendation
 
-A decision (P07) that a second engine must reproduce the root *without* adopting Golem DB's node
+A decision (P07) that a second engine must reproduce the root *without* adopting GolemDB's node
 format would make `leaf_value_hashes` an engine-private optimisation — B still works because the
 witness is `(Y, vh)`, however the server obtains `vh`; only the *cost* claim would change.
 
@@ -1390,7 +1390,7 @@ _(architect fills in per 10.2, 10.3, 10.4)_
     running the new code cannot check names, so the admin tool, which runs it, must reject
     unknown or missing names before sending the install. Undeclared names are ignored at
     activation.
-  - Golem DB writes warn logs for operators: at activation per missing or ignored name, and per
+  - GolemDB writes warn logs for operators: at activation per missing or ignored name, and per
     call failing on an unpriced weight.
   - Landed in metering D8/D9, design §4 and the API's *Administration*.
 
@@ -1603,9 +1603,9 @@ on:** P07 (is a second conformant engine a goal?). Feeds S05.
 ### Question
 
 `#alloc`, `#roots`, `#recordKeys`, `#params`, `@meteringModel`, `@modelWeight` are committed cells,
-so `StateRoot` is a function of Golem DB's bookkeeping layout, not only of the logical database. A
+so `StateRoot` is a function of GolemDB's bookkeeping layout, not only of the logical database. A
 second engine holding the same records would not agree on a root unless it reproduced §4 byte for
-byte (Fable Athena). Is that the contract, or a Golem DB choice?
+byte (Fable Athena). Is that the contract, or a GolemDB choice?
 
 ### Alternatives
 
@@ -1614,8 +1614,8 @@ byte (Fable Athena). Is that the contract, or a Golem DB choice?
 | What a second engine reproduces | §2–§4, §8 exactly | §2–§3, §8 for user cells and the index; its own bookkeeping |
 | Cost now | none | a third trie (or a partition of `CellTrie` by ID range: system records route under one fixed prefix), one more root in `#roots`/head (96 B), a preimage change |
 | Proofs | unchanged | a proof of a user cell no longer transits system cells; a proof of the allocator or a key binding goes through `SystemRoot` |
-| Honest description | "Golem DB's root" | "the database's root, plus this engine's root" |
-| P07 default | matches ("not a goal for v1; §4 layout is Golem DB's") | prepares for a goal nobody has set |
+| Honest description | "GolemDB's root" | "the database's root, plus this engine's root" |
+| P07 default | matches ("not a goal for v1; §4 layout is GolemDB's") | prepares for a goal nobody has set |
 
 **Recommendation: A for v1**, stated plainly in the normative-surface appendix (S05): *the
 commitment binds the engine's bookkeeping; an engine that computes the same `GlobalRoot` is a
@@ -1742,7 +1742,7 @@ fields; the starting ordinal bound in, so the same rows at a different position 
 
 | | A — **host** composes `AppHash = H(GlobalRoot ‖ logDigests)` and maintains that | B — **engine** writes commit `n`'s digests as cells at commit `n+1` (lag-one, like `#roots`), so the world-state root transitively commits the log |
 | --- | --- | --- |
-| Who builds | Arkiv | Golem DB |
+| Who builds | Arkiv | GolemDB |
 | Engine commits to log content | no — §11's stance today | yes, one commit late |
 | Cells per commit | none | one per segment (32 B), under a new system record `#logDigests` (id 5), same lag-one write as `#roots` |
 | Provable | against the host's `AppHash`, by host rules | against `GlobalRoot`, by the engine's ordinary cell proof; a light client with only the root can verify a receipt digest |
@@ -1798,10 +1798,10 @@ documents).
 | P04 | decided | Arkiv vocabulary inside a generic engine | **Reword the two definitional uses (§8 "block headers", §11 ¶1); keep examples** | Requirements: "Genericity … is the enforcement mechanism: an engine that can support a cycling-event tracker cannot have smuggled in a blockchain concept" | K1-sized edit, scheduled with the Phase 3 moves |
 | P05 | decided | §11 segments: adopted or still a proposal | **Adopted** as the design of a stated requirement, with two additions owed | Requirements SE-1 *Immutable log*: append-only, `(segment, ordinal)`, outside the root, pruned with retention, may contain its own commit's root, **and "for each commit the engine returns a deterministic digest of the rows appended to each log"** | §11 status `proposed` → `recorded, open`; catalogue rows lose *proposed*; D17 live; **D19** added for the digest; shard-mark survival stays in D05 |
 | P06 | done (2026-10-01) | "Full history" (§1 property 5) vs. a retention window | **A minimum retention window as an instance parameter; beyond it the consensus-path API refuses on every node; deeper history is a separate archival surface** | Requirements DI-7 *History*, CS-5 ("minimum retention window"), glossary *Retention window* | Property 5 qualified; D05 5.2 revised; history's *tier* stays open (OQ2 below) |
-| P07 | done (2026-10-01) | Is a second conformant engine a goal? | **Yes, and conformance includes the root** | Requirements: "Golem-DB is swappable … the first implementation of that contract"; NF-8: a second engine must pass "encodings, **commitment vectors**, query results, cost receipts"; DI-2: the commitment covers "every piece of engine state that affects results" | D18 = A; its partitioned-root alternative withdrawn — the reserved layout is normative *by requirement* |
+| P07 | done (2026-10-01) | Is a second conformant engine a goal? | **Yes, and conformance includes the root** | Requirements: "GolemDB is swappable … the first implementation of that contract"; NF-8: a second engine must pass "encodings, **commitment vectors**, query results, cost receipts"; DI-2: the commitment covers "every piece of engine state that affects results" | D18 = A; its partitioned-root alternative withdrawn — the reserved layout is normative *by requirement* |
 | **P08** | waiting | Standalone negation and existence terms: must the live DSL's `!=` / `!` on their own survive into v0.1? | **Recommend yes → adopt the live-set index term** (D01 1.1-B / 1.2-B): one engine-maintained term over all live `recordID`s, +1 container write per create and per delete; gives a universe for `NOT`, `!=`, `EXISTS`, match-all, and a free `count(*)`. D01 1.1-A would reject `status != "open"` as `InvalidQuery` | Live product: `!=` and `!` are first-class operators today; requirements OQ6 asks the same question | Product owner confirms. If yes: D01 1.1 → B, 1.2 → B, and the API's "≥ 1 positive literal" `[API]` change is dropped. Also record which `!=` semantics the live DSL has, SQL-style (excludes entities without the attribute) or MongoDB-style (includes them): the input to D01 1.5 |
 | **P09** | waiting | Glob `~`: general, prefix-only, or dropped? | **Recommend prefix-only**: a literal followed by one trailing wildcard compiles to the §5 prefix scan; any other pattern ⇒ `InvalidQuery` at the SDK. Interior or leading wildcards are unbounded scans with no deterministic cost shape | Live product has general glob; the target draft says "no glob … glob pricing is nontrivial" | Product owner accepts the regression; one sentence in D01; an SDK rule |
-| OQ3 | decided | Queries inside a branch (requirements open question 3) | **Keep the API rule — queries read committed state, `N−1` — and accept a one-block lag.** Arkiv's expiry must find entities with `expiresAtBlock ≤ N` while executing block `N`; an entity created and already-expired in the same block is collected at `N+1`. Nothing else in the live product queries during execution; extending `query` through the overlay would cost an index overlay read path and a second cost model for one edge case | Live product: "issues deterministic Golem-DB deletes during block processing" | No engine change; answer to be reflected into the requirements' OQ3 |
+| OQ3 | decided | Queries inside a branch (requirements open question 3) | **Keep the API rule — queries read committed state, `N−1` — and accept a one-block lag.** Arkiv's expiry must find entities with `expiresAtBlock ≤ N` while executing block `N`; an entity created and already-expired in the same block is collected at `N+1`. Nothing else in the live product queries during execution; extending `query` through the overlay would cost an index overlay read path and a second cost model for one edge case | Live product: "issues deterministic GolemDB deletes during block processing" | No engine change; answer to be reflected into the requirements' OQ3 |
 | OQ2 | open | History's tier: who reads past state, how far back, how often | Today's demand is **zero** — the live product exposes no as-of read, only events — so the minimum window can be small (a day of blocks) and D05 5.7-B (synced-node exemption) is safe. "How far back will RPC and light clients want" is a forward-looking product call | Live product (absence of the feature) | Product owner; sets `#minRetention` |
 | OQ5 | open | Namespacing / multi-tenancy: engine mechanism or business logic | Not a live feature; not blocking. If the engine route is taken it becomes a requirement and a new D-row (a scope parameter on every operation, partitioning keys and index terms) | — | Product owner; no deadline |
 

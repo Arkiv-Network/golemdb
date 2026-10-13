@@ -8,7 +8,7 @@ Status: draft, 2026-10-09.
 ## The situation
 
 - **One implementation counts: `feature/golem-db-api`** (`95a24ea`). `feat/record-ops` was an
-  experiment to find a good shape for the API. The API spec, [golem-db-api.md](golem-db-api.md), records
+  experiment to find a good shape for the API. The API spec, [golemdb-api.md](golemdb-api.md), records
   the shape it arrived at, so the spec is the target and `feature/golem-db-api` is the code that
   gets there.
 - **Breaking changes are nearly free for about four weeks.** No consumer depends on the API yet,
@@ -39,12 +39,12 @@ stored-format change whose later migration grows with the data.
 
 | Gap in `feature/golem-db-api` | Target | Reference |
 | --- | --- | --- |
-| Record calls return `Result<T>` | `Metered<T>`: result plus receipt, also on failure | API [Receipts](golem-db-api.md#receipts) |
-| `RecordOp::create(key)` requires a key | `create()` with an optional `.key(k)`, decided by the key mode | API [Record keys](golem-db-api.md#record-keys) |
-| No budget | explicit `Budget::Limited(n) \| Unlimited`, no default | API [Agreed changes](golem-db-api.md#agreed-changes-not-yet-implemented) |
-| `insert` (create) and `set` (patch) keep the *value's* kind, which defaults to field | `insert` removed; `set` keeps the **stored** cell's kind and fails with the new `CellNotFound { name }` if the cell does not exist | API [Agreed changes](golem-db-api.md#agreed-changes-not-yet-implemented) |
-| Builder steps return `Result<Self>` | **proposed:** steps never fail; the first invalid step is reported by the call, with a receipt, which is the shape the metering spec asks for | API [`RecordOp`](golem-db-api.md#recordop) |
-| No `#meta` cell | `#meta` on every user record: four counts over its user cells, maintained by every write | API [`#meta`](golem-db-api.md#meta) |
+| Record calls return `Result<T>` | `Metered<T>`: result plus receipt, also on failure | API [Receipts](golemdb-api.md#receipts) |
+| `RecordOp::create(key)` requires a key | `create()` with an optional `.key(k)`, decided by the key mode | API [Record keys](golemdb-api.md#record-keys) |
+| No budget | explicit `Budget::Limited(n) \| Unlimited`, no default | API [Agreed changes](golemdb-api.md#agreed-changes-not-yet-implemented) |
+| `insert` (create) and `set` (patch) keep the *value's* kind, which defaults to field | `insert` removed; `set` keeps the **stored** cell's kind and fails with the new `CellNotFound { name }` if the cell does not exist | API [Agreed changes](golemdb-api.md#agreed-changes-not-yet-implemented) |
+| Builder steps return `Result<Self>` | **proposed:** steps never fail; the first invalid step is reported by the call, with a receipt, which is the shape the metering spec asks for | API [`RecordOp`](golemdb-api.md#recordop) |
+| No `#meta` cell | `#meta` on every user record: four counts over its user cells, maintained by every write | API [`#meta`](golemdb-api.md#meta) |
 
 The receipt can report cost 0 and the budget can be accepted and ignored until metering exists;
 what matters is that the signatures carry them. `Details` and `#meta` count the same effects, so

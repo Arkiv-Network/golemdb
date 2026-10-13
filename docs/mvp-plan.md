@@ -16,7 +16,7 @@ read them back, query them by attribute, and look up their blocks and transactio
   fitting together. The plan is built around one vertical slice that Arkiv can run end to end
   early, and widened as far as the testnet needs. Any additional features come after features required for hackathons.
 - **Final API shape, thin implementation.** Every call has its target signature from the start
-  ([golem-db-api.md](golem-db-api.md)); what is not built returns `NotImplemented`. Later work
+  ([golemdb-api.md](golemdb-api.md)); what is not built returns `NotImplemented`. Later work
   fills in behaviour without moving the contract.
 - **Freeze early.** The API the integration builds on is frozen within the first days; later
   changes need a reason the integration owner agrees to.
@@ -66,7 +66,7 @@ Two simplifications keep this feasible:
 
 **2. Write metering (second, into the testnet only if ready by the feature freeze).**
 
-Implement the write cost model of [metering](golem-db-metering.md) D2 to D5, which is specified
+Implement the write cost model of [metering](golemdb-metering.md) D2 to D5, which is specified
 and has been reviewed, so `receipt.cost` carries real costs for `create`, `patch` and `delete`.
 It changes no signature. Simplifications for the testnet, each allowed by the spec:
 
@@ -103,7 +103,7 @@ decided in a later iteration.
 currently rests on one person. 
 Top priority is Raj and Emanuel agreeing and understanding the focus.
 
-A potential first task is the **immutable logs MVP** ([design §11](golem-db-design.md#appending-to-a-branch)):
+A potential first task is the **immutable logs MVP** ([design §11](golemdb-design.md#appending-to-a-branch)):
 appends on open or sealed branches, gets by ordinal and by key, `range_of`, `rows_of`, over an
 uncommitted MDBX table, including the API part of these calls. Arkiv's block and transaction RPC
 depends on it. If Emanuel takes it:
