@@ -9,9 +9,3 @@ test test_name="":
 [group('test')]
 nextest test_name="":
   cargo nextest run {{test_name}} --workspace --all-features 
-
-
-# Run all benches
-[group('test')]
-bench bench_name="":
-  cargo bench --workspace --all-features --no-run

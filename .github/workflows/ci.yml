@@ -50,6 +50,6 @@ jobs:
       - name: Install Just command runner
         uses: extractions/setup-just@v3
 
-      - name: bench
+      - name: build bench
         run: |
-          just bench
+          just build-bench
