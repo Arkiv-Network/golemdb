@@ -31,11 +31,11 @@ jobs:
         run: |
           just build
 
-      - name: test
+      - name: test doc
         run: |
-          just test
+          just test_doc
 
-      - name: nextest
+      - name: test
         run: |
           just nextest
 
@@ -52,4 +52,4 @@ jobs:
 
       - name: build bench
         run: |
-          just build-bench
+          just build_bench

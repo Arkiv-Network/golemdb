@@ -7,5 +7,5 @@ build:
 
 # Build benches
 [group('build')]
-build-bench bench_name="":
+build_bench:
   cargo bench --workspace --all-features --no-run
