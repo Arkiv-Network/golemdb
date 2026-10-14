@@ -16,31 +16,47 @@ pub struct TermRange {
     upper: Bound<Vec<u8>>,
 }
 
+/// Why bounds make no [`TermRange`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RangeError {
+    #[error("a range needs at least one bound")]
+    NoBound,
+    #[error("range bounds of two types: {lower:?} and {upper:?}")]
+    TypeMismatch { lower: CellType, upper: CellType },
+    #[error("range lower bound is above its upper bound")]
+    Inverted,
+    /// The name, or the bounds' type, has no index term.
+    #[error(transparent)]
+    Term(#[from] TermError),
+}
+
 impl TermRange {
-    /// The terms of `name` and type `ty` whose value lies between `lower`
-    /// and `upper`. A bounded side is the term of its value; an unbounded
-    /// side reaches the end of the run.
+    /// The terms of `name` whose value lies between `lower` and `upper`, in
+    /// the run of the bounds' type. A bounded side is the term of its value;
+    /// an unbounded side reaches the end of the run.
     ///
-    /// Fails as [`IndexTerm::for_cell_name`] does on the name or the type,
-    /// and with [`TermError::TypeMismatch`] on a bound of another type.
-    /// Inverted bounds are not rejected here: scanning them fails.
+    /// The bounds' shape is checked first, without building a term:
+    /// [`RangeError::NoBound`], then [`RangeError::TypeMismatch`]. Then the
+    /// name and the type, as [`IndexTerm::for_cell_name`] does
+    /// ([`RangeError::Term`]), and last [`RangeError::Inverted`] on the keys.
     pub fn between(
         name: CellNameRef<'_>,
-        ty: CellType,
         lower: Bound<CellValueRef<'_>>,
         upper: Bound<CellValueRef<'_>>,
-    ) -> Result<Self, TermError> {
-        let name = name_str(name)?;
-        let run = IndexTerm::prefix(name, ty)?;
-        let term = |value: CellValueRef<'_>| {
-            if value.cell_type() != ty {
-                return Err(TermError::TypeMismatch {
-                    expected: ty,
-                    actual: value.cell_type(),
+    ) -> Result<Self, RangeError> {
+        let ty = match (bound_value(lower), bound_value(upper)) {
+            (None, None) => return Err(RangeError::NoBound),
+            (Some(low), Some(high)) if low.cell_type() != high.cell_type() => {
+                return Err(RangeError::TypeMismatch {
+                    lower: low.cell_type(),
+                    upper: high.cell_type(),
                 });
             }
-            Ok(IndexTerm::for_value(name, value)?.into_bytes())
+            (Some(value), _) | (None, Some(value)) => value.cell_type(),
         };
+        let name = name_str(name)?;
+        let run = IndexTerm::prefix(name, ty)?;
+        let term = |value| IndexTerm::for_value(name, value).map(IndexTerm::into_bytes);
         let lower = match lower {
             Bound::Included(value) => Bound::Included(term(value)?),
             Bound::Excluded(value) => Bound::Excluded(term(value)?),
@@ -51,6 +67,16 @@ impl TermRange {
             Bound::Excluded(value) => Bound::Excluded(term(value)?),
             Bound::Unbounded => past(run),
         };
+        // The keys share the run's prefix, so key order is value order. This
+        // is the check a storage scan makes: one never fails on these bounds.
+        if let (
+            Bound::Included(low) | Bound::Excluded(low),
+            Bound::Included(high) | Bound::Excluded(high),
+        ) = (&lower, &upper)
+            && low > high
+        {
+            return Err(RangeError::Inverted);
+        }
         Ok(Self { lower, upper })
     }
 
@@ -60,6 +86,13 @@ impl TermRange {
             self.lower.as_ref().map(Vec::as_slice),
             self.upper.as_ref().map(Vec::as_slice),
         )
+    }
+}
+
+fn bound_value<T>(bound: Bound<T>) -> Option<T> {
+    match bound {
+        Bound::Included(value) | Bound::Excluded(value) => Some(value),
+        Bound::Unbounded => None,
     }
 }
 
@@ -90,25 +123,18 @@ mod tests {
     /// Raw, so tests can also pass names the grammar rejects.
     fn between(
         name: &[u8],
-        ty: CellType,
         lower: Bound<CellValue>,
         upper: Bound<CellValue>,
-    ) -> Result<TermRange, TermError> {
+    ) -> Result<TermRange, RangeError> {
         TermRange::between(
             CellNameRef::raw(name),
-            ty,
             lower.as_ref().map(CellValue::as_view),
             upper.as_ref().map(CellValue::as_view),
         )
     }
 
-    fn range(
-        name: &str,
-        ty: CellType,
-        lower: Bound<&CellValue>,
-        upper: Bound<&CellValue>,
-    ) -> TermRange {
-        between(name.as_bytes(), ty, lower.cloned(), upper.cloned()).expect("valid range")
+    fn range(name: &str, lower: Bound<&CellValue>, upper: Bound<&CellValue>) -> TermRange {
+        between(name.as_bytes(), lower.cloned(), upper.cloned()).expect("valid range")
     }
 
     fn term(name: &str, value: &CellValue) -> IndexTerm {
@@ -140,77 +166,110 @@ mod tests {
 
     #[test]
     fn included_bounds_are_the_terms_of_their_values() {
-        let range = between(b"a", U32, Included(u32(1)), Included(u32(7))).unwrap();
+        let range = between(b"a", Included(u32(1)), Included(u32(7))).unwrap();
         assert_eq!(range.bounds(), (Included(ONE), Included(SEVEN)));
     }
 
     #[test]
     fn excluded_bounds_are_the_terms_of_their_values() {
-        let range = between(b"a", U32, Excluded(u32(1)), Excluded(u32(7))).unwrap();
+        let range = between(b"a", Excluded(u32(1)), Excluded(u32(7))).unwrap();
         assert_eq!(range.bounds(), (Excluded(ONE), Excluded(SEVEN)));
     }
 
     #[test]
     fn an_unbounded_lower_side_starts_at_the_run() {
-        let range = between(b"a", U32, Unbounded, Included(u32(7))).unwrap();
+        let range = between(b"a", Unbounded, Included(u32(7))).unwrap();
         assert_eq!(range.bounds(), (Included(RUN_START), Included(SEVEN)));
     }
 
     #[test]
     fn an_unbounded_upper_side_ends_past_the_run() {
-        let range = between(b"a", U32, Included(u32(1)), Unbounded).unwrap();
+        let range = between(b"a", Included(u32(1)), Unbounded).unwrap();
         assert_eq!(range.bounds(), (Included(ONE), Excluded(RUN_END)));
     }
 
     #[test]
-    fn a_range_with_no_bound_is_the_whole_run() {
-        let range = between(b"a", U32, Unbounded, Unbounded).unwrap();
-        assert_eq!(range.bounds(), (Included(RUN_START), Excluded(RUN_END)));
+    fn a_range_needs_a_bound() {
+        assert_eq!(
+            between(b"a", Unbounded, Unbounded),
+            Err(RangeError::NoBound)
+        );
     }
 
     #[test]
-    fn inverted_bounds_are_not_checked() {
-        // Scanning them fails in storage instead.
-        let range = between(b"a", U32, Included(u32(7)), Included(u32(1))).unwrap();
-        assert_eq!(range.bounds(), (Included(SEVEN), Included(ONE)));
+    fn bounds_of_two_types_are_a_mismatch() {
+        let result = between(b"a", Included(u32(1)), Excluded(CellValue::from_i32(1)));
+        let mismatch = RangeError::TypeMismatch {
+            lower: U32,
+            upper: CellType::Int(Width::W4),
+        };
+        assert_eq!(result, Err(mismatch));
+    }
+
+    #[test]
+    fn inverted_bounds_are_rejected() {
+        for (lower, upper) in [
+            (Included(u32(7)), Included(u32(1))),
+            (Excluded(u32(7)), Excluded(u32(1))),
+            (Included(u32(1)), Excluded(u32(0))),
+        ] {
+            let result = between(b"a", lower.clone(), upper.clone());
+            assert_eq!(result, Err(RangeError::Inverted), "{lower:?}..{upper:?}");
+        }
+    }
+
+    #[test]
+    fn equal_bounds_with_an_excluded_side_are_empty() {
+        let (run, neighbours) = neighbourhood();
+        let all = [run.clone(), neighbours].concat();
+        let seven = u32(7);
+        assert_eq!(
+            within(&range("a", Included(&seven), Included(&seven)), &all),
+            [&run[2]]
+        );
+        for (lower, upper) in [
+            (Included(&seven), Excluded(&seven)),
+            (Excluded(&seven), Included(&seven)),
+            (Excluded(&seven), Excluded(&seven)),
+        ] {
+            let empty = range("a", lower, upper);
+            assert!(within(&empty, &all).is_empty(), "{lower:?}..{upper:?}");
+        }
     }
 
     #[test]
     fn a_name_that_is_not_utf8_is_invalid() {
-        let result = between(&[0xff], U32, Unbounded, Unbounded);
-        assert_eq!(result, Err(TermError::InvalidName));
+        let result = between(&[0xff], Included(u32(1)), Unbounded);
+        assert_eq!(result, Err(RangeError::Term(TermError::InvalidName)));
     }
 
     #[test]
     fn a_name_outside_the_grammar_is_invalid() {
-        let result = between(b"1a", U32, Unbounded, Unbounded);
-        assert_eq!(result, Err(TermError::InvalidName));
+        let result = between(b"1a", Unbounded, Included(u32(1)));
+        assert_eq!(result, Err(RangeError::Term(TermError::InvalidName)));
     }
 
     #[test]
     fn bytes_has_no_run() {
-        let result = between(b"a", CellType::Bytes, Unbounded, Unbounded);
-        assert_eq!(result, Err(TermError::UnsupportedType(CellType::Bytes)));
+        let result = between(b"a", Included(CellValue::from_bytes(b"x")), Unbounded);
+        let unsupported = TermError::UnsupportedType(CellType::Bytes);
+        assert_eq!(result, Err(RangeError::Term(unsupported)));
     }
 
     #[test]
-    fn a_lower_bound_of_another_type_is_a_mismatch() {
-        let result = between(b"a", U32, Included(CellValue::from_u64(1)), Unbounded);
-        let mismatch = TermError::TypeMismatch {
-            expected: U32,
-            actual: CellType::Uint(Width::W8),
-        };
-        assert_eq!(result, Err(mismatch));
-    }
-
-    #[test]
-    fn an_upper_bound_of_another_type_is_a_mismatch() {
-        let result = between(b"a", U32, Unbounded, Excluded(CellValue::from_i32(1)));
-        let mismatch = TermError::TypeMismatch {
-            expected: U32,
-            actual: CellType::Int(Width::W4),
-        };
-        assert_eq!(result, Err(mismatch));
+    fn the_shape_is_checked_before_the_name_and_inversion_after() {
+        assert_eq!(
+            between(b"1a", Unbounded, Unbounded),
+            Err(RangeError::NoBound)
+        );
+        assert!(matches!(
+            between(b"1a", Included(u32(1)), Included(CellValue::from_u64(1))),
+            Err(RangeError::TypeMismatch { .. })
+        ));
+        assert_eq!(
+            between(b"1a", Included(u32(7)), Included(u32(1))),
+            Err(RangeError::Term(TermError::InvalidName))
+        );
     }
 
     /// `u32` terms of `a` with neighbours on every side: other types under `a`,
@@ -234,18 +293,23 @@ mod tests {
     }
 
     #[test]
-    fn an_unbounded_range_covers_exactly_its_run() {
+    fn unbounded_sides_stay_in_the_run() {
         let (run, neighbours) = neighbourhood();
         let all = [run.clone(), neighbours].concat();
-        let range = range("a", U32, Unbounded, Unbounded);
-        assert!(within(&range, &all).into_iter().eq(&run));
+        let (min, max) = (u32(0), u32(u32::MAX));
+        for range in [
+            range("a", Unbounded, Included(&max)),
+            range("a", Included(&min), Unbounded),
+        ] {
+            assert!(within(&range, &all).into_iter().eq(&run), "{range:?}");
+        }
     }
 
     #[test]
     fn bounds_are_values_in_the_run() {
         let (run, neighbours) = neighbourhood();
         let all = [run.clone(), neighbours].concat();
-        let (one, seven) = (CellValue::from_u32(1), CellValue::from_u32(7));
+        let (one, seven) = (u32(1), u32(7));
         for (lower, upper, expected) in [
             (Included(&one), Included(&seven), &run[1..3]),
             (Excluded(&one), Included(&seven), &run[2..3]),
@@ -256,7 +320,7 @@ mod tests {
             (Unbounded, Included(&seven), &run[..3]),
             (Unbounded, Excluded(&seven), &run[..2]),
         ] {
-            let got = within(&range("a", U32, lower, upper), &all);
+            let got = within(&range("a", lower, upper), &all);
             assert!(got.into_iter().eq(expected), "{lower:?}..{upper:?}");
         }
     }
@@ -265,13 +329,12 @@ mod tests {
     fn the_empty_string_is_the_least_str() {
         let (empty, a) = (CellValue::from_str(""), CellValue::from_str("a"));
         let all = [term("s", &empty), term("s", &a)];
-        let ty = CellType::Str;
-        let at_most_empty = range("s", ty, Unbounded, Included(&empty));
+        let at_most_empty = range("s", Unbounded, Included(&empty));
         assert!(within(&at_most_empty, &all).into_iter().eq(&all[..1]));
         // The excluded empty string is the run's own prefix: nothing lies below.
-        let below_empty = range("s", ty, Unbounded, Excluded(&empty));
+        let below_empty = range("s", Unbounded, Excluded(&empty));
         assert!(within(&below_empty, &all).is_empty());
-        let above_empty = range("s", ty, Excluded(&empty), Unbounded);
+        let above_empty = range("s", Excluded(&empty), Unbounded);
         assert!(within(&above_empty, &all).into_iter().eq(&all[1..]));
     }
 

@@ -125,8 +125,7 @@ mod tests {
         }
     }
 
-    /// A source whose every read fails. A scan fails at its first term, and
-    /// panics if stepped past it.
+    /// A source whose every read fails. A scan fails at its first term.
     struct FailingSource;
 
     impl PostingSource for FailingSource {
@@ -139,9 +138,46 @@ mod tests {
             _: &'a TermRange,
         ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>
         {
-            let past_the_error = std::iter::from_fn(|| panic!("scan stepped past an error"));
-            Ok(std::iter::once(Err(IndexError::Corruption("injected"))).chain(past_the_error))
+            Ok(injected_failure())
         }
+    }
+
+    /// A [`FakeSource`] whose scans read `good` terms, then fail.
+    struct FailingMidScan {
+        inner: FakeSource,
+        good: usize,
+    }
+
+    impl PostingSource for FailingMidScan {
+        fn postings(&self, term: &IndexTerm) -> golemdb_index::Result<Bitmap> {
+            self.inner.postings(term)
+        }
+
+        fn scan<'a>(
+            &'a self,
+            range: &'a TermRange,
+        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>
+        {
+            Ok(self
+                .inner
+                .scan(range)?
+                .take(self.good)
+                .chain(injected_failure()))
+        }
+    }
+
+    /// The injected read error, then a panic if a scan is stepped past it.
+    fn injected_failure() -> impl Iterator<Item = golemdb_index::Result<Bitmap>> {
+        let past_the_error = std::iter::from_fn(|| panic!("scan stepped past an error"));
+        std::iter::once(Err(IndexError::Corruption("injected"))).chain(past_the_error)
+    }
+
+    fn is_injected_failure(result: &Result<Bitmap>) -> bool {
+        matches!(
+            result,
+            Err(QueryError::Internal(source))
+                if matches!(source.downcast_ref(), Some(IndexError::Corruption("injected")))
+        )
     }
 
     /// Raw, so tests can also build names the grammar rejects.
@@ -315,6 +351,10 @@ mod tests {
             (i32s(Unbounded, Excluded(0)), &[1, 3, 10]),
             (i32s(Unbounded, Included(-4)), &[]),
             (i32s(Excluded(1), Unbounded), &[4, 10]),
+            // Equal bounds with an excluded side: well-formed, and empty.
+            (i32s(Included(1), Excluded(1)), &[]),
+            (i32s(Excluded(1), Included(1)), &[]),
+            (i32s(Excluded(1), Excluded(1)), &[]),
             (
                 i32s(Included(i32::MIN), Included(i32::MAX)),
                 &[0, 1, 3, 4, 10],
@@ -399,17 +439,11 @@ mod tests {
             range("a", Unbounded, Unbounded),
             range("a", Included(u(1)), Included(CellValue::from_u64(2))),
             range("a", Included(u(2)), Included(u(1))),
-            range("a", Included(u(1)), Excluded(u(1))),
-            range("a", Excluded(u(1)), Included(u(1))),
-            range("a", Excluded(u(1)), Excluded(u(1))),
+            range("a", Excluded(u(2)), Excluded(u(1))),
             i32s(Included(1), Included(-1)),
             // The shape is checked before the field and the type.
             range("1bad", Unbounded, Unbounded),
-            range(
-                "b",
-                Included(CellValue::from_bytes(b"y")),
-                Included(CellValue::from_bytes(b"x")),
-            ),
+            range("1bad", Included(u(1)), Excluded(str("x"))),
         ] {
             assert!(
                 matches!(
@@ -480,6 +514,25 @@ mod tests {
                 name(b"b"),
                 TermError::UnsupportedType(CellType::Bytes),
             ),
+            // Inversion is checked on the terms, after the field and the type.
+            (
+                range(
+                    "1bad",
+                    Bound::Included(CellValue::from_u32(2)),
+                    Bound::Included(CellValue::from_u32(1)),
+                ),
+                name(b"1bad"),
+                TermError::InvalidName,
+            ),
+            (
+                range(
+                    "b",
+                    Bound::Included(CellValue::from_bytes(b"y")),
+                    Bound::Included(CellValue::from_bytes(b"x")),
+                ),
+                name(b"b"),
+                TermError::UnsupportedType(CellType::Bytes),
+            ),
         ] {
             match evaluate(&FailingSource, &filter) {
                 Err(QueryError::InvalidArgument { field: got, source }) => {
@@ -503,11 +556,28 @@ mod tests {
             ),
         ] {
             let result = evaluate(&FailingSource, &filter);
-            assert!(matches!(
-                result,
-                Err(QueryError::Internal(source))
-                    if matches!(source.downcast_ref(), Some(IndexError::Corruption("injected")))
-            ));
+            assert!(is_injected_failure(&result), "{filter:?}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn a_scan_failing_midway_fails_the_range_with_no_partial_union() {
+        let inner = || {
+            [-1, 0, 1]
+                .into_iter()
+                .fold(FakeSource::default(), |source, n| {
+                    source.with("n", CellValue::from_i32(n), [n.unsigned_abs().into()])
+                })
+        };
+        let filter = i32s(Bound::Unbounded, Bound::Included(i32::MAX));
+        // Fails after the first term, after the second, and after the last.
+        for good in 1..=3 {
+            let source = FailingMidScan {
+                inner: inner(),
+                good,
+            };
+            let result = evaluate(&source, &filter);
+            assert!(is_injected_failure(&result), "{good}: {result:?}");
         }
     }
 }

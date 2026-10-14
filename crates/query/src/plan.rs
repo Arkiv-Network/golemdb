@@ -2,10 +2,10 @@
 //! before any state read and resolves its leaves to the index work they need.
 //! Pure; no storage access.
 
-use std::{cmp::Ordering, collections::BTreeSet, ops::Bound};
+use std::{collections::BTreeSet, ops::Bound};
 
 use golemdb_cells::{CellName, CellValue};
-use golemdb_index::{IndexTerm, TermRange};
+use golemdb_index::{IndexTerm, RangeError, TermRange};
 
 use crate::{Filter, QueryError, Result};
 
@@ -29,7 +29,7 @@ impl TryFrom<&Filter> for Plan {
     /// Admission: fails with [`QueryError::InvalidArgument`] on a leaf with no
     /// valid index term, and with [`QueryError::InvalidQuery`] on a malformed
     /// leaf (an empty `In`, or one whose values differ in type; a `Range` with
-    /// no bound, bounds of two types, or inverted bounds).
+    /// no bound, bounds of two types, or a lower bound above the upper).
     fn try_from(filter: &Filter) -> Result<Self> {
         match filter {
             Filter::Eq { field, value } => Ok(Self::TermRead(term(field, value)?)),
@@ -43,61 +43,34 @@ impl TryFrom<&Filter> for Plan {
     }
 }
 
-/// The terms of `field` between `lower` and `upper`. The bounds' shape is
-/// checked first, without building a term, then the field and the bounds'
-/// type as an `Eq` leaf's would be.
+/// The terms of `field` between `lower` and `upper`, checked as
+/// [`TermRange::between`] checks them: a field or type with no index term
+/// fails as an `Eq` leaf's would, and a malformed range is an invalid query.
 fn range(
     field: &CellName,
     lower: &Bound<CellValue>,
     upper: &Bound<CellValue>,
 ) -> Result<TermRange> {
-    let ty = match (bound_value(lower), bound_value(upper)) {
-        (None, None) => {
-            return Err(QueryError::InvalidQuery {
-                reason: "`Range` needs at least one bound",
-            });
-        }
-        (Some(value), None) | (None, Some(value)) => value.cell_type(),
-        (Some(low), Some(high)) => {
-            if low.cell_type() != high.cell_type() {
-                return Err(QueryError::InvalidQuery {
-                    reason: "`Range` bounds must have one type",
-                });
-            }
-            // Payloads are order-encoded, so within one type their byte order
-            // is the values' order.
-            let admits_values = match low.value().cmp(high.value()) {
-                Ordering::Less => true,
-                Ordering::Equal => {
-                    matches!((lower, upper), (Bound::Included(_), Bound::Included(_)))
-                }
-                Ordering::Greater => false,
-            };
-            if !admits_values {
-                return Err(QueryError::InvalidQuery {
-                    reason: "`Range` lower bound must be below the upper, or equal with both included",
-                });
-            }
-            low.cell_type()
-        }
-    };
     TermRange::between(
         field.as_view(),
-        ty,
         lower.as_ref().map(CellValue::as_view),
         upper.as_ref().map(CellValue::as_view),
     )
-    .map_err(|source| QueryError::InvalidArgument {
-        field: field.clone(),
-        source,
+    .map_err(|error| match error {
+        RangeError::Term(source) => QueryError::InvalidArgument {
+            field: field.clone(),
+            source,
+        },
+        RangeError::NoBound => QueryError::InvalidQuery {
+            reason: "`Range` needs at least one bound",
+        },
+        RangeError::TypeMismatch { .. } => QueryError::InvalidQuery {
+            reason: "`Range` bounds must have one type",
+        },
+        RangeError::Inverted => QueryError::InvalidQuery {
+            reason: "`Range` lower bound must not be above the upper",
+        },
     })
-}
-
-fn bound_value(bound: &Bound<CellValue>) -> Option<&CellValue> {
-    match bound {
-        Bound::Included(value) | Bound::Excluded(value) => Some(value),
-        Bound::Unbounded => None,
-    }
 }
 
 /// The terms of `field IN values`, sorted by key and deduplicated. The list's
@@ -133,7 +106,7 @@ fn term(field: &CellName, value: &CellValue) -> Result<IndexTerm> {
 
 #[cfg(test)]
 mod tests {
-    use golemdb_cells::{CellNameRef, CellType, Width};
+    use golemdb_cells::{CellNameRef, CellType};
     use golemdb_index::TermError;
 
     use super::*;
@@ -276,10 +249,10 @@ mod tests {
             (Bound::Excluded(&low), Bound::Unbounded),
             (Bound::Unbounded, Bound::Included(&high)),
             (Bound::Included(&high), Bound::Included(&high)),
+            (Bound::Excluded(&high), Bound::Excluded(&high)),
         ] {
             let expected = TermRange::between(
                 field.as_view(),
-                CellType::Int(Width::W8),
                 lower.map(CellValue::as_view),
                 upper.map(CellValue::as_view),
             )

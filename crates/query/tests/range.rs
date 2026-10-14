@@ -4,7 +4,11 @@
 
 mod support;
 
-use std::{cmp::Ordering, collections::BTreeMap, ops::Bound};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    ops::Bound,
+};
 
 use golemdb_api::{ApiError, RecordKey};
 use golemdb_cells::{CellType, CellValue};
@@ -148,8 +152,10 @@ fn the_fixture_is_ascending_and_covers_every_indexable_type() {
             );
         }
     }
-    // 23 indexable types: all but variable-length bytes.
+    // 23 indexable types, one list each: all but variable-length bytes.
+    let types: BTreeSet<_> = lists.iter().map(|list| list[0].cell_type().id()).collect();
     assert_eq!(lists.len(), 23);
+    assert_eq!(types.len(), lists.len());
 }
 
 #[test]
@@ -270,8 +276,7 @@ fn malformed_range_is_an_invalid_query() {
             Bound::Excluded(CellValue::from_i64(2)),
         ),
         range("f", Bound::Included(i(1)), Bound::Included(i(-1))),
-        range("f", Bound::Excluded(i(1)), Bound::Included(i(1))),
-        range("f", Bound::Included(i(1)), Bound::Excluded(i(1))),
+        range("f", Bound::Excluded(i(1)), Bound::Excluded(i(0))),
     ] {
         assert!(
             matches!(
@@ -288,6 +293,24 @@ fn malformed_range_is_an_invalid_query() {
             "{filter:?}"
         );
     }
+}
+
+#[test]
+fn equal_bounds_with_an_excluded_side_match_nothing() {
+    let test = TestDb::default();
+    test.create([record(key(1), &[("f", CellValue::from_i32(1))])]);
+    let one = || CellValue::from_i32(1);
+    for (lower, upper) in [
+        (Bound::Included(one()), Bound::Excluded(one())),
+        (Bound::Excluded(one()), Bound::Included(one())),
+        (Bound::Excluded(one()), Bound::Excluded(one())),
+    ] {
+        let filter = range("f", lower, upper);
+        assert!(test.keys(filter.clone()).unwrap().is_empty(), "{filter:?}");
+        assert_eq!(test.count(filter).unwrap(), 0);
+    }
+    let point = range("f", Bound::Included(one()), Bound::Included(one()));
+    assert_eq!(test.keys(point).unwrap(), [key(1)]);
 }
 
 #[test]
@@ -318,18 +341,16 @@ fn field() -> impl Strategy<Value = &'static str> {
     prop::sample::select(&FIELDS[..])
 }
 
-/// Whether admission accepts the bounds: at least one, and not inverted in
-/// the native order. Bounds of two types are left to the unit tests.
+/// Whether admission accepts the bounds: at least one, and the lower not
+/// above the upper in the native order. Bounds of two types are left to the
+/// unit tests.
 fn well_formed(lower: &Bound<CellValue>, upper: &Bound<CellValue>) -> bool {
     match (lower, upper) {
         (Bound::Unbounded, Bound::Unbounded) => false,
-        (Bound::Included(low), Bound::Included(high)) => {
-            native_cmp(low, high).is_some_and(Ordering::is_le)
-        }
         (
             Bound::Included(low) | Bound::Excluded(low),
             Bound::Included(high) | Bound::Excluded(high),
-        ) => native_cmp(low, high).is_some_and(Ordering::is_lt),
+        ) => native_cmp(low, high).is_some_and(Ordering::is_le),
         (Bound::Unbounded, _) | (_, Bound::Unbounded) => true,
     }
 }

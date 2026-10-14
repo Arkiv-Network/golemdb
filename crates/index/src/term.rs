@@ -208,11 +208,6 @@ pub enum TermError {
     Value(CellValueParseError),
     NaN,
     InvalidEncoding,
-    /// A range bound's value has another type than the range's run.
-    TypeMismatch {
-        expected: CellType,
-        actual: CellType,
-    },
 }
 
 impl fmt::Display for TermError {
@@ -223,9 +218,6 @@ impl fmt::Display for TermError {
             Self::Value(error) => write!(f, "invalid index value: {error}"),
             Self::NaN => f.write_str("NaN cannot be indexed"),
             Self::InvalidEncoding => f.write_str("invalid or noncanonical index term"),
-            Self::TypeMismatch { expected, actual } => {
-                write!(f, "{actual:?} bound in a {expected:?} range")
-            }
         }
     }
 }
