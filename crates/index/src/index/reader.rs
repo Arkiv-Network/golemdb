@@ -1,4 +1,4 @@
-use std::{iter::FusedIterator, ops::Bound};
+use std::iter::FusedIterator;
 
 use golemdb_merkle::{Hash, HashProvider, RootRef};
 use golemdb_storage::{ReadCursor, ReadTransaction, Scan, scan, scan_prefix};
@@ -32,29 +32,10 @@ impl<H: HashProvider> Index<'_, H> {
         self.bitmaps.bitmap(tx, root)
     }
 
-    /// Ordered flat-table scan. Constrain bounds to one name/type when evaluating
-    /// a typed predicate. This returns roots without materializing their bitmaps.
+    /// Ordered scan of one name/type run, between the range's bounds.
+    /// This returns roots without materializing their bitmaps:
+    /// see [`Self::bitmap_at`].
     pub fn terms<'a, T: ReadTransaction>(
-        &'a self,
-        tx: &'a T,
-        lower: Bound<IndexTerm>,
-        upper: Bound<IndexTerm>,
-    ) -> Result<TermScan<'a, T::Cursor<'a>, H>> {
-        Ok(TermScan {
-            scan: scan(
-                tx,
-                tables::INDEX,
-                lower.map(IndexTerm::into_bytes),
-                upper.map(IndexTerm::into_bytes),
-            )?,
-            hasher: self.hasher,
-            done: false,
-        })
-    }
-
-    /// Ordered scan of one name/type run, between the range's bounds. Inverted
-    /// bounds fail; equal bounds with an excluded side scan nothing.
-    pub fn terms_in<'a, T: ReadTransaction>(
         &'a self,
         tx: &'a T,
         range: &TermRange,

@@ -5,7 +5,7 @@ use golemdb_cells::{CellNameRef, CellType, CellValueRef};
 use crate::{IndexTerm, TermError, term::name_str};
 
 /// A range of index keys inside one name/type run, for an ordered scan with
-/// [`crate::Index::terms_in`].
+/// [`crate::Index::terms`].
 ///
 /// Every key in the range starts with the run's prefix, so a scan never
 /// leaks into another type under the same name, nor into a longer name

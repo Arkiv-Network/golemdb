@@ -19,6 +19,20 @@ const HASH: Keccak256Hasher = Keccak256Hasher;
 fn term(value: u8) -> IndexTerm {
     IndexTerm::new("tag", CellType::Str, &[b'a' + value]).unwrap()
 }
+
+/// The `str` terms of `tag` between the values of [`term`] `lower` and `upper`.
+fn tag_range(lower: Bound<u8>, upper: Bound<u8>) -> TermRange {
+    let value = |n: u8| CellValue::from_str(&char::from(b'a' + n).to_string());
+    let (lower, upper) = (lower.map(value), upper.map(value));
+    TermRange::between(
+        CellNameRef::raw(b"tag"),
+        CellType::Str,
+        lower.as_ref().map(CellValue::as_view),
+        upper.as_ref().map(CellValue::as_view),
+    )
+    .unwrap()
+}
+
 fn add(t: &IndexTerm, id: u64) -> PostingChange {
     PostingChange::Add {
         term: t.clone(),
@@ -317,7 +331,7 @@ fn typed_range_and_prefix_scans() {
         )
         .unwrap();
     let found = index
-        .terms(&tx, Bound::Included(term(1)), Bound::Excluded(term(4)))
+        .terms(&tx, &tag_range(Bound::Included(1), Bound::Excluded(4)))
         .unwrap()
         .collect::<golemdb_index::Result<Vec<_>>>()
         .unwrap();
@@ -339,7 +353,7 @@ fn typed_range_and_prefix_scans() {
     );
     assert!(
         index
-            .terms(&tx, Bound::Included(term(3)), Bound::Included(term(0)))
+            .terms(&tx, &tag_range(Bound::Included(3), Bound::Included(0)))
             .is_err()
     );
     tx.put(tables::INDEX, term(0).as_bytes(), &[0; 31]).unwrap();
@@ -383,7 +397,7 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
             upper.as_ref().map(CellValue::as_view),
         )
         .unwrap();
-        index.terms_in(&tx, &range).map(|scan| {
+        index.terms(&tx, &range).map(|scan| {
             scan.map(|entry| {
                 let (term, root) = entry.unwrap();
                 let bitmap = index.bitmap_at(&tx, root).unwrap();
