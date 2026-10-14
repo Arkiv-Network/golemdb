@@ -38,16 +38,11 @@ impl<H: HashProvider> Index<'_, H> {
     pub fn terms<'a, T: ReadTransaction>(
         &'a self,
         tx: &'a T,
-        range: &TermRange,
+        range: TermRange,
     ) -> Result<TermScan<'a, T::Cursor<'a>, H>> {
-        let (lower, upper) = range.bounds();
+        let (lower, upper) = range.into_bounds();
         Ok(TermScan {
-            scan: scan(
-                tx,
-                tables::INDEX,
-                lower.map(<[u8]>::to_vec),
-                upper.map(<[u8]>::to_vec),
-            )?,
+            scan: scan(tx, tables::INDEX, lower, upper)?,
             hasher: self.hasher,
             done: false,
         })

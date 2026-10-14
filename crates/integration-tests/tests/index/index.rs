@@ -331,7 +331,7 @@ fn typed_range_and_prefix_scans() {
     let found = index
         .terms(
             &tx,
-            &tag_range(Bound::Included(1), Bound::Excluded(4)).unwrap(),
+            tag_range(Bound::Included(1), Bound::Excluded(4)).unwrap(),
         )
         .unwrap()
         .collect::<golemdb_index::Result<Vec<_>>>()
@@ -399,7 +399,7 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
     let u32_run = |lower: Bound<u32>, upper: Bound<u32>| {
         let range = u32_range(lower, upper).unwrap();
         index
-            .terms(&tx, &range)
+            .terms(&tx, range)
             .unwrap()
             .map(|entry| {
                 let (term, root) = entry.unwrap();

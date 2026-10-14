@@ -6,10 +6,10 @@ use golemdb_index::Bitmap;
 use crate::{Result, plan::Plan, posting_source::PostingSource};
 
 /// The match set of an admitted filter: the IDs of every matching record,
-/// ascending. Fails only when the source does.
-pub(crate) fn match_set(source: &impl PostingSource, plan: &Plan) -> Result<Bitmap> {
+/// ascending. Consumes the plan. Fails only when the source does.
+pub(crate) fn match_set(source: &impl PostingSource, plan: Plan) -> Result<Bitmap> {
     match plan {
-        Plan::TermRead(term) => Ok(source.postings(term)?),
+        Plan::TermRead(term) => Ok(source.postings(&term)?),
         Plan::TermReads(terms) => union(terms.iter().map(|term| source.postings(term))),
         Plan::Scan(range) => union(source.scan(range)?),
     }
@@ -76,13 +76,10 @@ mod tests {
 
     impl FakeSource {
         /// The entries in `range`, in key order, as a storage scan yields them.
-        fn run<'a>(
-            &'a self,
-            range: &'a TermRange,
-        ) -> impl Iterator<Item = (&'a IndexTerm, &'a Bitmap)> {
+        fn run(&self, range: TermRange) -> impl Iterator<Item = (&IndexTerm, &Bitmap)> {
             self.0
                 .iter()
-                .filter(|(term, _)| range.bounds().contains(term.as_bytes()))
+                .filter(move |(term, _)| range.bounds().contains(term.as_bytes()))
         }
     }
 
@@ -91,11 +88,10 @@ mod tests {
             Ok(self.0.get(term).cloned().unwrap_or_default())
         }
 
-        fn scan<'a>(
-            &'a self,
-            range: &'a TermRange,
-        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>
-        {
+        fn scan(
+            &self,
+            range: TermRange,
+        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
             Ok(self.run(range).map(|(_, postings)| Ok(postings.clone())))
         }
     }
@@ -113,11 +109,10 @@ mod tests {
             self.inner.postings(term)
         }
 
-        fn scan<'a>(
-            &'a self,
-            range: &'a TermRange,
-        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>
-        {
+        fn scan(
+            &self,
+            range: TermRange,
+        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
             Ok(self.inner.run(range).map(|(term, postings)| {
                 self.reads.borrow_mut().push(term.clone());
                 Ok(postings.clone())
@@ -133,11 +128,10 @@ mod tests {
             Err(IndexError::Corruption("injected"))
         }
 
-        fn scan<'a>(
-            &'a self,
-            _: &'a TermRange,
-        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>
-        {
+        fn scan(
+            &self,
+            _: TermRange,
+        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
             Ok(injected_failure())
         }
     }
@@ -153,11 +147,10 @@ mod tests {
             self.inner.postings(term)
         }
 
-        fn scan<'a>(
-            &'a self,
-            range: &'a TermRange,
-        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>
-        {
+        fn scan(
+            &self,
+            range: TermRange,
+        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
             Ok(self
                 .inner
                 .scan(range)?
@@ -213,7 +206,7 @@ mod tests {
 
     /// Admission, then evaluation: the sequence `query` and `count` follow.
     fn evaluate(source: &impl PostingSource, filter: &Filter) -> Result<Bitmap> {
-        match_set(source, &Plan::try_from(filter)?)
+        match_set(source, Plan::try_from(filter)?)
     }
 
     fn ids(source: &FakeSource, filter: Filter) -> Vec<u64> {

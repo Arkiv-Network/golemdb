@@ -118,7 +118,7 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
         let plan = Plan::try_from(filter)?;
         let (snapshot, head) = committed_snapshot(self.branches.store(), requested)?;
         let index = Index::new(self.branches.hasher());
-        let matches = match_set(&IndexSource::new(&index, &snapshot), &plan)?;
+        let matches = match_set(&IndexSource::new(&index, &snapshot), plan)?;
         Ok(Evaluation {
             snapshot,
             head,

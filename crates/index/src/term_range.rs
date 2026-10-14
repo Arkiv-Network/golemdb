@@ -87,6 +87,11 @@ impl TermRange {
             self.upper.as_ref().map(Vec::as_slice),
         )
     }
+
+    /// The key bounds, owned, as a storage scan takes them.
+    pub fn into_bounds(self) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+        (self.lower, self.upper)
+    }
 }
 
 fn bound_value<T>(bound: Bound<T>) -> Option<T> {

@@ -13,10 +13,10 @@ pub(crate) trait PostingSource {
     /// The postings of every term in `range`, one bitmap per term, in
     /// ascending key order. Lazy: each term is stepped to and read as the
     /// iterator advances.
-    fn scan<'a>(
-        &'a self,
-        range: &'a TermRange,
-    ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>;
+    fn scan(
+        &self,
+        range: TermRange,
+    ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>>;
 }
 
 /// [`PostingSource`] over an [`Index`] at one read snapshot. Use one snapshot
@@ -37,10 +37,10 @@ impl<H: HashProvider, T: ReadTransaction> PostingSource for IndexSource<'_, '_, 
         Ok(self.index.bitmap(self.tx, term)?.unwrap_or_default())
     }
 
-    fn scan<'a>(
-        &'a self,
-        range: &'a TermRange,
-    ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a> {
+    fn scan(
+        &self,
+        range: TermRange,
+    ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
         Ok(self.index.terms(self.tx, range)?.map(|entry| {
             let (_, root) = entry?;
             self.index.bitmap_at(self.tx, root)
