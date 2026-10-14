@@ -8,7 +8,9 @@ use golemdb_api::{
     Api, ApiError, CellLimits, CountOp, Database, Filter, Genesis, HashAlgorithm, QueryOp,
     ReadTarget, RecordKey, RecordOp, op,
 };
-use golemdb_cells::{CellNameRef, CellValue};
+use std::{cmp::Ordering, ops::Bound};
+
+use golemdb_cells::{CellNameRef, CellType, CellValue, FloatWidth, Width};
 use proptest::prelude::*;
 
 pub struct TestDb {
@@ -91,6 +93,104 @@ pub fn is_in(field: &str, values: impl IntoIterator<Item = CellValue>) -> Filter
     }
 }
 
+/// Raw, so tests can also build names the grammar rejects.
+pub fn range(field: &str, lower: Bound<CellValue>, upper: Bound<CellValue>) -> Filter {
+    Filter::Range {
+        field: CellNameRef::raw(field.as_bytes()).into(),
+        lower,
+        upper,
+    }
+}
+
+/// Whether `value` lies between `lower` and `upper` in the native order of
+/// its type: a value of another type than a bound never does.
+pub fn is_between(value: &CellValue, lower: &Bound<CellValue>, upper: &Bound<CellValue>) -> bool {
+    let above = match lower {
+        Bound::Included(low) => native_cmp(value, low).is_some_and(Ordering::is_ge),
+        Bound::Excluded(low) => native_cmp(value, low).is_some_and(Ordering::is_gt),
+        Bound::Unbounded => true,
+    };
+    let below = match upper {
+        Bound::Included(high) => native_cmp(value, high).is_some_and(Ordering::is_le),
+        Bound::Excluded(high) => native_cmp(value, high).is_some_and(Ordering::is_lt),
+        Bound::Unbounded => true,
+    };
+    above && below
+}
+
+/// The order of two values of one type, `None` across types. Compares the
+/// values as native Rust values, without the cells' order encoding, so it is
+/// a reference for the index's byte order.
+pub fn native_cmp(a: &CellValue, b: &CellValue) -> Option<Ordering> {
+    if a.cell_type() != b.cell_type() {
+        return None;
+    }
+    let order = native(a).partial_cmp(&native(b));
+    Some(order.expect("values of one type compare: NaN is rejected"))
+}
+
+/// A cell value as a native one. Only values of one type are compared.
+#[derive(Debug, PartialEq, PartialOrd)]
+enum Native<'a> {
+    Bool(bool),
+    Str(&'a str),
+    /// Fixed bytes and `u256`, big-endian: compared byte by byte.
+    Bytes(Vec<u8>),
+    Unsigned(u128),
+    Signed(i128),
+    /// A 256-bit two's complement, big-endian: negative values first, then
+    /// byte by byte.
+    Signed256 {
+        non_negative: bool,
+        be: [u8; 32],
+    },
+    Float(f64),
+}
+
+fn native(value: &CellValue) -> Native<'_> {
+    const OWN_TYPE: &str = "accessor of the value's own type";
+    let signed256 = |be: [u8; 32]| Native::Signed256 {
+        non_negative: be[0] & 0x80 == 0,
+        be,
+    };
+    match value.cell_type() {
+        CellType::Bool => Native::Bool(value.as_bool().expect(OWN_TYPE)),
+        CellType::Str => Native::Str(value.as_str().expect(OWN_TYPE)),
+        CellType::Bytes => panic!("bytes has no order"),
+        CellType::Bytes20 => Native::Bytes(value.as_bytes20().expect(OWN_TYPE).into()),
+        CellType::FixedBytes(Width::W4) => Native::Bytes(value.as_bytes4().expect(OWN_TYPE).into()),
+        CellType::FixedBytes(Width::W8) => Native::Bytes(value.as_bytes8().expect(OWN_TYPE).into()),
+        CellType::FixedBytes(Width::W16) => {
+            Native::Bytes(value.as_bytes16().expect(OWN_TYPE).into())
+        }
+        CellType::FixedBytes(Width::W32) => {
+            Native::Bytes(value.as_bytes32().expect(OWN_TYPE).into())
+        }
+        CellType::Uint(Width::W4) => Native::Unsigned(value.as_u32().expect(OWN_TYPE).into()),
+        CellType::Uint(Width::W8) => Native::Unsigned(value.as_u64().expect(OWN_TYPE).into()),
+        CellType::Uint(Width::W16) => Native::Unsigned(value.as_u128().expect(OWN_TYPE)),
+        CellType::Uint(Width::W32) => Native::Bytes(value.as_u256_be().expect(OWN_TYPE).into()),
+        CellType::Int(Width::W4) => Native::Signed(value.as_i32().expect(OWN_TYPE).into()),
+        CellType::Int(Width::W8) => Native::Signed(value.as_i64().expect(OWN_TYPE).into()),
+        CellType::Int(Width::W16) => Native::Signed(value.as_i128().expect(OWN_TYPE)),
+        CellType::Int(Width::W32) => signed256(value.as_i256_be().expect(OWN_TYPE)),
+        CellType::Decimal(Width::W4) => {
+            Native::Signed(value.as_dec32_unscaled().expect(OWN_TYPE).into())
+        }
+        CellType::Decimal(Width::W8) => {
+            Native::Signed(value.as_dec64_unscaled().expect(OWN_TYPE).into())
+        }
+        CellType::Decimal(Width::W16) => {
+            Native::Signed(value.as_dec128_unscaled().expect(OWN_TYPE))
+        }
+        CellType::Decimal(Width::W32) => signed256(value.as_dec256_unscaled_be().expect(OWN_TYPE)),
+        CellType::Float(FloatWidth::F32) => Native::Float(value.as_f32().expect(OWN_TYPE).into()),
+        CellType::Float(FloatWidth::F64) => Native::Float(value.as_f64().expect(OWN_TYPE)),
+        CellType::Date32 => Native::Signed(value.as_date32().expect(OWN_TYPE).into()),
+        CellType::Timestamp64 => Native::Signed(value.as_timestamp64().expect(OWN_TYPE).into()),
+    }
+}
+
 /// Number of types [`typed_value`] picks from.
 const TYPES: u8 = 23;
 
@@ -110,6 +210,20 @@ pub fn small_values_of_one_type(
             len.clone(),
         )
     })
+}
+
+/// A lower and an upper bound, each unbounded, included or excluded, over
+/// one random type, from [`small_value`]'s domain: often equal or inverted.
+pub fn small_bounds_of_one_type() -> impl Strategy<Value = (Bound<CellValue>, Bound<CellValue>)> {
+    (0..TYPES).prop_flat_map(|ty| (small_bound(ty), small_bound(ty)))
+}
+
+fn small_bound(ty: u8) -> impl Strategy<Value = Bound<CellValue>> {
+    prop_oneof![
+        1 => Just(Bound::Unbounded),
+        2 => (-2i8..=2).prop_map(move |n| Bound::Included(typed_value(ty, n))),
+        2 => (-2i8..=2).prop_map(move |n| Bound::Excluded(typed_value(ty, n))),
+    ]
 }
 
 /// Type `ty` (`0..TYPES`), value `n` in `-2..=2`. The same `n` across types

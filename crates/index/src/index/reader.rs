@@ -4,7 +4,9 @@ use golemdb_merkle::{Hash, HashProvider, RootRef};
 use golemdb_storage::{ReadCursor, ReadTransaction, Scan, scan, scan_prefix};
 
 use super::Index;
-use crate::{Bitmap, INDEX_TRIE_PATH_BYTES, IndexTerm, Result, index_trie::decode_root, tables};
+use crate::{
+    Bitmap, INDEX_TRIE_PATH_BYTES, IndexTerm, Result, TermRange, index_trie::decode_root, tables,
+};
 
 impl<H: HashProvider> Index<'_, H> {
     /// Reconstruct current root metadata. Singleton recovery uses the flat table
@@ -20,8 +22,14 @@ impl<H: HashProvider> Index<'_, H> {
     /// Materialize a term's postings; absent terms return None, never an empty bitmap.
     pub fn bitmap(&self, tx: &impl ReadTransaction, term: &IndexTerm) -> Result<Option<Bitmap>> {
         self.bitmap_root(tx, term)?
-            .map(|hash| self.bitmaps.bitmap(tx, hash))
+            .map(|hash| self.bitmap_at(tx, hash))
             .transpose()
+    }
+
+    /// Materialize the postings under a bitmap root, as a [`TermScan`]
+    /// yields it, without looking its term up again.
+    pub fn bitmap_at(&self, tx: &impl ReadTransaction, root: Hash) -> Result<Bitmap> {
+        self.bitmaps.bitmap(tx, root)
     }
 
     /// Ordered flat-table scan. Constrain bounds to one name/type when evaluating
@@ -38,6 +46,26 @@ impl<H: HashProvider> Index<'_, H> {
                 tables::INDEX,
                 lower.map(IndexTerm::into_bytes),
                 upper.map(IndexTerm::into_bytes),
+            )?,
+            hasher: self.hasher,
+            done: false,
+        })
+    }
+
+    /// Ordered scan of one name/type run, between the range's bounds. Inverted
+    /// bounds fail; equal bounds with an excluded side scan nothing.
+    pub fn terms_in<'a, T: ReadTransaction>(
+        &'a self,
+        tx: &'a T,
+        range: &TermRange,
+    ) -> Result<TermScan<'a, T::Cursor<'a>, H>> {
+        let (lower, upper) = range.bounds();
+        Ok(TermScan {
+            scan: scan(
+                tx,
+                tables::INDEX,
+                lower.map(<[u8]>::to_vec),
+                upper.map(<[u8]>::to_vec),
             )?,
             hasher: self.hasher,
             done: false,

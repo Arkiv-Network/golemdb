@@ -10,19 +10,29 @@ use crate::{Result, plan::Plan, posting_source::PostingSource};
 pub(crate) fn match_set(source: &impl PostingSource, plan: &Plan) -> Result<Bitmap> {
     match plan {
         Plan::TermRead(term) => Ok(source.postings(term)?),
-        Plan::TermReads(terms) => terms.iter().try_fold(Bitmap::default(), |mut union, term| {
-            union |= source.postings(term)?;
-            Ok(union)
-        }),
+        Plan::TermReads(terms) => union(terms.iter().map(|term| source.postings(term))),
+        Plan::Scan(range) => union(source.scan(range)?),
     }
+}
+
+/// The union of `postings`, read one after another in the order given.
+fn union(mut postings: impl Iterator<Item = golemdb_index::Result<Bitmap>>) -> Result<Bitmap> {
+    postings.try_fold(Bitmap::default(), |mut union, postings| {
+        union |= postings?;
+        Ok(union)
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::BTreeMap};
+    use std::{
+        cell::RefCell,
+        collections::BTreeMap,
+        ops::{Bound, RangeBounds},
+    };
 
     use golemdb_cells::{CellKind, CellName, CellNameRef, CellType, CellValue};
-    use golemdb_index::{BitmapContainer, IndexError, IndexTerm, TermError, path};
+    use golemdb_index::{BitmapContainer, IndexError, IndexTerm, TermError, TermRange, path};
 
     use super::*;
     use crate::{Filter, QueryError};
@@ -64,13 +74,34 @@ mod tests {
         .expect("unique, ordered paths")
     }
 
+    impl FakeSource {
+        /// The entries in `range`, in key order, as a storage scan yields them.
+        fn run<'a>(
+            &'a self,
+            range: &'a TermRange,
+        ) -> impl Iterator<Item = (&'a IndexTerm, &'a Bitmap)> {
+            self.0
+                .iter()
+                .filter(|(term, _)| range.bounds().contains(term.as_bytes()))
+        }
+    }
+
     impl PostingSource for FakeSource {
         fn postings(&self, term: &IndexTerm) -> golemdb_index::Result<Bitmap> {
             Ok(self.0.get(term).cloned().unwrap_or_default())
         }
+
+        fn scan<'a>(
+            &'a self,
+            range: &'a TermRange,
+        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>
+        {
+            Ok(self.run(range).map(|(_, postings)| Ok(postings.clone())))
+        }
     }
 
-    /// A [`FakeSource`] that records every term it is asked for, in order.
+    /// A [`FakeSource`] that records every term it reads, in order: asked
+    /// for, or stepped to by a scan.
     struct RecordingSource {
         inner: FakeSource,
         reads: RefCell<Vec<IndexTerm>>,
@@ -81,14 +112,35 @@ mod tests {
             self.reads.borrow_mut().push(term.clone());
             self.inner.postings(term)
         }
+
+        fn scan<'a>(
+            &'a self,
+            range: &'a TermRange,
+        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>
+        {
+            Ok(self.inner.run(range).map(|(term, postings)| {
+                self.reads.borrow_mut().push(term.clone());
+                Ok(postings.clone())
+            }))
+        }
     }
 
-    /// A source whose every read fails.
+    /// A source whose every read fails. A scan fails at its first term, and
+    /// panics if stepped past it.
     struct FailingSource;
 
     impl PostingSource for FailingSource {
         fn postings(&self, _: &IndexTerm) -> golemdb_index::Result<Bitmap> {
             Err(IndexError::Corruption("injected"))
+        }
+
+        fn scan<'a>(
+            &'a self,
+            _: &'a TermRange,
+        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>
+        {
+            let past_the_error = std::iter::from_fn(|| panic!("scan stepped past an error"));
+            Ok(std::iter::once(Err(IndexError::Corruption("injected"))).chain(past_the_error))
         }
     }
 
@@ -108,6 +160,14 @@ mod tests {
         Filter::In {
             field: name(field.as_bytes()),
             values: values.into_iter().collect(),
+        }
+    }
+
+    fn range(field: &str, lower: Bound<CellValue>, upper: Bound<CellValue>) -> Filter {
+        Filter::Range {
+            field: name(field.as_bytes()),
+            lower,
+            upper,
         }
     }
 
@@ -229,6 +289,138 @@ mod tests {
         assert_eq!(*source.reads.borrow(), [term(-1), term(0), term(1)]);
     }
 
+    fn i32s(lower: Bound<i32>, upper: Bound<i32>) -> Filter {
+        range(
+            "n",
+            lower.map(CellValue::from_i32),
+            upper.map(CellValue::from_i32),
+        )
+    }
+
+    #[test]
+    fn range_matches_the_union_of_the_terms_between_its_bounds() {
+        let source = [-3, -1, 0, 1, 4]
+            .into_iter()
+            .fold(FakeSource::default(), |source, n| {
+                source.with("n", CellValue::from_i32(n), [n.unsigned_abs().into(), 10])
+            });
+        use Bound::{Excluded, Included, Unbounded};
+        for (filter, expected) in [
+            (i32s(Included(-1), Included(1)), &[0, 1, 10][..]),
+            (i32s(Excluded(-1), Included(1)), &[0, 1, 10]),
+            (i32s(Excluded(-1), Excluded(1)), &[0, 10]),
+            (i32s(Included(-2), Included(2)), &[0, 1, 10]),
+            (i32s(Included(2), Included(3)), &[]),
+            (i32s(Included(0), Included(0)), &[0, 10]),
+            (i32s(Unbounded, Excluded(0)), &[1, 3, 10]),
+            (i32s(Unbounded, Included(-4)), &[]),
+            (i32s(Excluded(1), Unbounded), &[4, 10]),
+            (
+                i32s(Included(i32::MIN), Included(i32::MAX)),
+                &[0, 1, 3, 4, 10],
+            ),
+        ] {
+            assert_eq!(ids(&source, filter.clone()), expected, "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn range_reads_only_its_run_in_key_order() {
+        let inner = FakeSource::default()
+            .with("n", CellValue::from_i32(-1), [1])
+            .with("n", CellValue::from_i32(1), [2])
+            .with("n", CellValue::from_i32(i32::MIN), [3])
+            .with("n", CellValue::from_u32(0), [4])
+            .with("n", CellValue::from_i64(0), [5])
+            .with("nn", CellValue::from_i32(0), [6])
+            .with("m", CellValue::from_i32(0), [7]);
+        let source = RecordingSource {
+            inner,
+            reads: RefCell::default(),
+        };
+        let filter = i32s(Bound::Unbounded, Bound::Included(i32::MAX));
+        let matches = evaluate(&source, &filter).expect("filter evaluates");
+        assert_eq!(matches.treemap().iter().collect::<Vec<_>>(), [1, 2, 3]);
+        let term = |n| IndexTerm::for_value("n", CellValue::from_i32(n).as_view()).expect("term");
+        assert_eq!(*source.reads.borrow(), [term(i32::MIN), term(-1), term(1)]);
+    }
+
+    #[test]
+    fn float_ranges_span_infinities_and_one_zero() {
+        let float = |value: f64| CellValue::from_f64(value).expect("not NaN");
+        let source = FakeSource::default()
+            .with("x", float(f64::NEG_INFINITY), [1])
+            .with("x", float(-1.5), [2])
+            .with("x", float(-0.0), [3])
+            .with("x", float(f64::MIN_POSITIVE), [4])
+            .with("x", float(f64::INFINITY), [5]);
+        let floats =
+            |lower: Bound<f64>, upper: Bound<f64>| range("x", lower.map(float), upper.map(float));
+        use Bound::{Excluded, Included, Unbounded};
+        for (filter, expected) in [
+            (
+                floats(Included(f64::NEG_INFINITY), Included(f64::INFINITY)),
+                &[1, 2, 3, 4, 5][..],
+            ),
+            (
+                floats(Excluded(f64::NEG_INFINITY), Excluded(f64::INFINITY)),
+                &[2, 3, 4],
+            ),
+            // -0.0 and 0.0 are one value.
+            (floats(Included(0.0), Included(0.0)), &[3]),
+            (floats(Excluded(-0.0), Unbounded), &[4, 5]),
+            (floats(Unbounded, Excluded(0.0)), &[1, 2]),
+        ] {
+            assert_eq!(ids(&source, filter.clone()), expected, "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn range_bounds_are_typed() {
+        let source = FakeSource::default()
+            .with("a", CellValue::from_i32(1), [1])
+            .with("a", CellValue::from_u32(1), [2])
+            .with("a", str("1"), [3]);
+        let filter = range(
+            "a",
+            Bound::Included(CellValue::from_u32(0)),
+            Bound::Unbounded,
+        );
+        assert_eq!(ids(&source, filter), [2]);
+        let filter = range("a", Bound::Unbounded, Bound::Included(str("2")));
+        assert_eq!(ids(&source, filter), [3]);
+    }
+
+    #[test]
+    fn malformed_range_is_rejected_before_reading() {
+        use Bound::{Excluded, Included, Unbounded};
+        let u = CellValue::from_u32;
+        for filter in [
+            range("a", Unbounded, Unbounded),
+            range("a", Included(u(1)), Included(CellValue::from_u64(2))),
+            range("a", Included(u(2)), Included(u(1))),
+            range("a", Included(u(1)), Excluded(u(1))),
+            range("a", Excluded(u(1)), Included(u(1))),
+            range("a", Excluded(u(1)), Excluded(u(1))),
+            i32s(Included(1), Included(-1)),
+            // The shape is checked before the field and the type.
+            range("1bad", Unbounded, Unbounded),
+            range(
+                "b",
+                Included(CellValue::from_bytes(b"y")),
+                Included(CellValue::from_bytes(b"x")),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    evaluate(&FailingSource, &filter),
+                    Err(QueryError::InvalidQuery { .. })
+                ),
+                "{filter:?}"
+            );
+        }
+    }
+
     #[test]
     fn malformed_in_is_rejected_before_reading() {
         for filter in [
@@ -274,6 +466,20 @@ mod tests {
                 name(b"b"),
                 TermError::UnsupportedType(CellType::Bytes),
             ),
+            (
+                range("1bad", Bound::Unbounded, Bound::Included(str("x"))),
+                name(b"1bad"),
+                TermError::InvalidName,
+            ),
+            (
+                range(
+                    "b",
+                    Bound::Excluded(CellValue::from_bytes(b"x")),
+                    Bound::Unbounded,
+                ),
+                name(b"b"),
+                TermError::UnsupportedType(CellType::Bytes),
+            ),
         ] {
             match evaluate(&FailingSource, &filter) {
                 Err(QueryError::InvalidArgument { field: got, source }) => {
@@ -290,6 +496,11 @@ mod tests {
         for filter in [
             eq("a", CellValue::from_i32(1)),
             is_in("a", [CellValue::from_i32(1), CellValue::from_i32(2)]),
+            range(
+                "a",
+                Bound::Included(CellValue::from_i32(1)),
+                Bound::Unbounded,
+            ),
         ] {
             let result = evaluate(&FailingSource, &filter);
             assert!(matches!(

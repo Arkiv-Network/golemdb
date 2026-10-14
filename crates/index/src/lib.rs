@@ -54,12 +54,14 @@ mod index_trie;
 pub mod path;
 pub mod tables;
 mod term;
+mod term_range;
 
 pub use bitmap::Bitmap;
 pub use container::BitmapContainer;
 pub use error::{BitmapError, IndexError, Result};
 pub use index::{Index, IndexUpdate, PostingChange, TermRootChange, TermScan};
 pub use term::{IndexTerm, TermError};
+pub use term_range::TermRange;
 
 /// IndexTrie routes by a complete term digest (32 bytes).
 /// This is a byte width, not the compressed trie's depth.

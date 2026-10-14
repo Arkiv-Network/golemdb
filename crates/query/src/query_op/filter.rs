@@ -1,5 +1,7 @@
 //! [`Filter`]: the filter tree a query evaluates, as the caller writes it.
 
+use std::ops::Bound;
+
 use golemdb_cells::{CellName, CellValue};
 
 /// A query's filter: plain data the caller builds, validated at admission.
@@ -19,7 +21,16 @@ pub enum Filter {
         field: CellName,
         values: Vec<CellValue>,
     },
-    // Range  { field: CellName, lower: Bound<CellValue>, upper: Bound<CellValue> },
+    /// The cell's value lies between `lower` and `upper`, in its type's
+    /// order: numeric for numbers and dates, false before true, byte order
+    /// for strings (UTF-8) and fixed bytes. At least one side is bounded;
+    /// bounds have one type, and `lower` is below `upper`, or equal to it
+    /// with both included.
+    Range {
+        field: CellName,
+        lower: Bound<CellValue>,
+        upper: Bound<CellValue>,
+    },
     // Prefix { field: CellName, prefix: CellValue },           // str, bytesN
     // Exists { field: CellName, ty: CellType },
     // And(Vec<Filter>),

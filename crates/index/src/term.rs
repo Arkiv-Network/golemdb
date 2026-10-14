@@ -78,8 +78,7 @@ impl IndexTerm {
         name: CellNameRef<'_>,
         value: CellValueRef<'_>,
     ) -> Result<Self, TermError> {
-        let name = std::str::from_utf8(name.as_bytes()).map_err(|_| TermError::InvalidName)?;
-        Self::from_str_name(name, value)
+        Self::from_value(name_str(name)?, value)
     }
 
     /// Prefix that confines range/prefix scans to one attribute name and type.
@@ -136,6 +135,12 @@ impl IndexTerm {
             bitmap_root,
         ])
     }
+}
+
+/// A stored cell name as a term name: one that is not UTF-8 is
+/// [`TermError::InvalidName`], like any name outside the grammar.
+pub(crate) fn name_str(name: CellNameRef<'_>) -> Result<&str, TermError> {
+    std::str::from_utf8(name.as_bytes()).map_err(|_| TermError::InvalidName)
 }
 
 fn validate_name(name: &str) -> Result<(), TermError> {
@@ -203,6 +208,11 @@ pub enum TermError {
     Value(CellValueParseError),
     NaN,
     InvalidEncoding,
+    /// A range bound's value has another type than the range's run.
+    TypeMismatch {
+        expected: CellType,
+        actual: CellType,
+    },
 }
 
 impl fmt::Display for TermError {
@@ -213,6 +223,9 @@ impl fmt::Display for TermError {
             Self::Value(error) => write!(f, "invalid index value: {error}"),
             Self::NaN => f.write_str("NaN cannot be indexed"),
             Self::InvalidEncoding => f.write_str("invalid or noncanonical index term"),
+            Self::TypeMismatch { expected, actual } => {
+                write!(f, "{actual:?} bound in a {expected:?} range")
+            }
         }
     }
 }

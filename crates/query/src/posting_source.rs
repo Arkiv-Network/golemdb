@@ -1,7 +1,7 @@
 //! The storage seam: everything the evaluator reads goes through
 //! [`PostingSource`], so query logic is testable without a database.
 
-use golemdb_index::{Bitmap, Index, IndexTerm};
+use golemdb_index::{Bitmap, Index, IndexTerm, TermRange};
 use golemdb_merkle::HashProvider;
 use golemdb_storage::ReadTransaction;
 
@@ -9,6 +9,14 @@ use golemdb_storage::ReadTransaction;
 pub(crate) trait PostingSource {
     /// The record IDs indexed under `term`; empty when the term is absent.
     fn postings(&self, term: &IndexTerm) -> golemdb_index::Result<Bitmap>;
+
+    /// The postings of every term in `range`, one bitmap per term, in
+    /// ascending key order. Lazy: each term is stepped to and read as the
+    /// iterator advances.
+    fn scan<'a>(
+        &'a self,
+        range: &'a TermRange,
+    ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a>;
 }
 
 /// [`PostingSource`] over an [`Index`] at one read snapshot. Use one snapshot
@@ -27,5 +35,15 @@ impl<'a, 'h, H: HashProvider, T: ReadTransaction> IndexSource<'a, 'h, H, T> {
 impl<H: HashProvider, T: ReadTransaction> PostingSource for IndexSource<'_, '_, H, T> {
     fn postings(&self, term: &IndexTerm) -> golemdb_index::Result<Bitmap> {
         Ok(self.index.bitmap(self.tx, term)?.unwrap_or_default())
+    }
+
+    fn scan<'a>(
+        &'a self,
+        range: &'a TermRange,
+    ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>> + 'a> {
+        Ok(self.index.terms_in(self.tx, range)?.map(|entry| {
+            let (_, root) = entry?;
+            self.index.bitmap_at(self.tx, root)
+        }))
     }
 }
