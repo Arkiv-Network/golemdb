@@ -21,6 +21,9 @@ pub(crate) enum Plan {
     /// A scan of the range's terms in ascending key order, one term read
     /// each: the union of their postings.
     Scan(TermRange),
+    /// A leaf no record can match, such as a `Range` whose bounds admit no
+    /// value: nothing is read.
+    Empty,
 }
 
 impl TryFrom<&Filter> for Plan {
@@ -29,7 +32,7 @@ impl TryFrom<&Filter> for Plan {
     /// Admission: fails with [`QueryError::InvalidArgument`] on a leaf with no
     /// valid index term, and with [`QueryError::InvalidQuery`] on a malformed
     /// leaf (an empty `In`, or one whose values differ in type; a `Range` with
-    /// no bound, bounds of two types, or a lower bound above the upper).
+    /// no bound, or bounds of two types).
     fn try_from(filter: &Filter) -> Result<Self> {
         match filter {
             Filter::Eq { field, value } => Ok(Self::TermRead(term(field, value)?)),
@@ -38,7 +41,7 @@ impl TryFrom<&Filter> for Plan {
                 field,
                 lower,
                 upper,
-            } => Ok(Self::Scan(range(field, lower, upper)?)),
+            } => Ok(range(field, lower, upper)?.map_or(Self::Empty, Self::Scan)),
         }
     }
 }
@@ -46,11 +49,12 @@ impl TryFrom<&Filter> for Plan {
 /// The terms of `field` between `lower` and `upper`, checked as
 /// [`TermRange::between`] checks them: a field or type with no index term
 /// fails as an `Eq` leaf's would, and a malformed range is an invalid query.
+/// `None` when the bounds admit no value.
 fn range(
     field: &CellName,
     lower: &Bound<CellValue>,
     upper: &Bound<CellValue>,
-) -> Result<TermRange> {
+) -> Result<Option<TermRange>> {
     TermRange::between(
         field.as_view(),
         lower.as_ref().map(CellValue::as_view),
@@ -66,9 +70,6 @@ fn range(
         },
         RangeError::TypeMismatch { .. } => QueryError::InvalidQuery {
             reason: "`Range` bounds must have one type",
-        },
-        RangeError::Inverted => QueryError::InvalidQuery {
-            reason: "`Range` lower bound must not be above the upper",
         },
     })
 }
@@ -241,24 +242,43 @@ mod tests {
     }
 
     #[test]
-    fn range_resolves_to_its_bounds_run() {
+    fn range_resolves_to_a_scan_of_its_run_or_to_empty() {
         let field: CellName = CellNameRef::raw(b"f").into();
         let (low, high) = (CellValue::from_i64(-5), CellValue::from_i64(5));
+        let plan = |lower: Bound<&CellValue>, upper: Bound<&CellValue>| {
+            let filter = Filter::Range {
+                field: field.clone(),
+                lower: lower.cloned(),
+                upper: upper.cloned(),
+            };
+            Plan::try_from(&filter).expect("valid Range")
+        };
         for (lower, upper) in [
             (Bound::Included(&low), Bound::Excluded(&high)),
             (Bound::Excluded(&low), Bound::Unbounded),
             (Bound::Unbounded, Bound::Included(&high)),
             (Bound::Included(&high), Bound::Included(&high)),
-            (Bound::Excluded(&high), Bound::Excluded(&high)),
         ] {
             let expected = TermRange::between(
                 field.as_view(),
                 lower.map(CellValue::as_view),
                 upper.map(CellValue::as_view),
             )
-            .expect("valid range");
-            let got = range(&field, &lower.cloned(), &upper.cloned()).expect("valid Range");
-            assert_eq!(got, expected, "{lower:?}..{upper:?}");
+            .expect("valid range")
+            .expect("non-empty range");
+            assert_eq!(
+                plan(lower, upper),
+                Plan::Scan(expected),
+                "{lower:?}..{upper:?}"
+            );
+        }
+        for (lower, upper) in [
+            (Bound::Included(&high), Bound::Included(&low)),
+            (Bound::Excluded(&high), Bound::Excluded(&low)),
+            (Bound::Included(&high), Bound::Excluded(&high)),
+            (Bound::Excluded(&high), Bound::Excluded(&high)),
+        ] {
+            assert_eq!(plan(lower, upper), Plan::Empty, "{lower:?}..{upper:?}");
         }
     }
 

@@ -23,8 +23,6 @@ pub enum RangeError {
     NoBound,
     #[error("range bounds of two types: {lower:?} and {upper:?}")]
     TypeMismatch { lower: CellType, upper: CellType },
-    #[error("range lower bound is above its upper bound")]
-    Inverted,
     /// The name, or the bounds' type, has no index term.
     #[error(transparent)]
     Term(#[from] TermError),
@@ -33,17 +31,19 @@ pub enum RangeError {
 impl TermRange {
     /// The terms of `name` whose value lies between `lower` and `upper`, in
     /// the run of the bounds' type. A bounded side is the term of its value;
-    /// an unbounded side reaches the end of the run.
+    /// an unbounded side reaches the end of the run. `None` when the keys
+    /// admit no term: the lower above the upper, or equal to it with a side
+    /// excluded. Such a range matches nothing, and needs no scan.
     ///
     /// The bounds' shape is checked first, without building a term:
     /// [`RangeError::NoBound`], then [`RangeError::TypeMismatch`]. Then the
     /// name and the type, as [`IndexTerm::for_cell_name`] does
-    /// ([`RangeError::Term`]), and last [`RangeError::Inverted`] on the keys.
+    /// ([`RangeError::Term`]), so an empty range with a bad name still fails.
     pub fn between(
         name: CellNameRef<'_>,
         lower: Bound<CellValueRef<'_>>,
         upper: Bound<CellValueRef<'_>>,
-    ) -> Result<Self, RangeError> {
+    ) -> Result<Option<Self>, RangeError> {
         let ty = match (bound_value(lower), bound_value(upper)) {
             (None, None) => return Err(RangeError::NoBound),
             (Some(low), Some(high)) if low.cell_type() != high.cell_type() => {
@@ -67,17 +67,16 @@ impl TermRange {
             Bound::Excluded(value) => Bound::Excluded(term(value)?),
             Bound::Unbounded => past(run),
         };
-        // The keys share the run's prefix, so key order is value order. This
-        // is the check a storage scan makes: one never fails on these bounds.
-        if let (
-            Bound::Included(low) | Bound::Excluded(low),
-            Bound::Included(high) | Bound::Excluded(high),
-        ) = (&lower, &upper)
-            && low > high
-        {
-            return Err(RangeError::Inverted);
-        }
-        Ok(Self { lower, upper })
+        // The keys share the run's prefix, so key order is value order.
+        let empty = match (&lower, &upper) {
+            (Bound::Included(low), Bound::Included(high)) => low > high,
+            (
+                Bound::Included(low) | Bound::Excluded(low),
+                Bound::Included(high) | Bound::Excluded(high),
+            ) => low >= high,
+            (Bound::Unbounded, _) | (_, Bound::Unbounded) => false,
+        };
+        Ok((!empty).then_some(Self { lower, upper }))
     }
 
     /// The key bounds, usable as a `RangeBounds<[u8]>`.
@@ -130,7 +129,7 @@ mod tests {
         name: &[u8],
         lower: Bound<CellValue>,
         upper: Bound<CellValue>,
-    ) -> Result<TermRange, RangeError> {
+    ) -> Result<Option<TermRange>, RangeError> {
         TermRange::between(
             CellNameRef::raw(name),
             lower.as_ref().map(CellValue::as_view),
@@ -139,7 +138,9 @@ mod tests {
     }
 
     fn range(name: &str, lower: Bound<&CellValue>, upper: Bound<&CellValue>) -> TermRange {
-        between(name.as_bytes(), lower.cloned(), upper.cloned()).expect("valid range")
+        between(name.as_bytes(), lower.cloned(), upper.cloned())
+            .expect("valid range")
+            .expect("non-empty range")
     }
 
     fn term(name: &str, value: &CellValue) -> IndexTerm {
@@ -171,25 +172,25 @@ mod tests {
 
     #[test]
     fn included_bounds_are_the_terms_of_their_values() {
-        let range = between(b"a", Included(u32(1)), Included(u32(7))).unwrap();
+        let range = range("a", Included(&u32(1)), Included(&u32(7)));
         assert_eq!(range.bounds(), (Included(ONE), Included(SEVEN)));
     }
 
     #[test]
     fn excluded_bounds_are_the_terms_of_their_values() {
-        let range = between(b"a", Excluded(u32(1)), Excluded(u32(7))).unwrap();
+        let range = range("a", Excluded(&u32(1)), Excluded(&u32(7)));
         assert_eq!(range.bounds(), (Excluded(ONE), Excluded(SEVEN)));
     }
 
     #[test]
     fn an_unbounded_lower_side_starts_at_the_run() {
-        let range = between(b"a", Unbounded, Included(u32(7))).unwrap();
+        let range = range("a", Unbounded, Included(&u32(7)));
         assert_eq!(range.bounds(), (Included(RUN_START), Included(SEVEN)));
     }
 
     #[test]
     fn an_unbounded_upper_side_ends_past_the_run() {
-        let range = between(b"a", Included(u32(1)), Unbounded).unwrap();
+        let range = range("a", Included(&u32(1)), Unbounded);
         assert_eq!(range.bounds(), (Included(ONE), Excluded(RUN_END)));
     }
 
@@ -212,19 +213,19 @@ mod tests {
     }
 
     #[test]
-    fn inverted_bounds_are_rejected() {
+    fn inverted_bounds_are_empty() {
         for (lower, upper) in [
             (Included(u32(7)), Included(u32(1))),
             (Excluded(u32(7)), Excluded(u32(1))),
             (Included(u32(1)), Excluded(u32(0))),
         ] {
             let result = between(b"a", lower.clone(), upper.clone());
-            assert_eq!(result, Err(RangeError::Inverted), "{lower:?}..{upper:?}");
+            assert_eq!(result, Ok(None), "{lower:?}..{upper:?}");
         }
     }
 
     #[test]
-    fn equal_bounds_with_an_excluded_side_are_empty() {
+    fn equal_bounds_are_empty_unless_both_are_included() {
         let (run, neighbours) = neighbourhood();
         let all = [run.clone(), neighbours].concat();
         let seven = u32(7);
@@ -233,12 +234,12 @@ mod tests {
             [&run[2]]
         );
         for (lower, upper) in [
-            (Included(&seven), Excluded(&seven)),
-            (Excluded(&seven), Included(&seven)),
-            (Excluded(&seven), Excluded(&seven)),
+            (Included(u32(7)), Excluded(u32(7))),
+            (Excluded(u32(7)), Included(u32(7))),
+            (Excluded(u32(7)), Excluded(u32(7))),
         ] {
-            let empty = range("a", lower, upper);
-            assert!(within(&empty, &all).is_empty(), "{lower:?}..{upper:?}");
+            let result = between(b"a", lower.clone(), upper.clone());
+            assert_eq!(result, Ok(None), "{lower:?}..{upper:?}");
         }
     }
 
@@ -262,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn the_shape_is_checked_before_the_name_and_inversion_after() {
+    fn the_shape_is_checked_before_the_name_and_emptiness_after() {
         assert_eq!(
             between(b"1a", Unbounded, Unbounded),
             Err(RangeError::NoBound)
@@ -337,8 +338,8 @@ mod tests {
         let at_most_empty = range("s", Unbounded, Included(&empty));
         assert!(within(&at_most_empty, &all).into_iter().eq(&all[..1]));
         // The excluded empty string is the run's own prefix: nothing lies below.
-        let below_empty = range("s", Unbounded, Excluded(&empty));
-        assert!(within(&below_empty, &all).is_empty());
+        let below_empty = between(b"s", Unbounded, Excluded(empty.clone()));
+        assert_eq!(below_empty, Ok(None));
         let above_empty = range("s", Excluded(&empty), Unbounded);
         assert!(within(&above_empty, &all).into_iter().eq(&all[1..]));
     }

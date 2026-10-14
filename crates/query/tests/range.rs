@@ -275,8 +275,6 @@ fn malformed_range_is_an_invalid_query() {
             Bound::Included(i(1)),
             Bound::Excluded(CellValue::from_i64(2)),
         ),
-        range("f", Bound::Included(i(1)), Bound::Included(i(-1))),
-        range("f", Bound::Excluded(i(1)), Bound::Excluded(i(0))),
     ] {
         assert!(
             matches!(
@@ -296,14 +294,17 @@ fn malformed_range_is_an_invalid_query() {
 }
 
 #[test]
-fn equal_bounds_with_an_excluded_side_match_nothing() {
+fn bounds_that_admit_no_value_match_nothing() {
     let test = TestDb::default();
     test.create([record(key(1), &[("f", CellValue::from_i32(1))])]);
     let one = || CellValue::from_i32(1);
+    let two = || CellValue::from_i32(2);
     for (lower, upper) in [
         (Bound::Included(one()), Bound::Excluded(one())),
         (Bound::Excluded(one()), Bound::Included(one())),
         (Bound::Excluded(one()), Bound::Excluded(one())),
+        (Bound::Included(two()), Bound::Included(one())),
+        (Bound::Excluded(two()), Bound::Excluded(one())),
     ] {
         let filter = range("f", lower, upper);
         assert!(test.keys(filter.clone()).unwrap().is_empty(), "{filter:?}");
@@ -341,18 +342,10 @@ fn field() -> impl Strategy<Value = &'static str> {
     prop::sample::select(&FIELDS[..])
 }
 
-/// Whether admission accepts the bounds: at least one, and the lower not
-/// above the upper in the native order. Bounds of two types are left to the
-/// unit tests.
+/// Whether admission accepts the bounds: at least one. Bounds of two types
+/// are left to the unit tests; bounds that admit no value are well-formed.
 fn well_formed(lower: &Bound<CellValue>, upper: &Bound<CellValue>) -> bool {
-    match (lower, upper) {
-        (Bound::Unbounded, Bound::Unbounded) => false,
-        (
-            Bound::Included(low) | Bound::Excluded(low),
-            Bound::Included(high) | Bound::Excluded(high),
-        ) => native_cmp(low, high).is_some_and(Ordering::is_le),
-        (Bound::Unbounded, _) | (_, Bound::Unbounded) => true,
-    }
+    !matches!((lower, upper), (Bound::Unbounded, Bound::Unbounded))
 }
 
 proptest! {

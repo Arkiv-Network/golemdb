@@ -23,9 +23,7 @@ pub enum Filter {
     },
     /// The cell's value lies between `lower` and `upper`, in its type's
     /// order: numeric for numbers and dates, false before true, byte order
-    /// for strings (UTF-8) and fixed bytes. At least one side is bounded,
-    /// bounds have one type, and `lower` is not above `upper`. Equal bounds
-    /// with an excluded side match nothing.
+    /// for strings (UTF-8) and fixed bytes. At least one side is bounded.
     Range {
         field: CellName,
         lower: Bound<CellValue>,

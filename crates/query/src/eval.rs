@@ -12,6 +12,7 @@ pub(crate) fn match_set(source: &impl PostingSource, plan: Plan) -> Result<Bitma
         Plan::TermRead(term) => Ok(source.postings(&term)?),
         Plan::TermReads(terms) => union(terms.iter().map(|term| source.postings(term))),
         Plan::Scan(range) => union(source.scan(range)?),
+        Plan::Empty => Ok(Bitmap::default()),
     }
 }
 
@@ -344,10 +345,12 @@ mod tests {
             (i32s(Unbounded, Excluded(0)), &[1, 3, 10]),
             (i32s(Unbounded, Included(-4)), &[]),
             (i32s(Excluded(1), Unbounded), &[4, 10]),
-            // Equal bounds with an excluded side: well-formed, and empty.
+            // Bounds that admit no value: well-formed, and empty.
             (i32s(Included(1), Excluded(1)), &[]),
             (i32s(Excluded(1), Included(1)), &[]),
             (i32s(Excluded(1), Excluded(1)), &[]),
+            (i32s(Included(1), Included(-1)), &[]),
+            (i32s(Excluded(4), Excluded(-3)), &[]),
             (
                 i32s(Included(i32::MIN), Included(i32::MAX)),
                 &[0, 1, 3, 4, 10],
@@ -431,9 +434,7 @@ mod tests {
         for filter in [
             range("a", Unbounded, Unbounded),
             range("a", Included(u(1)), Included(CellValue::from_u64(2))),
-            range("a", Included(u(2)), Included(u(1))),
-            range("a", Excluded(u(2)), Excluded(u(1))),
-            i32s(Included(1), Included(-1)),
+            range("a", Included(u(2)), Included(CellValue::from_u64(1))),
             // The shape is checked before the field and the type.
             range("1bad", Unbounded, Unbounded),
             range("1bad", Included(u(1)), Excluded(str("x"))),
@@ -445,6 +446,22 @@ mod tests {
                 ),
                 "{filter:?}"
             );
+        }
+    }
+
+    #[test]
+    fn an_empty_range_matches_nothing_without_reading() {
+        use Bound::{Excluded, Included};
+        // FailingSource would surface as QueryError::Internal if it were consulted.
+        for filter in [
+            i32s(Included(1), Included(-1)),
+            i32s(Excluded(1), Excluded(-1)),
+            i32s(Included(1), Excluded(1)),
+            i32s(Excluded(1), Included(1)),
+            i32s(Excluded(1), Excluded(1)),
+        ] {
+            let matches = evaluate(&FailingSource, &filter).expect("filter evaluates");
+            assert!(matches.treemap().is_empty(), "{filter:?}");
         }
     }
 
@@ -507,7 +524,7 @@ mod tests {
                 name(b"b"),
                 TermError::UnsupportedType(CellType::Bytes),
             ),
-            // Inversion is checked on the terms, after the field and the type.
+            // Emptiness is checked on the terms, after the field and the type.
             (
                 range(
                     "1bad",

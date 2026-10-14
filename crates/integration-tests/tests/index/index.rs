@@ -8,8 +8,8 @@ use std::{
 
 use golemdb_cells::{CellNameRef, CellType, CellValue};
 use golemdb_index::{
-    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange,
-    RangeError, TermRange, tables,
+    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, TermRange,
+    tables,
 };
 use golemdb_merkle::{Hash, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
@@ -20,8 +20,9 @@ fn term(value: u8) -> IndexTerm {
     IndexTerm::new("tag", CellType::Str, &[b'a' + value]).unwrap()
 }
 
-/// The `str` terms of `tag` between the values of [`term`] `lower` and `upper`.
-fn tag_range(lower: Bound<u8>, upper: Bound<u8>) -> Result<TermRange, RangeError> {
+/// The `str` terms of `tag` between the values of [`term`] `lower` and
+/// `upper`, `None` when the bounds admit none.
+fn tag_range(lower: Bound<u8>, upper: Bound<u8>) -> Option<TermRange> {
     let value = |n: u8| CellValue::from_str(&char::from(b'a' + n).to_string());
     let (lower, upper) = (lower.map(value), upper.map(value));
     TermRange::between(
@@ -29,6 +30,7 @@ fn tag_range(lower: Bound<u8>, upper: Bound<u8>) -> Result<TermRange, RangeError
         lower.as_ref().map(CellValue::as_view),
         upper.as_ref().map(CellValue::as_view),
     )
+    .unwrap()
 }
 
 fn add(t: &IndexTerm, id: u64) -> PostingChange {
@@ -352,10 +354,7 @@ fn typed_range_and_prefix_scans() {
             .0,
         term(2)
     );
-    assert_eq!(
-        tag_range(Bound::Included(3), Bound::Included(0)),
-        Err(RangeError::Inverted)
-    );
+    assert_eq!(tag_range(Bound::Included(3), Bound::Included(0)), None);
     tx.put(tables::INDEX, term(0).as_bytes(), &[0; 31]).unwrap();
     let mut scan = index.terms_with_prefix(&tx, vec![]).unwrap();
     assert!(scan.next().unwrap().is_err());
@@ -395,6 +394,7 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
             lower.as_ref().map(CellValue::as_view),
             upper.as_ref().map(CellValue::as_view),
         )
+        .unwrap()
     };
     let u32_run = |lower: Bound<u32>, upper: Bound<u32>| {
         let range = u32_range(lower, upper).unwrap();
@@ -416,18 +416,18 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
         u32_run(Bound::Excluded(0), Bound::Included(u32::MAX)),
         run[1..]
     );
-    // Equal bounds with an excluded side are a range storage scans as empty.
+    // Bounds that admit no value make no range, so no scan.
     for (lower, upper) in [
         (Bound::Included(5), Bound::Excluded(5)),
         (Bound::Excluded(5), Bound::Included(5)),
         (Bound::Excluded(5), Bound::Excluded(5)),
+        (Bound::Included(6), Bound::Included(5)),
     ] {
-        assert!(u32_run(lower, upper).is_empty(), "{lower:?}..{upper:?}");
+        assert_eq!(u32_range(lower, upper), None, "{lower:?}..{upper:?}");
     }
-    assert_eq!(
-        u32_range(Bound::Included(6), Bound::Included(5)),
-        Err(RangeError::Inverted)
-    );
+    // Excluded neighbours with no value between are still a key range: the
+    // scan finds no term in it.
+    assert!(u32_run(Bound::Excluded(5), Bound::Excluded(6)).is_empty());
 }
 
 #[test]
