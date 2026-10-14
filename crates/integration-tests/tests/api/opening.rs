@@ -9,7 +9,7 @@ use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransacti
 
 const SUPERBLOCK: Table = Table("Superblock");
 const KEY: RecordKey = RecordKey([0x42; 32]);
-const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\n";
+const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\nimmutable_data: {shard_span: 500000, segments: []}\n";
 
 fn config() -> OpenConfig {
     OpenConfig::new(Genesis::from_yaml(YAML).unwrap())
@@ -39,7 +39,7 @@ pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
 #[test]
 fn yaml_is_explicit_strict_and_has_canonical_identity() {
     let first = Genesis::from_yaml(YAML).unwrap();
-    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nhash_function: keccak-256\n").unwrap();
+    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nhash_function: keccak-256\nimmutable_data: {segments: [], shard_span: 500000}\n").unwrap();
     assert_eq!(first, reordered);
     assert_eq!(
         Database::open_memory(&first).unwrap().info(),
@@ -135,8 +135,11 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
         golemdb_branch::CommitId::new(1)
     );
     let before = snapshot(&db);
-    let reopened =
-        Database::from_store(db.clone(), &config.with_mode(OpenMode::ExistingOnly)).unwrap();
+    let reopened = Database::from_store(
+        db.clone(),
+        &config.clone().with_mode(OpenMode::ExistingOnly),
+    )
+    .unwrap();
     assert!(!reopened.info().created);
     assert_eq!(reopened.info().commit_id, golemdb_branch::CommitId::new(1));
     assert_eq!(reopened.info().genesis_id, genesis.genesis_id);
@@ -181,19 +184,23 @@ fn memory_genesis_and_committed_reopen_support_both_hash_algorithms() {
 fn modes(db: impl Store + Clone + Send + Sync + 'static) {
     let config = config();
     assert!(matches!(
-        Database::from_store(db.clone(), &config.with_mode(OpenMode::ExistingOnly)),
+        Database::from_store(
+            db.clone(),
+            &config.clone().with_mode(OpenMode::ExistingOnly)
+        ),
         Err(OpenError::NotInitialized)
     ));
     assert!(db.begin_write().unwrap().is_empty().unwrap());
-    let opened = Database::from_store(db.clone(), &config.with_mode(OpenMode::CreateNew)).unwrap();
+    let opened =
+        Database::from_store(db.clone(), &config.clone().with_mode(OpenMode::CreateNew)).unwrap();
     assert!(opened.info().created);
     let before = snapshot(&db);
     assert!(matches!(
-        Database::from_store(db.clone(), &config.with_mode(OpenMode::CreateNew)),
+        Database::from_store(db.clone(), &config.clone().with_mode(OpenMode::CreateNew)),
         Err(OpenError::AlreadyInitialized)
     ));
     for change in 0..4 {
-        let mut different = config;
+        let mut different = config.clone();
         match change {
             0 => different.genesis.hash_function = HashAlgorithm::Blake3,
             1 => different.genesis.cell_limits.max_cell_name_len += 1,
@@ -275,6 +282,8 @@ fn missing_or_malformed_metadata_and_reserved_cells_fail_without_repair() {
     }
     for key in [
         CellKey::new(system::PARAMS.id, reserved::MAX_STR_LEN),
+        CellKey::new(system::PARAMS.id, reserved::SHARD_SPAN),
+        CellKey::new(system::PARAMS.id, reserved::IMMUTABLE_DATA_SEGMENTS),
         CellKey::new(system::ALLOC.id, reserved::NEXT_RECORD_ID),
         CellKey::new(system::PARAMS.id, reserved::KEY),
         CellKey::new(
@@ -336,7 +345,7 @@ fn unsupported_format_ids_and_missing_trie_roots_are_rejected() {
 fn concurrent(db: impl Store + Clone + Send + Sync + 'static, mode: OpenMode, different: bool) {
     let mut a = config();
     a.mode = mode;
-    let mut b = a;
+    let mut b = a.clone();
     if different {
         b.genesis.cell_limits.max_str_len += 1;
     }

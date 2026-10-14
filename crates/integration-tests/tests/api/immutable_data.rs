@@ -96,6 +96,7 @@ fn contract(database: impl Store + Clone + Send + Sync + 'static, hash_function:
             max_str_len: 64,
             max_bytes_len: 128,
         },
+        golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
     ));
     let db = Database::from_store(
         Guarded {

@@ -10,6 +10,9 @@ The unpublished integration-test package is a workspace member only.
 - `docs/` - project-wide design and API documentation
 - `crates/cells` (package `golemdb-cells`) — the wire format for "Cells",
   GolemDB's typed value encoding
+- `crates/immutable-data` (package `golemdb-immutable-data`) — typed immutable rows,
+  schemas, projections, genesis declarations, NippyJar/memory shard storage,
+  physical append/read/truncate and transactional key/commit-range mappings ([storage contract](crates/immutable-data/README.md))
 - `crates/storage` (package `golemdb-storage`) — transactional ordered key/value
   traits, bidirectional cursors, range scans and an in-memory implementation
 - `crates/storage-mdbx` (package `golemdb-storage-mdbx`) — MDBX implementation of

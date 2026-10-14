@@ -18,7 +18,9 @@
 //!
 //! let config = OpenConfig::new(Genesis::new(HashAlgorithm::Keccak256, CellLimits {
 //!         max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 128,
-//! }));
+//! },
+//!     golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
+//! ));
 //! let db = Database::open_memory(&config.genesis)?;
 //! let branch = db.begin()?;
 //! let key = RecordKey([0x42; 32]);
@@ -47,6 +49,10 @@ pub use config::{Genesis, OpenConfig, OpenMode};
 pub use database::Database;
 pub use error::{ApiError, Result};
 pub use golemdb_cells::CellLimits;
+pub use golemdb_immutable_data::{
+    ImmutableDataColumn, ImmutableDataCompression, ImmutableDataConfig, ImmutableDataConfigError,
+    ImmutableDataSegment,
+};
 pub use golemdb_merkle::HashAlgorithm;
 pub use golemdb_storage_mdbx::MdbxOptions;
 pub use immutable_data::{
