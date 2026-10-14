@@ -450,10 +450,11 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_range_matches_nothing_without_reading() {
+    fn an_empty_leaf_matches_nothing_without_reading() {
         use Bound::{Excluded, Included};
         // FailingSource would surface as QueryError::Internal if it were consulted.
         for filter in [
+            is_in("n", []),
             i32s(Included(1), Included(-1)),
             i32s(Excluded(1), Excluded(-1)),
             i32s(Included(1), Excluded(1)),
@@ -468,8 +469,8 @@ mod tests {
     #[test]
     fn malformed_in_is_rejected_before_reading() {
         for filter in [
-            is_in("a", []),
             is_in("a", [CellValue::from_i32(1), CellValue::from_u32(1)]),
+            is_in("a", [str("x"), CellValue::from_bytes(b"x")]),
         ] {
             assert!(
                 matches!(
@@ -510,6 +511,8 @@ mod tests {
                 name(b"b"),
                 TermError::UnsupportedType(CellType::Bytes),
             ),
+            // With no value, the name is still checked.
+            (is_in("1bad", []), name(b"1bad"), TermError::InvalidName),
             (
                 range("1bad", Bound::Unbounded, Bound::Included(str("x"))),
                 name(b"1bad"),

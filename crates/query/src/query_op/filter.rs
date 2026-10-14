@@ -15,8 +15,8 @@ use golemdb_cells::{CellName, CellValue};
 pub enum Filter {
     /// The cell holds exactly `value`, with its type.
     Eq { field: CellName, value: CellValue },
-    /// The cell holds one of `values`. The values must be non-empty and of
-    /// one type; a value given twice is read once.
+    /// The cell holds one of `values`. The values must be of one type; a
+    /// value given twice is read once, and no value matches nothing.
     In {
         field: CellName,
         values: Vec<CellValue>,
