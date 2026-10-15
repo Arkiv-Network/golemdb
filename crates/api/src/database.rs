@@ -106,11 +106,11 @@ impl Api for Database {
     fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()> {
         self.inner.delete(branch, operation)
     }
-    fn query(&self, commit: Option<CommitId>, operation: QueryOp) -> Result<QueryPage> {
-        self.inner.query(commit, operation)
+    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Result<QueryPage> {
+        self.inner.query(commit_id, operation)
     }
-    fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Result<u64> {
-        self.inner.count(commit, operation)
+    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Result<u64> {
+        self.inner.count(commit_id, operation)
     }
     fn head(&self) -> Result<CommitId> {
         self.inner.head()

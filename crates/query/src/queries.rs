@@ -38,17 +38,7 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
     /// The records matching `op`'s filter at `commit` (`None` for the head),
     /// in record ID order, projected as `get` projects. Sort, limit and offset
     /// return `NotImplemented` for now, and the budget is not enforced yet.
-    pub fn query(&self, commit: Option<CommitId>, op: QueryOp) -> Result<QueryPage> {
-        self.run_query(commit, op)
-    }
-
-    /// The size of the filter's match set at `commit` (`None` for the head).
-    /// The budget is not enforced yet.
-    pub fn count(&self, commit: Option<CommitId>, op: CountOp) -> Result<u64> {
-        self.run_count(commit, op)
-    }
-
-    fn run_query(&self, commit: Option<CommitId>, op: QueryOp) -> Result<QueryPage> {
+    pub fn query(&self, commit_id: Option<CommitId>, op: QueryOp) -> Result<QueryPage> {
         let QueryOp {
             filter,
             sort,
@@ -77,7 +67,7 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
             snapshot,
             head,
             matches,
-        } = self.evaluate(commit, &filter)?;
+        } = self.evaluate(commit_id, &filter)?;
         let cells = CellReader::new(&snapshot);
         let records = matches
             .treemap()
@@ -91,9 +81,11 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
         })
     }
 
-    fn run_count(&self, commit: Option<CommitId>, op: CountOp) -> Result<u64> {
+    /// The size of the filter's match set at `commit` (`None` for the head).
+    /// The budget is not enforced yet.
+    pub fn count(&self, commit_id: Option<CommitId>, op: CountOp) -> Result<u64> {
         let CountOp { filter, budget: _ } = op;
-        Ok(self.evaluate(commit, &filter)?.matches.treemap().len())
+        Ok(self.evaluate(commit_id, &filter)?.matches.treemap().len())
     }
 
     /// Shared by `query` and `count`: admit `filter`, then open one snapshot,
@@ -102,11 +94,11 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
     /// same state.
     fn evaluate(
         &self,
-        commit: Option<CommitId>,
+        commit_id: Option<CommitId>,
         filter: &Filter,
     ) -> Result<Evaluation<S::Read<'_>>> {
         let plan = Plan::try_from(filter)?;
-        let (snapshot, head) = committed_snapshot(&self.store, commit)?;
+        let (snapshot, head) = committed_snapshot(&self.store, commit_id)?;
         let index = Index::new(&self.hasher);
         let matches = match_set(&IndexSource::new(&index, &snapshot), plan)?;
         Ok(Evaluation {

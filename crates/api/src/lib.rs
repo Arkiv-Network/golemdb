@@ -86,11 +86,11 @@ pub trait Api {
     /// snapshot. `commit` names the commit to read, `None` the head; explicit
     /// non-head commits are not yet supported; sort, limit and offset return
     /// NotImplemented.
-    fn query(&self, commit: Option<CommitId>, operation: QueryOp) -> Result<QueryPage>;
+    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Result<QueryPage>;
 
     /// The number of committed records matching the operation's filter, under
     /// the same commit rules as `query`.
-    fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Result<u64>;
+    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Result<u64>;
 
     // Branch lifecycle. IDs are valid only for their issuing engine.
     fn head(&self) -> Result<CommitId>;
