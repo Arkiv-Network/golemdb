@@ -1,12 +1,12 @@
 use golemdb_branch::{BranchError, Branches};
 use golemdb_cells::{
-    CellChange, CellKey, CellName, CellNameRef, CellType, CellValue, CellValueRef, Cells, Width,
-    reserved, system,
+    CellChange, CellKey, CellName, CellNameRef, CellType, CellValue, CellValueRef, Width, reserved,
+    system,
 };
 use golemdb_index::{Index, IndexTerm};
-use golemdb_merkle::{HashProvider, Keccak256Hasher, RootRef};
+use golemdb_merkle::Keccak256Hasher;
 use golemdb_record::{CellPatch, ReadTarget, RecordCells, RecordError, RecordKey, Records};
-use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction};
+use golemdb_storage::{MemoryStore, Store};
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
 const OTHER: RecordKey = RecordKey([0x43; 32]);
@@ -34,7 +34,7 @@ fn binding(key: RecordKey) -> CellKey {
 
 // Explicit initialized state, as supplied by the future connection/genesis layer.
 // Build the real cell trie so seal/commit exercise production root updates.
-fn initialize(db: &impl Store) {
+fn initialize<D: Store>(db: D) -> Branches<D, Keccak256Hasher> {
     let mut changes = Vec::new();
     let mut put = |id, name: CellNameRef<'_>, value| {
         changes.push(CellChange::Put {
@@ -66,23 +66,7 @@ fn initialize(db: &impl Store) {
         );
     }
     put(system::ALLOC.id, reserved::NEXT_RECORD_ID, u64_value(64));
-    let hash = Keccak256Hasher;
-    let mut tx = db.begin_write().unwrap();
-    let update = Cells::new(&hash)
-        .apply(&mut tx, RootRef::Empty, changes)
-        .unwrap();
-    tx.put(
-        Table("Superblock"),
-        b"head",
-        &[
-            0u64.to_be_bytes().as_slice(),
-            &update.root.hash(&hash),
-            &hash.hash(&[]),
-        ]
-        .concat(),
-    )
-    .unwrap();
-    tx.commit().unwrap();
+    Branches::create(db, Keccak256Hasher, changes).unwrap()
 }
 
 fn allocated<S: Store>(
@@ -112,8 +96,7 @@ fn id<S: Store>(
 }
 
 fn lifecycle(db: impl Store + Clone) {
-    initialize(&db);
-    let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
+    let branches = initialize(db.clone());
     let records = Records::new(branches.clone());
     let b = branches.begin().unwrap();
     let competitor = branches.begin().unwrap();

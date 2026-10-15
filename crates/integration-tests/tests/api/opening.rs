@@ -253,6 +253,7 @@ fn partial_or_foreign_state_is_never_initialized() {
 fn missing_or_malformed_metadata_and_reserved_cells_fail_without_repair() {
     for key in [
         b"format".as_slice(),
+        b"retention",
         b"hash_fn",
         b"roaring",
         b"genesis_id",
@@ -528,4 +529,116 @@ fn mdbx_existing_empty_tables_prevent_initialization() {
             (!delete).then(|| b"value".to_vec())
         );
     }
+}
+
+fn queries_after_gc(db: impl Store + Clone + Send + Sync + 'static) {
+    use std::ops::Bound;
+
+    let cfg = config();
+    let opened = Database::from_store(db.clone(), &cfg).unwrap();
+    let keys = [RecordKey([0x41; 32]), RecordKey([0x42; 32])];
+    let branch = opened.begin().unwrap();
+    for key in keys {
+        opened
+            .create(
+                branch,
+                RecordOp::create(key)
+                    .attribute("price", CellValue::from_u64(0))
+                    .unwrap(),
+            )
+            .unwrap();
+    }
+    opened.commit(branch).unwrap();
+    for price in 1..=4 {
+        let branch = opened.begin().unwrap();
+        for key in keys {
+            opened
+                .patch(
+                    branch,
+                    RecordOp::patch(key)
+                        .attribute("price", CellValue::from_u64(price))
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        opened.commit(branch).unwrap();
+        let field = CellNameRef::raw(b"price").into();
+        for filter in [
+            Filter::Eq {
+                field,
+                value: CellValue::from_u64(price),
+            },
+            Filter::In {
+                field: CellNameRef::raw(b"price").into(),
+                values: vec![CellValue::from_u64(price - 1), CellValue::from_u64(price)],
+            },
+            Filter::Range {
+                field: CellNameRef::raw(b"price").into(),
+                lower: Bound::Included(CellValue::from_u64(price)),
+                upper: Bound::Unbounded,
+            },
+        ] {
+            assert_eq!(
+                opened.count(None, CountOp::filter(filter.clone())).unwrap(),
+                2
+            );
+            let reopened = Database::from_store(db.clone(), &cfg).unwrap();
+            let page = reopened.query(None, QueryOp::from_filter(filter)).unwrap();
+            assert_eq!(
+                page.records
+                    .iter()
+                    .map(|record| record.key)
+                    .collect::<Vec<_>>(),
+                keys
+            );
+        }
+        assert_eq!(
+            opened
+                .count(
+                    None,
+                    CountOp::filter(Filter::Eq {
+                        field: CellNameRef::raw(b"price").into(),
+                        value: CellValue::from_u64(price - 1),
+                    })
+                )
+                .unwrap(),
+            0
+        );
+    }
+    let branch = opened.begin().unwrap();
+    for key in keys {
+        opened.delete(branch, RecordOp::delete(key)).unwrap();
+    }
+    opened.commit(branch).unwrap();
+    assert_eq!(
+        opened
+            .count(
+                None,
+                CountOp::filter(Filter::Range {
+                    field: CellNameRef::raw(b"price").into(),
+                    lower: Bound::Included(CellValue::from_u64(0)),
+                    upper: Bound::Unbounded,
+                })
+            )
+            .unwrap(),
+        0
+    );
+    let tx = db.begin_read().unwrap();
+    assert!(
+        scan_prefix(&tx, golemdb_index::tables::BITMAP_CONTAINER, vec![])
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn memory_api_queries_survive_gc_and_reopen() {
+    queries_after_gc(MemoryStore::new());
+}
+
+#[test]
+fn mdbx_api_queries_survive_gc_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    queries_after_gc(golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap());
 }

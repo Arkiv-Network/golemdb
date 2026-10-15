@@ -11,6 +11,16 @@ pub enum BranchError {
     CommitNumberExhausted,
     #[error("the previous commit's #roots cell already exists")]
     RootsCellExists,
+    #[error("garbage collection: {0}")]
+    GarbageCollection(&'static str),
+    #[error("unsupported database format")]
+    UnsupportedDatabaseFormat,
+    #[error("retaining {0} commits before head is not implemented")]
+    UnsupportedRetention(u64),
+    #[error("genesis requires empty engine tables; {0:?} is not empty")]
+    DatabaseNotEmpty(golemdb_storage::Table),
+    #[error(transparent)]
+    Merkle(#[from] golemdb_merkle::MerkleError),
     #[error(transparent)]
     Cells(#[from] golemdb_cells::CellError),
     #[error(transparent)]

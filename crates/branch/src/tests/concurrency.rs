@@ -6,7 +6,7 @@ use crate::{
 };
 use golemdb_cells::{CellKey, CellNameRef, CellValue};
 use golemdb_merkle::{HashProvider, Keccak256Hasher};
-use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction};
+use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 
 fn key(name: &[u8]) -> CellKey {
     CellKey::new(64, CellNameRef::raw(name))
@@ -20,7 +20,7 @@ fn publish_empty_head(db: &MemoryStore, commit: u64) {
     let root = Keccak256Hasher.hash(&[]);
     let mut tx = db.begin_write().unwrap();
     tx.put(
-        Table("Superblock"),
+        crate::tables::SUPERBLOCK,
         b"head",
         &[commit.to_be_bytes().as_slice(), &root, &root].concat(),
     )
@@ -30,7 +30,7 @@ fn publish_empty_head(db: &MemoryStore, commit: u64) {
 
 fn database() -> MemoryStore {
     let db = MemoryStore::new();
-    publish_empty_head(&db, 0);
+    crate::genesis::create(&db, &Keccak256Hasher, []).unwrap();
     db
 }
 

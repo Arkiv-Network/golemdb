@@ -12,7 +12,9 @@ use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{
     BranchError, BranchId, BranchInfo, CellRead, CellWrite, CommitId, OperationError, Result,
-    SealedCommit, head::read_head, overlay::CellOverlay,
+    SealedCommit,
+    head::{read_head, read_retention},
+    overlay::CellOverlay,
 };
 
 // A process-wide counter prevents handle aliasing between independent managers,
@@ -71,11 +73,12 @@ struct Inner<S, H> {
 /// the current branch lock is already held and nested calls can deadlock. They
 /// can return owned results, but cannot retain views or borrowed scans.
 ///
-/// This increment does not initialize genesis, validate format/hash settings,
-/// authenticate entire tries, maintain history, or rewind the store. The supplied hash
-/// provider must match the deployment and is shared by all branch seals. External writers
-/// must publish cells and a strictly increasing head atomically; changing cells
-/// under an unchanged head or rewinding it violates this manager's contract.
+/// Use [`Self::create`] for a new store and [`Self::new`] to reopen it.
+/// This increment does not validate hash settings, authenticate entire tries,
+/// maintain history, or rewind the store. The supplied hash provider must
+/// match the deployment and is shared by all branch seals. Only this manager
+/// publishes commits: each one replaces cells, indexes, node reference counts
+/// and head together, so external engine writes violate its contract.
 ///
 /// # Callback panics
 ///
@@ -107,19 +110,36 @@ impl<S, H> Clone for Branches<S, H> {
 
 impl<S: Store, H: HashProvider> Branches<S, H> {
     /// Open a manager over an initialized head. Performs no writes and fails
-    /// if the head is missing, malformed, or unreadable.
+    /// if the head is missing, malformed, or unreadable, or the store format
+    /// or retention is unsupported.
     pub fn new(store: S, hasher: H) -> Result<Self> {
         {
             let tx = store.begin_read()?;
             read_head(&tx)?;
+            crate::gc::check_retention(read_retention(&tx)?)?;
         }
-        Ok(Self {
+        Ok(Self::from_parts(store, hasher))
+    }
+
+    /// Commit genesis in its own writer, then open a manager over it. See
+    /// [`crate::create_genesis_in`] for the genesis contract.
+    pub fn create(
+        store: S,
+        hasher: H,
+        cells: impl IntoIterator<Item = golemdb_cells::CellChange>,
+    ) -> Result<Self> {
+        crate::genesis::create(&store, &hasher, cells)?;
+        Ok(Self::from_parts(store, hasher))
+    }
+
+    fn from_parts(store: S, hasher: H) -> Self {
+        Self {
             inner: Arc::new(Inner {
                 store,
                 hasher,
                 branches: Mutex::new(BTreeMap::new()),
             }),
-        })
+        }
     }
 
     pub fn head(&self) -> Result<CommitId> {
@@ -128,7 +148,7 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
 
     /// The store shared by this manager. Committed readers can open a
     /// snapshot directly; no branch registration or overlay is needed.
-    /// Direct writers must obey the publication contract documented on Branches.
+    /// Engine tables must not be written directly; see the contract on Branches.
     pub fn store(&self) -> &S {
         &self.inner.store
     }
@@ -252,8 +272,9 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
     /// Success consumes the branch; competitors over the old head become stale.
     /// A failed seal leaves the branch open. A storage failure after sealing
     /// retains the sealed result for retry or discard, subject to head validation.
-    /// A live branch whose origin lost the race returns Conflict and is consumed.
-    /// Unknown or already invalidated/consumed handles return HandleInvalid.
+    /// Obsolete trie and bitmap rows are deleted in the same transaction; seal
+    /// computes them, so publication only validates head and replays rows.
+    /// A live losing branch returns Conflict; invalidated handles return HandleInvalid.
     ///
     /// # Panics
     ///
@@ -269,7 +290,7 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
             let state = slot.as_mut().ok_or(BranchError::HandleInvalid)?;
             let sealed = state.seal(origin, &self.inner.hasher)?;
             let tx = self.inner.store.begin_write()?;
-            match crate::commit::persist(tx, state.commit_id, &sealed) {
+            match crate::commit::persist(tx, &sealed) {
                 Ok(commit_id) => {
                     *slot = None;
                     // Publication has succeeded. Registry housekeeping must not

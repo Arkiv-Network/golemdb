@@ -381,11 +381,13 @@ the exact layouts._
 | `IndexHistory`    | `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue`                   | `commitsList: Roaring64`              | Every commit number that modified a given index term.                                       |
 | `IndexChangeSet`  | `commitNr: u64` ‖ `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue` | `bitmapHash: B256`                    | Pre-image of a term's bitmap root before the change made at `commitNr`.                     |
 | `Superblock`      | `superKey: Bytes`                                                  | `superValue: Bytes`                   | The only uncommitted engine state: format identifiers and the head ([§4](#the-superblock)). |
+| `NodeRefs`        | `kind: u8` ‖ `hashedNode: B256`                                    | `refCount: u64`                       | Derived reference counts above one of trie nodes and containers (§9).                       |
 
 The ten data tables fall into three groups — **primary state and its commitment** (`Cell`,
 `CellTrie`), **indexing** (`Index`, `IndexTrie`, `BitmapTrie`, `BitmapContainer`) and **history**
 (`CellHistory`, `CellChangeSet`, `IndexHistory`, `IndexChangeSet`) — with the `Superblock` standing
-apart from all three as the one structure outside the transactional cell machinery.
+apart from all three as the one structure outside the transactional cell machinery. `NodeRefs` is
+physical bookkeeping, not state: it is derived from the retained roots and can be rebuilt from them.
 
 The history group mirrors the primary/index split exactly: `CellHistory`/`CellChangeSet` stand to
 `Cell` precisely as `IndexHistory`/`IndexChangeSet` stand to `Index`. `BitmapTrie` is named for what
@@ -393,7 +395,7 @@ it holds; the hash of a `BitmapTrie` root **is** the `bitmapHash` stored in `Ind
 
 **There is no identity table, no root table and no engine-singleton table.** The `recordKey →
 recordID` mapping, the root history and the ID allocator are all ordinary committed cells of
-reserved system records ([§4](#record-classes-and-the-reserved-catalogue)). Only the four
+reserved system records ([§4](#record-classes-and-the-reserved-catalogue)). Only the five
 `Superblock` rows sit outside the commitment, and only because they structurally cannot sit inside
 it.
 
@@ -877,12 +879,13 @@ Two pieces of engine state cannot be cells, for structural reasons rather than c
 Everything else moves into reserved records. What remains is one tiny uncommitted table, rows typed
 by key:
 
-| Key       | Value                                                               | Written                                                          |
-| --------- | ------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| `format`  | schema/layout version: `u32` (BE)                                   | genesis                                                          |
-| `hash_fn` | hash function ID: `u16` (BE)                                        | genesis                                                          |
-| `roaring` | Roaring serialization rule version: `u16` (BE)                      | genesis                                                          |
-| `head`    | `commitNr: u64` (BE) ‖ `StateRoot: B256` ‖ `IndexRoot: B256` (72 B) | once per commit, atomically within the commit's MDBX transaction |
+| Key         | Value                                                               | Written                                                          |
+| ----------- | ------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `format`    | schema/layout version: `u32` (BE)                                   | genesis                                                          |
+| `hash_fn`   | hash function ID: `u16` (BE)                                        | genesis                                                          |
+| `roaring`   | Roaring serialization rule version: `u16` (BE)                      | genesis                                                          |
+| `retention` | commits before head whose physical tries are kept: `u64` (BE)       | genesis                                                          |
+| `head`      | `commitNr: u64` (BE) ‖ `StateRoot: B256` ‖ `IndexRoot: B256` (72 B) | once per commit, atomically within the commit's MDBX transaction |
 
 The `head` row is the entry point for everything: current roots for proofs and root maintenance, the
 current `commitNr` that keys the history tables, and crash recovery on restart.
@@ -1964,7 +1967,8 @@ contents are gone.
 Third, and new relative to a design with dedicated side tables: **the engine's own operational state
 is inside the commitment,** because it lives in `Cell`. The root history, the `recordKey → recordID`
 mapping, the ID allocator and the chain parameters are all committed cells, so two nodes agreeing on
-the root necessarily agree on all of them. The uncommitted surface is exactly four `Superblock` rows.
+the root necessarily agree on all of them. The uncommitted surface is exactly five `Superblock` rows,
+plus the derived `NodeRefs`.
 
 ### Depth Bounds and Future Optimization Paths
 
@@ -2044,6 +2048,13 @@ which has three consequences:
 The price is that a node can no longer be addressed by where it sits: resolving a path means walking
 down from the root, and superseded nodes are not deleted by the write that supersedes them, so
 reclaiming them requires garbage collection.
+
+**Current implementation:** `NodeRefs` counts references from retained roots and live parents,
+storing only counts above one, since nearly every node has a single parent. A commit nets the count
+changes, deletes nodes whose count reaches zero, and writes both in the head's transaction. Only `retention = 0` is implemented: a commit releases its origin's
+roots, so `#roots` keeps commitments but not their tries. A retention window
+([D05](decisions_for_architect.md#7--d05--retention-and-historical-discovery)) will instead release
+the roots of the commit leaving the window, read from `#roots` and `IndexChangeSet`.
 
 **Caveat on deduplication.** Because leaf hashes bind the _complete_ path
 ([§8](#the-two-tries)), a sub-trie's hash encodes its absolute position, so two sub-tries at

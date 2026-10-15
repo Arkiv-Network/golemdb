@@ -1,4 +1,7 @@
-use golemdb_branch::{BranchError, Branches};
+use golemdb_branch::{
+    BranchError, Branches,
+    tables::{ENGINE, SUPERBLOCK},
+};
 use golemdb_cells::{CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, tables};
 use golemdb_index::{Index, IndexTerm};
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher};
@@ -13,16 +16,6 @@ use std::{
     },
 };
 
-const SUPERBLOCK: Table = Table("Superblock");
-const TABLES: [Table; 7] = [
-    tables::CELL,
-    tables::CELL_TRIE,
-    golemdb_index::tables::INDEX,
-    golemdb_index::tables::INDEX_TRIE,
-    golemdb_index::tables::BITMAP_TRIE,
-    golemdb_index::tables::BITMAP_CONTAINER,
-    SUPERBLOCK,
-];
 fn key(name: &[u8]) -> CellKey {
     CellKey::new(64, CellNameRef::raw(name))
 }
@@ -31,20 +24,14 @@ fn value(text: &str) -> CellValue {
         .unwrap()
         .into()
 }
-fn genesis(db: &impl Store, hash: &impl HashProvider) {
-    let empty = hash.hash(&[]);
-    let mut tx = db.begin_write().unwrap();
-    tx.put(
-        SUPERBLOCK,
-        b"head",
-        &[0u64.to_be_bytes().as_slice(), &empty, &empty].concat(),
-    )
-    .unwrap();
-    tx.commit().unwrap();
+// Genesis for tests that then open the database through a wrapper.
+fn genesis(db: &(impl Store + Clone)) {
+    Branches::create(db.clone(), Keccak256Hasher, []).unwrap();
 }
+
 fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
     let tx = db.begin_read().unwrap();
-    TABLES
+    ENGINE
         .iter()
         .map(|table| {
             scan_prefix(&tx, *table, vec![])
@@ -71,7 +58,7 @@ fn stage<S: Store, H: HashProvider>(
 #[test]
 fn stale_commit_conflicts_unless_another_operation_already_invalidated_it() {
     let db = MemoryStore::new();
-    genesis(&db, &Keccak256Hasher);
+    genesis(&db);
     let branches = Branches::new(db, Keccak256Hasher).unwrap();
     let winner = stage(&branches, "winner");
     let stale = stage(&branches, "stale");
@@ -93,8 +80,7 @@ fn stale_commit_conflicts_unless_another_operation_already_invalidated_it() {
     ));
 }
 fn lifecycle(db: impl Store + Clone, hash: impl HashProvider + Copy) {
-    genesis(&db, &hash);
-    let branches = Branches::new(db.clone(), hash).unwrap();
+    let branches = Branches::create(db.clone(), hash, []).unwrap();
     let old_reader = db.begin_read().unwrap();
     let old_head = old_reader.get(SUPERBLOCK, b"head").unwrap();
     let winner = stage(&branches, "Alice");
@@ -229,7 +215,9 @@ enum Fault {
     Open,
     Write(usize),
     HeadRead,
+    GraphRead,
     HeadWrite,
+    NodeDelete,
     Commit,
     Panic(usize),
 }
@@ -294,12 +282,18 @@ impl<W: ReadTransaction> ReadTransaction for ControlledWrite<W> {
     where
         Self: 'a;
     fn get(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Option<Vec<u8>>> {
+        if matches!(self.fault, Fault::GraphRead) && table != SUPERBLOCK {
+            return Err(injected());
+        }
         if matches!(self.fault, Fault::HeadRead) && table == SUPERBLOCK && key == b"head" {
             return Err(injected());
         }
         self.inner.get(table, key)
     }
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
+        if matches!(self.fault, Fault::GraphRead) {
+            return Err(injected());
+        }
         self.inner.cursor(table, key)
     }
 }
@@ -328,6 +322,10 @@ impl<W: WriteTransaction> WriteTransaction for ControlledWrite<W> {
         self.inner.insert(table, key, value)
     }
     fn delete(&mut self, table: Table, key: &[u8]) -> golemdb_storage::Result<bool> {
+        // GC deletes the replaced cell trie root in the measured commit.
+        if matches!(self.fault, Fault::NodeDelete) && table == tables::CELL_TRIE {
+            return Err(injected());
+        }
         self.mutation(table)?;
         self.inner.delete(table, key)
     }
@@ -339,8 +337,7 @@ impl<W: WriteTransaction> WriteTransaction for ControlledWrite<W> {
     }
 }
 fn failure_recovery(db: impl Store + Clone + 'static) {
-    genesis(&db, &Keccak256Hasher);
-    let init = Branches::new(db.clone(), Keccak256Hasher).unwrap();
+    let init = Branches::create(db.clone(), Keccak256Hasher, []).unwrap();
     init.commit(stage(&init, "original")).unwrap();
     let before = snapshot(&db);
     let controlled = Controlled::new(db.clone());
@@ -360,6 +357,7 @@ fn failure_recovery(db: impl Store + Clone + 'static) {
         Fault::Write(1),
         Fault::Write(3),
         Fault::HeadWrite,
+        Fault::NodeDelete,
         Fault::Commit,
         Fault::Panic(3),
     ] {
@@ -402,12 +400,39 @@ fn mdbx_failures_abort_all_rows_and_allow_retry() {
     failure_recovery(golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap());
 }
 
+fn publication_reads_only_header(db: impl Store + Clone) {
+    let branches = Branches::create(db.clone(), Keccak256Hasher, []).unwrap();
+    branches.commit(stage(&branches, "original")).unwrap();
+    let controlled = Controlled::new(db);
+    *controlled.fault.lock().unwrap() = Fault::GraphRead;
+    let branches = Branches::new(controlled, Keccak256Hasher).unwrap();
+    for explicit in [false, true] {
+        let branch = stage(&branches, if explicit { "final" } else { "changed" });
+        if explicit {
+            branches.seal(branch).unwrap();
+        }
+        branches.commit(branch).unwrap();
+    }
+}
+
+#[test]
+fn memory_publication_only_reads_head_and_format() {
+    publication_reads_only_header(MemoryStore::new());
+}
+
+#[test]
+fn mdbx_publication_only_reads_head_and_format() {
+    let dir = tempfile::tempdir().unwrap();
+    publication_reads_only_header(golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap());
+}
+
 fn race(db: impl Store + Clone + Send + Sync + 'static) {
-    genesis(&db, &Keccak256Hasher);
+    genesis(&db);
     let mut controlled = Controlled::new(db.clone());
     controlled.barrier = Some(Arc::new(Barrier::new(2)));
     let a = Branches::new(controlled.clone(), Keccak256Hasher).unwrap();
     let b = Branches::new(controlled.clone(), Keccak256Hasher).unwrap();
+    let initial_rows = snapshot(&db).iter().map(Vec::len).sum::<usize>();
     let id_a = stage(&a, "Alice");
     let id_b = stage(&b, "Bob");
     let seal_a = a.seal(id_a).unwrap();
@@ -423,11 +448,11 @@ fn race(db: impl Store + Clone + Send + Sync + 'static) {
         _ => panic!("unexpected race results: {result_a:?}, {result_b:?}"),
     };
     assert_eq!(a.head().unwrap(), golemdb_branch::CommitId::new(1));
-    // The baseline contains only head; every winning replay mutation produces
-    // one final row (including the head replacement). The loser writes nothing.
+    // Every winning replay mutation produces one final row, including the
+    // head replacement. The pre-existing format marker is not rewritten.
     assert_eq!(
         controlled.mutations.load(Ordering::Relaxed),
-        snapshot(&db).iter().map(Vec::len).sum::<usize>()
+        snapshot(&db).iter().map(Vec::len).sum::<usize>() - initial_rows + 1
     );
     let tx = db.begin_read().unwrap();
     assert_eq!(
@@ -470,8 +495,7 @@ fn implicit_and_explicit_seal_publish_identical_state() {
     let mut results = Vec::new();
     for explicit in [false, true] {
         let db = MemoryStore::new();
-        genesis(&db, &Keccak256Hasher);
-        let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
+        let branches = Branches::create(db.clone(), Keccak256Hasher, []).unwrap();
         let branch = stage(&branches, "final");
         branches.checkpoint(branch).unwrap();
         branches
@@ -497,7 +521,7 @@ fn implicit_and_explicit_seal_publish_identical_state() {
 fn mdbx_key_limit_during_implicit_seal_leaves_branch_open() {
     let dir = tempfile::tempdir().unwrap();
     let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
-    genesis(&db, &Keccak256Hasher);
+    genesis(&db);
     let before = snapshot(&db);
     let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
     let branch = branches.begin().unwrap();

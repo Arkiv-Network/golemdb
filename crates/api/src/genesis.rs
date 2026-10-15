@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use golemdb_branch::{Head, read_head_state, write_head};
+use golemdb_branch::{Head, create_genesis_in, read_head_state};
 use golemdb_cells::{CellChange, CellKey, CellNameRef, CellValue, Cells, reserved, system, tables};
 use golemdb_index::Index;
-use golemdb_merkle::{Hash, HashAlgorithm, HashProvider, RootRef};
+use golemdb_merkle::{Hash, HashAlgorithm, HashProvider};
 use golemdb_storage::{ReadCursor, ReadTransaction, Table, WriteTransaction};
 
 use crate::{Genesis, OpenConfig, OpenError, OpenInfo, OpenMode, OpenResult};
@@ -92,7 +92,13 @@ pub(crate) fn prepare(
         if config.mode == OpenMode::ExistingOnly {
             return Err(OpenError::NotInitialized);
         }
-        tx.put(SUPERBLOCK, b"format", &FORMAT.to_be_bytes())?;
+        let head = create_genesis_in(
+            tx,
+            hasher,
+            cells
+                .into_iter()
+                .map(|(key, value)| CellChange::Put { key, value }),
+        )?;
         tx.put(
             SUPERBLOCK,
             b"hash_fn",
@@ -100,21 +106,6 @@ pub(crate) fn prepare(
         )?;
         tx.put(SUPERBLOCK, b"roaring", &ROARING.to_be_bytes())?;
         tx.put(SUPERBLOCK, b"genesis_id", &genesis_id)?;
-        let update = Cells::new(hasher).apply(
-            tx,
-            RootRef::Empty,
-            cells
-                .into_iter()
-                .map(|(key, value)| CellChange::Put { key, value }),
-        )?;
-        // Every genesis cell is a field, so IndexRoot is the canonical empty root.
-        // #roots cannot contain its own roots and has no history entries at commit 0.
-        let head = Head {
-            commit_id: crate::CommitId::GENESIS,
-            state_root: update.root.hash(hasher),
-            index_root: hasher.hash(&[]),
-        };
-        write_head(tx, &head)?;
         return Ok(OpenInfo::new(true, head, genesis_id));
     }
 
