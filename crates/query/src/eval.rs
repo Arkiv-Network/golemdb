@@ -3,7 +3,7 @@
 
 use golemdb_index::Bitmap;
 
-use crate::{Result, plan::Plan, source::PostingSource};
+use crate::{Result, plan::Plan, posting_source::PostingSource};
 
 /// The match set of an admitted filter: the IDs of every matching record,
 /// ascending. Fails only when the source does.
@@ -224,7 +224,8 @@ mod tests {
         let values = [1, -1, 1, 0, -1].map(CellValue::from_i32);
         let matches = evaluate(&source, &is_in("n", values)).expect("filter evaluates");
         assert_eq!(matches.treemap().iter().collect::<Vec<_>>(), [1]);
-        let term = |n| IndexTerm::for_value("n", CellValue::from_i32(n).as_view()).expect("term");
+        let term =
+            |n| IndexTerm::from_str_name("n", CellValue::from_i32(n).as_view()).expect("term");
         assert_eq!(*source.reads.borrow(), [term(-1), term(0), term(1)]);
     }
 

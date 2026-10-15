@@ -59,13 +59,13 @@ impl IndexTerm {
         if !cell.is_indexable() {
             return Ok(None);
         }
-        Self::for_value(name, cell).map(Some)
+        Self::from_str_name(name, cell).map(Some)
     }
 
     /// The term `name = value` is indexed under, whatever the cell's kind:
     /// queries look a value up by name, type and value. The payload is already
     /// valid and order-encoded, so it is copied verbatim, as for `from_cell`.
-    pub fn for_value(name: &str, value: CellValueRef<'_>) -> Result<Self, TermError> {
+    pub fn from_str_name(name: &str, value: CellValueRef<'_>) -> Result<Self, TermError> {
         let mut bytes = Self::prefix(name, value.cell_type())?;
         bytes.extend_from_slice(value.value());
         Ok(Self(bytes))
@@ -74,12 +74,12 @@ impl IndexTerm {
     /// [`Self::for_value`] for a stored cell name. Names are raw bytes; one
     /// that is not UTF-8 is [`TermError::InvalidName`], like any name outside
     /// the grammar. Seal and queries both build terms through here.
-    pub fn for_cell_name(
+    pub fn from_cell_name(
         name: CellNameRef<'_>,
         value: CellValueRef<'_>,
     ) -> Result<Self, TermError> {
         let name = std::str::from_utf8(name.as_bytes()).map_err(|_| TermError::InvalidName)?;
-        Self::for_value(name, value)
+        Self::from_str_name(name, value)
     }
 
     /// Prefix that confines range/prefix scans to one attribute name and type.
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn for_value_appends_the_stored_payload_to_the_prefix() {
         for (value, _) in values() {
-            let term = IndexTerm::for_value("Price", value.as_view()).expect("indexable");
+            let term = IndexTerm::from_str_name("Price", value.as_view()).expect("indexable");
             let mut expected = IndexTerm::prefix("Price", value.cell_type()).expect("indexable");
             expected.extend_from_slice(value.value());
             assert_eq!(term.as_bytes(), expected, "{value:?}");
@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn for_value_agrees_with_native_construction() {
         for (value, native) in values() {
-            let term = IndexTerm::for_value("Price", value.as_view()).expect("indexable");
+            let term = IndexTerm::from_str_name("Price", value.as_view()).expect("indexable");
             let from_native = IndexTerm::new("Price", value.cell_type(), &native).expect("valid");
             assert_eq!(term, from_native, "{value:?}");
         }
@@ -323,9 +323,9 @@ mod tests {
                 .clone()
                 .with_kind(CellKind::Attribute)
                 .expect("indexable type");
-            let term = IndexTerm::for_value("Price", field.as_view()).expect("indexable");
+            let term = IndexTerm::from_str_name("Price", field.as_view()).expect("indexable");
             assert_eq!(
-                IndexTerm::for_value("Price", attribute.as_view()).expect("indexable"),
+                IndexTerm::from_str_name("Price", attribute.as_view()).expect("indexable"),
                 term
             );
             // from_cell is for_value for attributes, and nothing for fields.
@@ -342,11 +342,11 @@ mod tests {
 
     #[test]
     fn for_value_keeps_names_and_types_apart() {
-        let price = |name| IndexTerm::for_value(name, CellValue::from_u32(7).as_view());
+        let price = |name| IndexTerm::from_str_name(name, CellValue::from_u32(7).as_view());
         assert_ne!(price("Price"), price("Price2"));
         assert_ne!(
             price("Price"),
-            IndexTerm::for_value("Price", CellValue::from_i32(7).as_view())
+            IndexTerm::from_str_name("Price", CellValue::from_i32(7).as_view())
         );
         assert!(price("$owner").is_ok());
     }
@@ -356,13 +356,13 @@ mod tests {
         let value = CellValue::from_u32(7);
         for name in ["", "$", "0bad", "#key", "@admin", "a b", "a\0b", "é"] {
             assert_eq!(
-                IndexTerm::for_value(name, value.as_view()),
+                IndexTerm::from_str_name(name, value.as_view()),
                 Err(TermError::InvalidName),
                 "{name:?}"
             );
         }
         assert_eq!(
-            IndexTerm::for_value("Price", CellValue::from_bytes(b"x").as_view()),
+            IndexTerm::from_str_name("Price", CellValue::from_bytes(b"x").as_view()),
             Err(TermError::UnsupportedType(CellType::Bytes))
         );
     }
@@ -372,13 +372,13 @@ mod tests {
         let value = CellValue::from_u32(7);
         for name in ["Price", "$owner", "1bad", "#key"] {
             assert_eq!(
-                IndexTerm::for_cell_name(CellNameRef::raw(name.as_bytes()), value.as_view()),
-                IndexTerm::for_value(name, value.as_view()),
+                IndexTerm::from_cell_name(CellNameRef::raw(name.as_bytes()), value.as_view()),
+                IndexTerm::from_str_name(name, value.as_view()),
                 "{name:?}"
             );
         }
         assert_eq!(
-            IndexTerm::for_cell_name(CellNameRef::raw(&[0xff]), value.as_view()),
+            IndexTerm::from_cell_name(CellNameRef::raw(&[0xff]), value.as_view()),
             Err(TermError::InvalidName)
         );
     }

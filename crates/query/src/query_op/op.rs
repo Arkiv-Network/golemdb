@@ -25,7 +25,7 @@ pub struct QueryOp {
 }
 
 impl QueryOp {
-    pub fn filter(filter: Filter) -> Self {
+    pub fn from_filter(filter: Filter) -> Self {
         Self {
             filter,
             sort: Vec::new(),
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn a_query_starts_with_only_its_filter() {
         assert_eq!(
-            QueryOp::filter(color_is_blue()),
+            QueryOp::from_filter(color_is_blue()),
             QueryOp {
                 filter: color_is_blue(),
                 sort: vec![],
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn every_step_sets_its_field() {
         let price = SortKey::asc("price", CellType::Uint(Width::W8));
-        let op = QueryOp::filter(color_is_blue())
+        let op = QueryOp::from_filter(color_is_blue())
             .sort([price.clone()])
             .only(["owner", "status"])
             .limit(50)
@@ -158,9 +158,9 @@ mod tests {
 
     #[test]
     fn projection_is_deduplicated_in_byte_order_and_may_be_empty() {
-        let op = QueryOp::filter(color_is_blue()).only(["status", "owner", "status"]);
+        let op = QueryOp::from_filter(color_is_blue()).only(["status", "owner", "status"]);
         assert_eq!(op.projection, Some(vec![name(b"owner"), name(b"status")]));
-        let none = QueryOp::filter(color_is_blue()).only(Vec::<&str>::new());
+        let none = QueryOp::from_filter(color_is_blue()).only(Vec::<&str>::new());
         assert_eq!(none.projection, Some(vec![]));
     }
 
@@ -168,7 +168,7 @@ mod tests {
     fn repeated_steps_replace_earlier_ones() {
         let price = SortKey::asc("price", CellType::Uint(Width::W8));
         let date = SortKey::desc("date", CellType::Date32);
-        let op = QueryOp::filter(color_is_blue())
+        let op = QueryOp::from_filter(color_is_blue())
             .sort([price])
             .sort([date.clone()])
             .limit(1)

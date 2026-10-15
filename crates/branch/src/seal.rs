@@ -96,5 +96,8 @@ fn term(key: &CellKey, value: Option<&CellValue>) -> Result<Option<IndexTerm>> {
         return Ok(None);
     };
     // Binary reserved field names never reach UTF-8/name validation.
-    Ok(Some(IndexTerm::for_cell_name(key.name(), value.as_view())?))
+    Ok(Some(IndexTerm::from_cell_name(
+        key.name(),
+        value.as_view(),
+    )?))
 }
