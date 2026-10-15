@@ -16,7 +16,7 @@ and adapters.
 | `record` | Record identity, key bindings, allocation, admission checks, and atomic CRUD over branch cell views. |
 | `branch` | Branch registry, overlays, undo frames, guarded reads and writes, sealing, and atomic publication. |
 | `cells` | Cell names, keys, types, canonical values, deployment limits, reserved-record constants, `Cell` storage and its commitment. |
-| `immutable-data` | Typed rows and genesis schemas using cell codecs, NippyJar/memory shards, committed reads and transactional log metadata. |
+| `immutable-data` | Typed rows and genesis schemas using cell codecs, NippyJar/memory files, physical reads/recovery and transactional log metadata. |
 | `index` | Ordered terms, bitmap containers, posting updates, index queries, and the two index commitment tiers. |
 | `merkle` | Generic compressed hexary Patricia tries, branch codecs, traversal, immutable branch mutation, and hash providers. |
 | `storage` | Transactional ordered KV traits, cursors, shared scans, and `MemoryStore`. |
@@ -247,9 +247,9 @@ undo entries and can decrease on rollback; it is not an OCC revision token.
 
 Seal computes a net cell diff and derives index posting changes from actual old
 and new attribute values. It applies both to buffered storage, computes the roots,
-and freezes the branch without opening a durable writer. Repeated seal reuses the
-result after checking head. Sealed branches allow reads but reject writes,
-checkpoints, and rollback.
+and freezes live cell state without opening a durable writer. Repeated seal reuses
+the result after checking head. Sealed branches allow reads but reject cell writes,
+checkpoints, and rollback; independent immutable batches remain editable.
 
 Sealing commit `n + 1` also adds `#roots[n] = state_root(n) || index_root(n)` as a
 non-indexed bytes cell. Its name is `n:u64_be`. This avoids committing a root to
@@ -414,22 +414,57 @@ The caller checks whether a commit exists/is visible; the file layer validates
 range bounds within its span, not exact per-commit provenance.
 
 Physical truncate removes files/rows from a supplied global ordinal onward and
-reuses those ordinals; it never changes metadata. The later coordinator must
-exclude readers during append/sync/MDBX publication or rollback, remember original
-ends, bind keys and ranges in its transaction, and explicitly truncate on a
-definitely unsuccessful publication. Physical reads do not enforce committed
-visibility. A failed rollback blocks further publication. Crash recovery is still
-pending; no caller may treat physical row counts as durable publication markers.
+reuses those ordinals; it never changes metadata. Physical reads do not enforce
+committed visibility. `recover(tx, commit)` restores physical tails to the supplied
+durable commit ranges without accessing head or changing metadata. It rejects
+missing committed data, trims unpublished tails and removes unpublished files.
+Recovery trims/syncs offsets before data, then adjusts the native configuration;
+it is repeatable after interruption. NippyJar atomically replaces configuration
+after syncing data/offsets, so recovery needs no additional journal.
 Directory ownership uses an OS lock, and file validation precedes NippyJar's
 self-healing writer. Reads check basic file layout but do not scan interior column
 offsets separately; malformed interior offsets may panic inside NippyJar.
 See `crates/immutable-data/README.md` for details.
 
-The `Database` immutable-data facade methods still return NotImplemented and
-retain placeholder signatures. Iterations 4–6 will integrate independent branch
-batches, publication/recovery and the facade, including staged-tail truncate and
-projected get/rows_of. Existing cell checkpoints/rollback never affect immutable
-batches. Retention/pruning, key expiry and digests remain deferred.
+`Branches::new(store, hasher, None)` disables immutable data. Pass
+`Some(ImmutableDataOptions::files(config, genesis_id, directory))` to open files
+or `Some(ImmutableDataOptions::memory(config, genesis_id))` to use memory storage.
+The constructor enables staging, publication and committed reads before the manager
+can be shared or used. Missing or invalid head metadata is rejected before file I/O.
+Append accepts an owned typed row and optional key; truncate
+removes only the branch's pending suffix. Both work before/after seal, leave sealed
+roots unchanged, and do not affect cell checkpoints, rollback or branch version.
+Each batch’s `first_ordinal` is resolved lazily using `metadata::end_ordinal_at` from the
+latest published range at/before origin in the same snapshot as the head check.
+Key uniqueness covers committed bindings and that branch's own batch; competing
+branches may reserve the same key/ordinal. Discard/stale invalidation release rows
+and keys. Errors leave staging unchanged. No files or KV metadata are written.
+
+The constructor uses the supplied genesis declarations for staging and physical storage,
+owns storage and recovers under a store writer before use.
+Only this manager and its clones may publish head or immutable metadata. A shared
+lock covers file mutation, synchronization, KV publication and rollback. Cells,
+index, keys, commit ranges and head publish in one transaction after syncing files.
+On errors a fresh writer snapshot resolves the outcome: published means success;
+a known abort restores files to durable ranges and retains the sealed branch for
+retry. Unresolved outcomes, failed recovery and publication panics block further
+publication until reopen and recovery. The manager owns an optional locked immutable
+writer alongside the store, and `commit.rs` implements the procedure; there is no
+separate coordinator layer. Without immutable storage, commits rely on the store's
+own writer serialization.
+`Branches::immutable_data()` exposes an independent `ImmutableDataReader`. Its
+projected `get` and `rows_of` take one caller-owned published snapshot and the
+commit number from that snapshot, enforcing key/range/ordinal visibility without
+locking or flushing the writer. Discovery excludes spans newer than the segment's
+last published batch. NippyJar's cursor uses EOF for its last column, so committed
+reads use native offsets/codecs with stored terminal offsets and tolerate extra
+unpublished bytes. Only destructive cleanup waits for read mappings. Reader clones
+retain directory ownership; close them before reopening files. Future commits are
+rejected. Store commits must be durable and outcome snapshots
+authoritative. There is no staging-only constructor.
+The `Database` immutable-data facade still returns NotImplemented and retains
+placeholder signatures. Iteration 6 will integrate the facade. Retention/pruning,
+key expiry and digests remain deferred.
 
 ### History, proofs, and storage evolution
 

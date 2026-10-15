@@ -113,7 +113,7 @@ fn id<S: Store>(
 
 fn lifecycle(db: impl Store + Clone) {
     initialize(&db);
-    let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
     let records = Records::new(branches.clone());
     let b = branches.begin().unwrap();
     let competitor = branches.begin().unwrap();
@@ -220,7 +220,7 @@ fn lifecycle(db: impl Store + Clone) {
             .is_none()
     );
     drop(tx);
-    let reopened = Branches::new(db, Keccak256Hasher).unwrap();
+    let reopened = Branches::new(db, Keccak256Hasher, None).unwrap();
     let records = Records::new(reopened.clone());
     let b = reopened.begin().unwrap();
     assert_eq!(allocated(&reopened, b), 66);
@@ -267,7 +267,7 @@ fn mdbx_commit_and_database_reopen() {
     let dir = tempfile::tempdir().unwrap();
     lifecycle(golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap());
     let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
-    let branches = Branches::new(db, Keccak256Hasher).unwrap();
+    let branches = Branches::new(db, Keccak256Hasher, None).unwrap();
     let records = Records::new(branches.clone());
     let b = branches.begin().unwrap();
     assert_eq!(allocated(&branches, b), 66);

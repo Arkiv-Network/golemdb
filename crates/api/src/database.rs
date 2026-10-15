@@ -180,7 +180,7 @@ struct Inner<S, H> {
 
 impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
     fn new(store: S, hasher: H) -> OpenResult<Self> {
-        let branches = Branches::new(store.clone(), hasher.clone())?;
+        let branches = Branches::new(store.clone(), hasher.clone(), None)?;
         let records = Records::new(branches.clone());
         let queries = Queries::new(store, hasher);
         Ok(Self {

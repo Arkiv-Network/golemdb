@@ -1,4 +1,5 @@
-/// Failures admitting branch operations, reading cells, or moving through frames.
+/// Failures admitting branch operations, accessing cells or immutable staging,
+/// moving through frames, or publishing a branch.
 #[derive(Debug, thiserror::Error)]
 pub enum BranchError {
     #[error("branch ID is unknown, discarded, or no longer over the head")]
@@ -33,6 +34,18 @@ pub enum BranchError {
     Value(#[from] golemdb_cells::CellValueParseError),
     #[error("no frame remains to roll back")]
     NoFrameToRollback,
+    #[error(transparent)]
+    ImmutableData(#[from] golemdb_immutable_data::ImmutableDataStorageError),
+    #[error(
+        "immutable publication outcome or rollback is unresolved; reopen and recover before continuing"
+    )]
+    RecoveryRequired,
+    #[error("immutable publication failed ({publication}); recovery also failed ({recovery})")]
+    PublicationRecovery {
+        publication: Box<BranchError>,
+        #[source]
+        recovery: Box<BranchError>,
+    },
 }
 
 /// Distinguishes handle/head admission failures from a callback's own error.

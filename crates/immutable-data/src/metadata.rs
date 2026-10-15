@@ -1,7 +1,7 @@
 //! Uncommitted-to-the-root metadata. Callers own publication and must abort their
 //! transaction on mutation errors. These helpers never inspect the database head.
 use crate::{ImmutableDataKey, ImmutableDataStorageError as Error, StorageResult};
-use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
+use golemdb_storage::{ReadCursor, ReadTransaction, Table, WriteTransaction};
 use std::ops::Range;
 
 pub const KEYS: Table = Table("ImmutableDataKeys");
@@ -106,6 +106,39 @@ pub fn commit_range(
     let Some(bytes) = tx.get(COMMIT_RANGES, &range_key(segment, commit))? else {
         return Ok(None);
     };
+    decode_range(&bytes).map(Some)
+}
+
+/// Exclusive end from the latest recorded range at or before `commit`, or zero
+/// if this segment has no such range. The caller supplies a published snapshot
+/// and verifies commit visibility. No files or database head are consulted.
+/// Retention must preserve this allocation boundary; pruning is not implemented.
+pub fn end_ordinal_at(tx: &impl ReadTransaction, segment: u32, commit: u64) -> StorageResult<u64> {
+    Ok(last_range_at(tx, segment, commit)?.map_or(0, |(_, range)| range.end))
+}
+
+/// Latest nonempty batch at/before the supplied publication snapshot. Its
+/// commit identifies the newest file span a committed reader may inspect.
+pub(crate) fn last_range_at(
+    tx: &impl ReadTransaction,
+    segment: u32,
+    commit: u64,
+) -> StorageResult<Option<(u64, Range<u64>)>> {
+    let mut cursor = tx.cursor(COMMIT_RANGES, &range_key(segment, commit))?;
+    let Some((key, value)) = cursor.prev()? else {
+        return Ok(None);
+    };
+    if !key.starts_with(&segment.to_be_bytes()) {
+        return Ok(None);
+    }
+    if key.len() != 12 {
+        return Err(Error::Corrupt("invalid commit range key"));
+    }
+    let commit = u64::from_be_bytes(key[4..].try_into().expect("checked length"));
+    Ok(Some((commit, decode_range(&value)?)))
+}
+
+fn decode_range(bytes: &[u8]) -> StorageResult<Range<u64>> {
     if bytes.len() != 16 {
         return Err(Error::Corrupt("invalid commit range encoding"));
     }
@@ -114,5 +147,42 @@ pub fn commit_range(
     if start >= end {
         return Err(Error::Corrupt("invalid commit range bounds"));
     }
-    Ok(Some(start..end))
+    Ok(start..end)
+}
+
+/// Temporary recovery inventory, grouped by file span. Reject gaps and future
+/// metadata rather than guessing a truncation boundary. Retention is not enabled.
+pub(crate) fn recovery_ranges(
+    tx: &impl ReadTransaction,
+    segment: u32,
+    commit: u64,
+    span: u64,
+) -> StorageResult<std::collections::BTreeMap<u64, Range<u64>>> {
+    let prefix = segment.to_be_bytes();
+    let mut cursor = tx.cursor(COMMIT_RANGES, &prefix)?;
+    let mut ranges = std::collections::BTreeMap::<u64, Range<u64>>::new();
+    let mut end = 0;
+    while let Some((key, value)) = cursor.next()? {
+        if !key.starts_with(&prefix) {
+            break;
+        }
+        if key.len() != 12 {
+            return Err(Error::Corrupt("invalid commit range key"));
+        }
+        let id = u64::from_be_bytes(key[4..].try_into().expect("checked key length"));
+        if id > commit {
+            return Err(Error::Corrupt("commit range exceeds published head"));
+        }
+        let range = decode_range(&value)?;
+        if range.start != end {
+            return Err(Error::Corrupt("noncontiguous published ranges"));
+        }
+        end = range.end;
+        let start = crate::backend::span_start(id, span)?;
+        ranges
+            .entry(start)
+            .and_modify(|r| r.end = range.end)
+            .or_insert(range);
+    }
+    Ok(ranges)
 }

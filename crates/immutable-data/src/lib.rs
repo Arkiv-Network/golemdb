@@ -11,8 +11,10 @@
 //! Genesis declarations resolve omitted types to bytes and encode deterministically
 //! for the API opener's committed parameters. [`ImmutableDataStorage::in_memory`]
 //! and [`ImmutableDataStorage::open`] select memory or NippyJar storage, with
-//! separate key/range helpers using caller-owned KV transactions. Branch integration and
-//! automatic recovery are pending; the API facade still has its operation stubs.
+//! separate key/range helpers using caller-owned KV transactions. Branch staging
+//! and publication coordination live in `golemdb-branch`. Physical recovery uses
+//! caller-supplied durable commit ranges without reading or writing database head.
+//! The API facade still has its operation stubs.
 //! These types do not depend on API or branch types.
 //!
 //! ```
@@ -57,6 +59,7 @@ mod error;
 mod files;
 mod memory;
 pub mod metadata;
+mod reader;
 mod row;
 mod schema;
 mod storage;
@@ -71,6 +74,7 @@ pub use config::{
     MAX_COLUMNS, MAX_SCHEMA_BYTES, MAX_SEGMENTS,
 };
 pub use error::{ImmutableDataError, Result};
+pub use reader::ImmutableDataReader;
 pub use row::{FromImmutableDataValue, ImmutableDataRow};
 pub use schema::{ImmutableDataColumn, ImmutableDataProjection, ImmutableDataSchema};
 pub use storage::ImmutableDataStorage;

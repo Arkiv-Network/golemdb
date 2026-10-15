@@ -222,7 +222,7 @@ fn an_indexed_record_without_its_key_is_internal_corruption() {
 
     // Corrupt the committed state below the facade: the record keeps its
     // indexed attribute but loses its `#key` cell.
-    let branches = Branches::new(store, Keccak256Hasher).unwrap();
+    let branches = Branches::new(store, Keccak256Hasher, None).unwrap();
     let corrupt = branches.begin().unwrap();
     branches
         .write(corrupt, |cell_writer| {

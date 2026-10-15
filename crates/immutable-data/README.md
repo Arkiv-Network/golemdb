@@ -19,20 +19,45 @@ Column names retain the cell user-name grammar in genesis configuration.
 | Method | Behavior |
 | --- | --- |
 | `schema(segment)` | Borrow the named segment's validated schema. |
+| `reader()` | Clone an independent committed reader, without access to active writers. |
 | `append(segment, commit, &row)` | Append a complete typed row and return its global segment ordinal. Commit selects a file span only. |
 | `get(segment, ordinal, &options)` | Read a physical row with named projection. |
 | `end_ordinal(segment)` | Report the next physical ordinal, including successful buffered appends; zero when empty. |
 | `truncate(segment, from)` | Remove the physical tail `[from, end)`, including later files. |
 | `sync()` | Synchronize pending data, offsets, configurations and directory entries. |
+| `recover(tx, commit)` | Restore physical tails to the supplied durable commit-range snapshot, without changing metadata. |
 | `bind_key(tx, segment, key, ordinal)` | Stage a unique bidirectional binding to an existing physical row. |
 | `get_by_key(tx, segment, key, &options)` | Resolve the binding from the supplied transaction and read that ordinal. |
 | `record_commit_range(tx, segment, commit, range)` | Stage one nonempty range contained in that commit's file span. |
 | `rows_of(tx, segment, commit, &options)` | Read the stored ordinal range, or return an empty vector when there is no entry. |
 
-`append`, `truncate` and `sync` require mutable access. Reads can flush an active
-writer through an internal mutex; this mutex does **not** provide publication or
-snapshot isolation. Key/range insertion validates physical bounds without flushing
+`append`, `truncate`, `sync` and `recover` require mutable access and borrow the
+writer without locking. Physical read conveniences on this handle can flush an
+active writer through an internal mutex; use the independent reader below for
+committed reads. Key/range insertion validates physical bounds without flushing
 a healthy active writer. The caller owns and commits every KV transaction.
+
+## Committed reader
+
+`ImmutableDataReader` is cloneable and exposes `schema`,
+`get(tx, published_commit, segment, address, options)` and
+`rows_of(tx, published_commit, segment, commit, options)`. Supply one published KV
+snapshot and the commit number read from that same snapshot. It never reads head
+itself, accepts no branch handle, and never locks or flushes the append writer.
+
+Keys, ranges and ordinal bounds come from the snapshot. Future commits and
+unpublished ordinals are rejected. File discovery is bounded by the segment's
+latest published batch, so incomplete future files are ignored even after empty
+commit gaps. Configurations may describe additional rows; only the requested
+prefix must exist. Reads tolerate an extra partial data/offset tail.
+
+The pinned NippyJar cursor uses physical EOF for its last column. Committed reads
+instead use NippyJar's mapped offset reader and codecs, ending every selected
+column at its stored terminal offset. No extra per-column validation scan is added.
+Readers hold shared cleanup access until their local mappings drop; only physical
+truncate/recovery takes exclusive access. Append and sync proceed independently.
+Memory readers use a short collection lock per operation. Cloned reader handles
+retain directory ownership, so close all of them before reopening the directory.
 
 ## Files and ordinals
 
@@ -67,12 +92,13 @@ publishing metadata or closing storage; dropping a writer is not a durability
 operation. A physical read may flush its selected active writer, but does not
 publish anything in MDBX.
 
-When an existing file is selected for reading or appending, extra data or offsets
+When an existing file is selected for a physical read or append, extra data or offsets
 beyond the `.conf` row count are discarded through NippyJar's native recovery.
 This handles dropping a writer after unsynced appends. Required file lengths and
 boundary offsets are checked first: missing configured data is an error and is
 never healed by reducing the configured row count. Recovery does not scan
-interior offsets.
+interior offsets. Tail cleanup waits for independent readers to release their
+mappings; committed reads only inspect their published prefix and never heal files.
 
 Reads check the active/latest file, then inspect older configurations newest-first.
 Discovery sorts numeric commit starts and opens payloads only in the matching
@@ -101,7 +127,7 @@ segment-name order. Integer components are fixed-width big endian.
 
 Only keyed rows create key mappings. Key lookups check forward/reverse agreement.
 Commit ranges are nonempty and inserted once; no entry is needed for an empty
-batch. The coordinator supplies exact batch boundaries; the file layer can verify
+batch. The publisher supplies exact batch boundaries; the file layer can verify
 that the range belongs to a span, not that it was appended by a particular commit.
 `rows_of` callers establish commit existence/visibility. A mapping to missing rows
 is corruption. Abort the transaction on any metadata mutation error.
@@ -110,30 +136,61 @@ is corruption. Abort the transaction on any metadata mutation error.
 encodings/uniqueness, while the storage-handle conveniences additionally validate
 physical bounds. No method reads or writes `Superblock/head`.
 
+`metadata::end_ordinal_at(tx, segment_id, commit)` reads the latest range at or
+before the supplied commit with one reverse cursor lookup. It returns zero when
+no range exists for that segment. Branch staging uses this published boundary for
+provisional ordinals; physical file tails do not determine allocation. Retention
+must preserve this boundary when pruning is designed.
+
 ## Caller-owned publication and rollback
 
-The later coordinator must serialize the whole operation and exclude readers:
+The branch manager serializes publishers through the whole operation. Its internal
+`commit.rs` implements the procedure; independent committed readers keep running:
 
-1. Remember affected segments' original ending ordinals.
-2. Append rows with the target commit as the routing coordinate.
-3. Synchronize physical storage.
-4. Stage key bindings and nonempty commit ranges alongside the database changes.
+1. Open a KV writer, recheck head and stage sealed cell/index changes.
+2. Verify staged ordinals against published/physical ends, then append rows with the target commit as the routing coordinate.
+3. Stage key bindings and nonempty commit ranges in the same transaction.
+4. Synchronize physical storage.
 5. Publish the caller's KV transaction.
 
-On a definitely unsuccessful publication, abort the transaction, truncate affected
-segments to their remembered ends and synchronize rollback before releasing access.
-Resolve uncertain publication outcomes before truncating. Physical reads can see
-unpublished rows: the coordinator must enforce committed visibility.
+On failure, reacquire a writer and resolve the publication outcome before trimming
+files. A published outcome is success; a known abort restores physical storage to
+the durable ranges before releasing access. An unresolved outcome or failed recovery
+blocks further publication until reopen and recovery. Committed readers can still
+read intact prefixes using authoritative snapshots. Raw physical reads can see
+unpublished rows; the independent committed reader enforces snapshot visibility.
 
 Physical `truncate` does not remove metadata. It supports no-op, partial-file,
 exact-boundary and complete rollback, with ordinal reuse. Invalid bounds are
 rejected before mutation. Failed I/O can leave partial work; callers must stop
-publication until recovery succeeds. A failed active writer rejects further use.
-File access validates required files before NippyJar's auto-healing writer is
-constructed. Recovery beyond unfinished file tails, including reconciling synced
-files with MDBX publication, remains iteration 5.
+publication until recovery succeeds. A failed active writer rejects further use
+until recovery drops it and restores the published prefix.
 
-The directory has a single owner enforced by an OS lock. Readers do not escape
-individual calls. Branch overlays, publication coordination, database crash
-recovery, retention/key expiry, digests and public API facade integration are not
-implemented here. Iterations 4–6 are described in the implementation plan.
+## Recovery
+
+`open` acquires directory ownership; it cannot recover without a published KV
+snapshot. The branch constructor calls `recover(tx, published_commit)` under a
+store writer before allowing access. Direct callers must exclude other publishers
+and supply an authoritative snapshot; recovery waits for file readers internally.
+Recovery does not inspect or
+write `Superblock/head` and never changes key/range metadata.
+
+Recovery scans ranges once per segment, checks contiguous ordinals and rejects
+future entries, then groups them by file span. Required file identities, row counts
+and prefix boundaries must cover all published rows. Missing committed data is an
+error. Buffered writers are dropped before any trimming. Recovery trims offsets
+and syncs them first, then trims and syncs data, and finally lets NippyJar reduce
+the configuration's row count to the validated prefix. Wholly unpublished files
+and incomplete creation companions are removed; directory changes are synced.
+
+The pinned NippyJar version syncs data and offsets before atomically replacing its
+configuration through a synced temporary file and rename. Thus an interrupted
+append retains a configuration covering at least the published prefix. Recovery
+needs no additional journal and is repeatable after interruption. This assumes
+durable KV commits and filesystem sync/atomic-rename guarantees; it is not a full
+payload corruption audit. Retention will need to preserve recovery boundaries.
+
+The directory has a single owner enforced by an OS lock shared by the writer and
+reader handles. Mappings do not escape individual calls. Independent branch staging is implemented in `golemdb-branch`.
+Publication coordination and startup recovery live in `golemdb-branch`; only
+facade integration remains iteration 6. Retention/key expiry and digests remain deferred.
