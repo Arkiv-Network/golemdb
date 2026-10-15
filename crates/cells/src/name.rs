@@ -12,6 +12,7 @@
 
 use core::borrow::Borrow;
 use core::fmt;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellNameError {
@@ -130,6 +131,21 @@ impl CellName {
 
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+
+    /// A projection's names: taken raw, deduplicated, in byte order. Raw so
+    /// that reserved and binary names stay selectable, as reads allow.
+    pub fn projection<I, N>(names: I) -> Vec<Self>
+    where
+        I: IntoIterator<Item = N>,
+        N: AsRef<[u8]>,
+    {
+        names
+            .into_iter()
+            .map(|name| Self::from(CellNameRef::raw(name.as_ref())))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 }
 

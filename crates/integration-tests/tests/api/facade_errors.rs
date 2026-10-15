@@ -9,6 +9,8 @@ use std::{
 use golemdb_api::*;
 use golemdb_storage::{MemoryStore, StorageError, Store};
 
+/// Clones share the wrapped store and the switches.
+#[derive(Clone)]
 struct FailingStore<S> {
     database: S,
     fail_reads: Arc<AtomicBool>,
@@ -67,7 +69,7 @@ fn diagnostic(error: ApiError) {
     panic!("the backend diagnostic must survive the facade's error conversion");
 }
 
-fn failure_contract(database: impl Store + Send + Sync + 'static) {
+fn failure_contract(database: impl Store + Clone + Send + Sync + 'static) {
     let fail_reads = Arc::new(AtomicBool::new(false));
     let fail_writes = Arc::new(AtomicBool::new(false));
     let config = OpenConfig::new(Genesis::new(

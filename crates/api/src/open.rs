@@ -50,7 +50,7 @@ impl<S> OpenedStore<S> {
     }
 }
 
-impl<S: Store + Send + Sync + 'static> OpenedStore<S> {
+impl<S: Store + Clone + Send + Sync + 'static> OpenedStore<S> {
     /// Construct one engine using the validated hash selection. The returned
     /// facade's clones share its branch registry and storage lifetime.
     pub fn into_database(self) -> OpenResult<crate::Database> {
