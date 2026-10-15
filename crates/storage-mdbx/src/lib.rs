@@ -4,7 +4,8 @@ use std::{path::Path, sync::Arc};
 use libmdbx::{NoWriteMap, RO, RW, TableFlags, TransactionKind, WriteFlags};
 
 use golemdb_storage::{
-    Entry, ReadCursor, ReadTransaction, Result, StorageError, Store, Table, WriteTransaction,
+    Entry, ReadCursor, ReadTransaction, Result, StorageError, Store, StoreStats, Table,
+    WriteTransaction,
 };
 
 #[cfg(test)]
@@ -170,6 +171,35 @@ impl Store for MdbxStore {
     }
     fn max_value_size(&self) -> usize {
         self.limits.value
+    }
+    /// Bytes written are estimated from MDBX's page counters, so they include
+    /// pages that never reach disk: those of aborted transactions, and pages a
+    /// transaction copies and then frees, as when a table empties.
+    fn stats(&self) -> Result<Option<StoreStats>> {
+        // SAFETY: `MDBX_envinfo` holds only integers, so all zeros is valid; the
+        // environment remains open and `info` is writable for its full size.
+        let (code, info) = unsafe {
+            let mut info: mdbx_sys::MDBX_envinfo = std::mem::zeroed();
+            let code = mdbx_sys::mdbx_env_info_ex(
+                self.inner.ptr().0,
+                std::ptr::null(),
+                &mut info,
+                size_of::<mdbx_sys::MDBX_envinfo>(),
+            );
+            (code, info)
+        };
+        if code != 0 {
+            return Err(backend(libmdbx::Error::from_err_code(code)));
+        }
+        let page = u64::from(info.mi_dxb_pagesize);
+        let ops = info.mi_pgop_stat;
+        Ok(Some(StoreStats {
+            size: (info.mi_last_pgno + 1) * page,
+            // Pages created or copied, plus pages flushed early and changed
+            // again, less merged pages.
+            bytes_written: (ops.newly + ops.cow + ops.unspill - ops.merge) * page,
+            syncs: ops.fsync + ops.msync,
+        }))
     }
 
     type Read<'db> = MdbxReadTransaction<'db>;
