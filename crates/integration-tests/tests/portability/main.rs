@@ -64,7 +64,7 @@ const RATIO_DIVISOR: f64 = 3.0;
 const PATCH_DELETE_PERIOD: u64 = 4;
 
 /// The storage backend under test. Replacing MDBX means changing only this.
-fn open_store(path: &Path) -> Result<impl Store + Send + Sync + 'static> {
+fn open_store(path: &Path) -> Result<impl Store + Clone + Send + Sync + 'static> {
     Ok(MdbxStore::open(path)?)
 }
 
