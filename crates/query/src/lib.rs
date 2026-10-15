@@ -36,7 +36,7 @@
 //!     field: CellNameRef::parse_user(b"color", 32)?.into(),
 //!     value: CellValue::from_str("blue"),
 //! };
-//! let page = db.query(ReadTarget::Head, QueryOp::filter(filter))?;
+//! let page = db.query(ReadTarget::Head, QueryOp::from_filter(filter))?;
 //! assert_eq!(page.records, [db.get(ReadTarget::Head, RecordOp::get(key))?]);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
