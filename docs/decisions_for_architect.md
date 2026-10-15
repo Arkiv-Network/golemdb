@@ -3,20 +3,20 @@
 Spec decisions raised by the design change programme (`CHANGES.md`, kind K2), written so that a
 reviewer who has not followed the programme can judge each one from this file alone. One entry per
 decision. An entry moves from **proposed** to **decided** when the architect records a choice below;
-the spec text then lands in `golem-db-design.md` and the entry's *Outcome* is filled in.
+the spec text then lands in `golemdb-design.md` and the entry's *Outcome* is filled in.
 
 Each entry has the same shape: the question as the current text leaves it, with citations · the
 serious alternatives with their trade-offs · a recommendation and its rationale · what would change
 the recommendation · the fixture or trace that closes the decision.
 
-Conventions: `§n` refers to `golem-db-design.md`; "API" to `golem-db-api.md`, both in this
+Conventions: `§n` refers to `golemdb-design.md`; "API" to `golemdb-api.md`, both in this
 directory.
 
 ## Index
 
 Status values: **waiting** (brief written, architect's choice pending) · **decided** (Outcome
 recorded; spec text pending) · **done** (spec text landed, register row closed). `[API]` marks a
-decision whose recommendation changes `golem-db-api.md`. "Blocks" lists what cannot proceed until
+decision whose recommendation changes `golemdb-api.md`. "Blocks" lists what cannot proceed until
 the decision lands. **#** is the suggested order of decision — dependencies first — and is stable:
 a new decision takes the next free integer; entries below appear in this order and carry it in
 their heading.
@@ -24,22 +24,22 @@ their heading.
 | # | Decision | Status | Question in one line | Recommendation in one line | Depends on | Blocks | `[API]` | Pri |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | [D08](#1--d08--recordkeys-on-delete) | DONE as recommended | Does the `#recordKeys` binding survive a delete? | No — delete removes it; re-create is an ordinary `create` | — | D07, S10 | — | P1 |
-| 2 | [D07](#2--d07--branch-transitions-delete-visibility-exact-rollback-net-diff-cancelled-changes) | waiting, will resolve while coding | How do delete, rollback and the net diff interact in a branch? | Drop the deleted-record set (tombstone every cell); three-valued pre-image; net diff = entries ≠ origin; cancelled changes leave nothing | D08 | S10, Epic CRUD | — | P1 |
+| 2 | [D07](#2--d07--branch-transitions-delete-visibility-exact-rollback-net-diff-cancelled-changes) | partly resolved (2026-10-10): 7.1-A implemented on `feature/golem-db-api` (delete tombstones every live cell, no deleted-record set); 7.3 appears implemented; 7.2, 7.4 to verify; design §10 text pending | How do delete, rollback and the net diff interact in a branch? | Drop the deleted-record set (tombstone every cell); three-valued pre-image; net diff = entries ≠ origin; cancelled changes leave nothing | D08 | S10, Epic CRUD | — | P1 |
 | 3 | [D01](#3--d01--filter-evaluation) | waiting, needs more design work | How is the API's ordered DNF evaluated over the two-tier index, and what about negation, match-all, caps, cost? | Mechanism as pseudocode; caps in `#params`; flat DNF only; canonical cost includes region pruning. **Negation/match-all: live-set index term (1.1-B/1.2-B) if P08 confirms the live DSL's standalone `!=` must survive** — else ANDNOT-in-group, no match-all. 1.5: negation MongoDB-style (absent and other-typed cells match) | P08 | S07, Epic 8, D10 | yes — strike "nesting"; "≥ 1 positive literal" only if P08 = no | P1 |
-| 4 | [D04](#46--d04--d03--d02--concurrency-contract-crash-recovery-rewind) | waiting, verify that this is natively solved by our branch impl and mdbx features | What guarantees a read never mixes two states, and where is the commit race decided? | One MDBX read txn per operation with head check inside; commit mutex over guard → segment fsync → MDBX txn | D13 (sync mode), P05 | D03, D02, S08, S09 | — | P1 |
-| 5 | [D03](#46--d04--d03--d02--concurrency-contract-crash-recovery-rewind) | waiting, likely post mumbai | What happens on restart and on failure mid-commit? | Five-step restart; failure table by point; deterministic vs environmental errors | D04 | S08 | yes — new `Io` error | P1 |
+| 4 | [D04](#46--d04--d03--d02--concurrency-contract-crash-recovery-rewind) | partly resolved (2026-10-10): read half implemented and in the API spec (handle checked against head in the operation's own snapshot; commit rechecks head inside the writer); segment ordering waits for segments | What guarantees a read never mixes two states, and where is the commit race decided? | One MDBX read txn per operation with head check inside; commit mutex over guard → segment fsync → MDBX txn | D13 (sync mode), P05 | D03, D02, S08, S09 | — | P1 |
+| 5 | [D03](#46--d04--d03--d02--concurrency-contract-crash-recovery-rewind) | partly resolved (2026-10-10): deterministic vs environmental errors exist in the API spec via `StoreFull`; `Io` error and restart procedure open | What happens on restart and on failure mid-commit? | Five-step restart; failure table by point; deterministic vs environmental errors | D04 | S08 | yes — new `Io` error | P1 |
 | 6 | [D02](#46--d04--d03--d02--concurrency-contract-crash-recovery-rewind) | waiting (2.1 decided), likely v2 (not necessary with bft) | Does `rewind` exist, what does it undo, and what does "commit 100" mean afterwards? | **Semantics specified; feature deployment-optional, not in v1** (aligned with requirements OQ4); undo by change-set replay, one txn per commit, MDBX then segments; root-based identity for cursors and `at` | D04, D03 | D11, D05, S08 | yes — `Stale` error; optional root on `at`; `rewind` definition | P1 |
 | 7 | [D05](#7--d05--retention-and-historical-discovery) | ok to go, needs impl (5.2 minimum decided) | Retention: what survives per read class, how far back, what a read past the window returns, how deleted terms/cells are discovered; history after snapshot sync | Service matrix; **`#minRetention` instance parameter; consensus path refuses beyond it on every node; surplus via an archival surface** (aligned with CS-5/DI-7); GC root = every `#roots` entry retained; discovery by scanning the history tables; no cursor lease; synced node exempt for one window | P06, D02 | D06, D12, D17 | yes — `retention()`; archival surface | P1 |
 | 8 | [D06](#8--d06--proof-scope-and-the-non-inclusion-witness) | waiting, matthias tries to work on this next week | Which statements are provable, and how is absence of a virtual leaf witnessed? | Inclusion/non-inclusion of cells, bindings, terms, memberships; range completeness a non-goal; nested leaf preimage `Hash(0x00 ‖ key ‖ Hash(tag ‖ value))` with the inner hash stored beside `leaf_paths` | D05, P07 | D18, D09 | yes — proofs section | P1 |
 | 9 | [D09](#9--d09--normative-encoding-profile) | waiting  | The exact bytes an independent encoder must reproduce | 13 items pinned: Roaring portable 32-bit with `runOptimize` rule; pad nibble 0; `EMPTY_ROOT = Hash(0x07)`; reserved cells use grid types; zero-length = absent; decoders reject non-canonical; 10 vector sets | D01, D06 | S05, Epic 6 | — | P1 |
 | 10 | [D13](#10--d13--environment-assumptions) | waiting | What is assumed of MDBX, the filesystem and RAM, and who may reject on memory? | State `SYNC_DURABLE`, MVCC readers, no clock/randomness; engine imposes **no** node-local memory caps (they would fork consensus) — publishes the formula, host bounds via gas limit | — | D04, S06 | — | P2 |
-| 11 | [D10](#11--d10--assumed-metering-shape-and-activation-semantics) | decided for proposal, needs impl | What metering shape does the design assume, and what does "activation at A" mean? | Import the API's cost contract as a premise; price by the commit being produced (fork semantics); `#minActivationDelay` in `#params`; check weight completeness at install, not at A | D01, D13 | §5/§10/§13 cost claims | yes — install-time check, `priced_at` | P2 |
-| 12 | [D14](#12--d14--cost-qualifications) | waiting, needs more reading, metering must not check caching situation | Which cost claims are lookup counts rather than totals? | Sort = N fetches + O(N log N) compares charged per record; warm cache: IDs only or IDs + keys, both stated; history bitmap growth and rewrite stated; quantities table | D10, D13 | — | — | P2 |
+| 11 | [D10](#11--d10--assumed-metering-shape-and-activation-semantics) | decided (2026-10-10): 10.2 = A (branch base); 10.3 adopted (`#minActivationDelay`); 10.4: missing weights are unpriced, warn logs, names fixed per model version | What metering shape does the design assume, and what does "activation at A" mean? | Import the API's cost contract as a premise; price by the commit being produced (fork semantics); `#minActivationDelay` in `#params`; check weight completeness at install, not at A | D01, D13 | §5/§10/§13 cost claims | yes — install-time check, `priced_at` | P2 |
+| 12 | [D14](#12--d14--cost-qualifications) | partly decided (2026-10-10): 14.1 = canonical `⌈N log₂ N⌉ × S` as in metering D6; 14.3 partly covered by metering D2; 14.2, 14.4 open | Which cost claims are lookup counts rather than totals? | Sort = N fetches + O(N log N) compares charged per record; warm cache: IDs only or IDs + keys, both stated; history bitmap growth and rewrite stated; quantities table | D10, D13 | — | — | P2 |
 | 13 | [D11](#13--d11--cursor-contract) | decided for proposal, waits for impl | Is the cursor deterministic, what does the fingerprint cover, what wins between cursor / offset / `at`? | Cursor is a pure function of (query, state, position) — `machineId` leaves the engine; same-sequence fingerprint as an exclusion list; cursor + offset = `InvalidQuery`; root check → `Stale` | D02 | — | yes — cursor fields, precedence | P2 |
 | 14 | [D12](#14--d12--live-paging-guarantee) | waiting, should be clear, needs check/re-reading | What does a cursor guarantee under live paging? | Freedom from position-shift anomalies only; membership and values may change; no retention lease — narrow the adjective, keep the mechanism | D05 | — | — | P2 |
 | 15 | [D18](#15--d18--is-the-reserved-record-layout-part-of-the-commitment-contract) | done | Must a second engine reproduce §4's bookkeeping to match the root? | **Yes — by requirement** (DI-2 puts engine state under the root; NF-8 makes commitment vectors part of swappability); the partitioned-root alternative is withdrawn | P07 (decided) | S05 | — | P2 |
-| 16 | [D15](#16--d15--conflict-vs-handleinvalid-for-a-stale-handle) | waiting, version currently not implemented, needs discussion? | Two errors for one condition? | One: `HandleInvalid` everywhere, `commit` included; `Conflict` only for `expected_version` | D04 | — | yes | P3 |
-| 17 | [D16](#17--d16--refuse-a-second-consecutive-rollback) | implemented, multi-rollback is supported, adjust spec | Refuse a second consecutive `rollback()`? | `rollback()` on an empty open frame is an error and pops nothing; multi-frame undo dropped | D07 | — | yes | P3 |
+| 16 | [D15](#16--d15--conflict-vs-handleinvalid-for-a-stale-handle) | decided (2026-10-10): B, `HandleInvalid` everywhere; landed in the API spec, design §10 and metering; implementation to follow | Two errors for one condition? | One: `HandleInvalid` everywhere, `commit` included; `Conflict` only for `expected_version` | D04 | — | yes | P3 |
+| 17 | [D16](#17--d16--refuse-a-second-consecutive-rollback) | done in the API spec (2026-10-10): A, multi-frame rollback, `NoFrameToRollback` once every frame is undone; register row to close | Refuse a second consecutive `rollback()`? | `rollback()` on an empty open frame is an error and pops nothing; multi-frame undo dropped | D07 | — | yes | P3 |
 | 18 | [D17](#18--d17--typed-segment-columns) | waiting, needs more thinking | Typed segment columns? | No — raw bytes; typing would pin every host format at genesis | P05 (decided: adopted) | — | — | P3 |
 | 19 | [D19](#19--d19--per-commit-log-digest-what-it-is-and-where-it-is-committed) | waiting | SE-1 requires a per-commit digest of appended log rows: what is it and who commits it? | Domain-separated digest over row hashes with the start ordinal bound in, returned by `seal`; **engine commits it lag-one** in a new `#logDigests` system record, so `AppHash` stays one root | P05, D09 | §11 final | yes — `seal`/`commit` outputs | P2 |
 
@@ -47,10 +47,8 @@ Cross-cutting `[API]` changes accumulated so far, to land as one `[API]` PR once
 are taken: strike "nesting" from `LimitExceeded`; require ≥ 1 positive literal per group and ≥ 1
 group (D01) · add `Io` and `Stale` errors; optional expected root on `at`; a definition paragraph for
 `rewind` (D02/D03) · `retention()` introspection (D05) · provable-statement table and completeness
-non-goal in *Proofs* (D06) · install-time weight-completeness check; `priced_at` = target commit
-(D10) · cursor fields (`root` in, `machineId` out), fingerprint rule, precedence table (D11) ·
-`HandleInvalid` on `commit`, `Conflict` narrowed (D15) · `rollback` on an empty frame is an error
-(D16) · per-commit log digest returned by `commit`/`seal` (D19).
+non-goal in *Proofs* (D06) · `#minActivationDelay` in the install rule (D10, landed); `priced_at` = branch base (D10 10.2-A, landed) · cursor fields (`root` in, `machineId` out), fingerprint rule, precedence table (D11) ·
+`HandleInvalid` on `commit`, `Conflict` narrowed (D15, landed) · `rollback` stays multi-frame with `NoFrameToRollback` when exhausted (D16, landed) · per-commit log digest returned by `commit`/`seal` (D19).
 
 Product decisions (K4 rows and product questions surfaced by the briefs) are collected in one table
 at the [end of this document](#product-decisions), after the spec decisions.
@@ -172,6 +170,11 @@ inclusion proof for the same path against root_1 yields R1, against root_3 yield
 
 _(architect fills in: A / B / C / variant, date, one line of reasoning if it departs from the
 recommendation)_
+
+- **2026-10-10: A, as recommended.** `delete` removes the `#recordKeys` binding; re-creating the
+  key is an ordinary `create` with a fresh `recordID`. Implemented on `feature/golem-db-api`, and
+  stated in the API spec, metering's Record Model and design §4 (*Historised re-creation*), which
+  now agrees with §10.
 
 ---
 
@@ -324,6 +327,13 @@ T7  failed multi-cell op         patch B{x:2, y:2} with budget for one cell → 
 
 _(architect fills in per sub-question 7.1–7.4)_
 
+- **7.1 (2026-10-10):** A, as implemented on `feature/golem-db-api`: `delete` tombstones every
+  live cell of the record and its binding; there is no deleted-record set. The API spec describes
+  it. Design §10 still describes the set and needs updating.
+- **7.3:** the implementation adds no undo entry for an identical write and derives index
+  postings at seal from actual before/after values, which matches the recommendation; to verify
+  against the fixtures. 7.2 and 7.4 to verify.
+
 ---
 
 ## 3 · D01 — Filter evaluation
@@ -379,7 +389,7 @@ posting(p):
 ```
 
 - **Typed predicates at the bitmap level.** A literal names `(cellKey, typeTag, value…)`; its `Index`
-  key range lies entirely inside one type's run ([§5](golem-db-design.md#structural-index-key-formulation)), so a cell
+  key range lies entirely inside one type's run ([§5](golemdb-design.md#structural-index-key-formulation)), so a cell
   of another type under the same name is simply not in any posting list the literal touches — the
   API's "treated as absent" falls out of the key layout.
 - **Range and prefix are unions.** The cursor visits every term in the key range in ascending order;
@@ -462,7 +472,7 @@ which is precisely the adversarial input invariant 6 warns of.
 | Metering complexity | count terms and containers | count terms and containers; the container set is the pruned one |
 
 **Recommendation: B.** The two-tier index exists so that work scales with containers touched
-([§5](golem-db-design.md#why-the-posting-list-gets-a-second-tier)); charging for containers a correct evaluator never
+([§5](golemdb-design.md#why-the-posting-list-gets-a-second-tier)); charging for containers a correct evaluator never
 needs to open would contradict that rationale and make the API's "main optimization lever" claim
 false. The rule is one sentence: *canonical evaluation descends a term's `BitmapTrie` only into
 regions the running intermediate occupies; the first positive literal of each group has no
@@ -792,6 +802,13 @@ W4  rewind past retention        rewind(to) with to's change-sets pruned → Pru
 
 _(architect fills in per sub-question 4.1, 4.2, 3.1, 3.2, 2.1–2.3)_
 
+- **4.1 (2026-10-10), partly:** implemented as recommended for reads: every branch operation
+  validates its handle against the head in the same store snapshot it reads from, and `commit`
+  rechecks the head inside the store writer before writing. Both are in the API spec
+  (*Branches*). The segment-fsync ordering of 4.2 waits for segment storage.
+- **3.x (2026-10-10), partly:** the API spec distinguishes an environmental error, `StoreFull`
+  (one node's store is full; never part of a result other nodes see), from deterministic ones.
+  The `Io` error and the restart procedure are still open.
 - **2.1 (2026-09-30):** `rewind` is **not in v1**, as revised above. The API marks it so and the
   design's D02 row says so. 2.2 and 2.3 are still to decide.
 
@@ -963,6 +980,9 @@ _(architect fills in per sub-question 5.2, 5.3, 5.5, 5.6)_
   consensus-path API refuses reads before `head − #minRetention` on every node. Landed in design §1
   property 5 and the §4 `#params` table. Still to decide: the archival surface above the minimum,
   `retention()`, and 5.3–5.7.
+- **New dependency (2026-10-10):** metering calibrates its write byte weights and the history part
+  of `w_cell[op]` for residency of `#minRetention` commits (metering D4, D2). The value chosen here
+  therefore also sets prices.
 
 ---
 
@@ -1058,7 +1078,7 @@ costs.
 
 ### What would change the recommendation
 
-A decision (P07) that a second engine must reproduce the root *without* adopting Golem DB's node
+A decision (P07) that a second engine must reproduce the root *without* adopting GolemDB's node
 format would make `leaf_value_hashes` an engine-private optimisation — B still works because the
 witness is `(Y, vh)`, however the server obtains `vh`; only the *cost* claim would change.
 
@@ -1081,6 +1101,12 @@ commit 2.
 ### Outcome
 
 _(architect fills in: 8.1 scope; 8.2 A/B/C/D)_
+
+- **New input (2026-10-10):** range completeness stays a non-goal, but **whole-record
+  completeness** now follows indirectly: `#meta` is committed state, so a client holding an
+  inclusion proof of `#meta` can check that a full read withholds no user cell (the proven cells
+  must match its `cells` count). Design §3 *Record Shape: the `#meta` Cell*; the design's D06 row
+  notes it. 8.1's provable-statement table should list it.
 
 ---
 
@@ -1113,6 +1139,10 @@ is a value an independent encoder must produce identically, or the roots diverge
 | 9.11 | Cross-table key caps | genesis validation checks the **longest derived key**: `IndexChangeSet` = `8 + L` where `L` = `len(cellKey) + 1 + 1 + maxValueLen`; must be ≤ MDBX's max key size for the page size (4 KiB pages: 2022 B in libmdbx). State the formula, not the number | refuse genesis |
 | 9.12 | Leaf preimages (D06) | `CellTrie` leaf `Hash(0x00 ‖ trieKey ‖ Hash(typeTag ‖ value))`; `IndexTrie` leaf `Hash(0x02 ‖ trieKey ‖ bitmapHash)`; `BitmapTrie` leaf `Hash(0x04 ‖ hi48 ‖ roaring)` | — |
 | 9.13 | New `#params` caps (D01) | `#maxFilterGroups`, `#maxPredicatesPerGroup`: `u32` BE | as caps |
+| 9.14 | `#meta` value (added 2026-10-10) | `bytes32` field: `cells ‖ cellBytes ‖ indexedCells ‖ indexBytes`, each `u64` BE, sizes per metering D4 (design §3) | reject another type, kind or length |
+| 9.15 | Generated record key (added 2026-10-10) | `H("golemdb/record-key/v1" ‖ #keySeed ‖ recordID)`, `recordID` as `u64` BE (design §4 *Record-key modes*) | — |
+| 9.16 | `#keyMode`, `#keySeed`, new caps and counters (added 2026-10-10) | `#keyMode` `u32` (0 caller-assigned, 1 generated); `#keySeed` `bytes32`, generated mode only; `#maxRecordCells`, `#maxRecordIndexedCells`, `#minActivationDelay` `u32`; `#alloc` `#liveCells`, `#indexTerms` `u64` | as the other `#params` cells |
+| 9.17 | Genesis identity (added 2026-10-10) | `H("golemdb/genesis/v1" ‖ 0x00 ‖ format u32 ‖ hash_id u16 ‖ roaring u16 ‖ count u32 ‖ for each genesis cell in key order: len u32 ‖ key ‖ len u32 ‖ value)` (API *What genesis writes*) | mismatch on reopen is `GenesisMismatch` |
 
 **Non-canonical input is rejected, not normalised.** A decoder that silently re-encodes hides a
 divergent peer; rejection surfaces it at the boundary. The error is `InvalidArgument` for
@@ -1135,6 +1165,7 @@ V7  a 16-bit chunk at cardinality 4096 and 4097 (array/bitmap boundary); a chunk
 V8  the §6 worked example (records 100, 70 000, 1 179 700) — full node and container bytes and the bitmapHash
 V9  the §8 worked example — CellTrie node bytes, leaf hashes with the D06 nested preimage, StateRoot
 V10 genesis validation: a #maxStrLen that fits the Index key but not the IndexChangeSet key → refused
+V11 #meta of an empty record and of the metering worked example's record; a generated key for a fixed seed and IDs 64, 65; the genesis identity of Genesis::DEV-equivalent settings
 ```
 
 ### Text to change on acceptance
@@ -1312,13 +1343,18 @@ preserves the upgrade window" is replaced by 10.3, which preserves it explicitly
 
 ### Fixture (timeline)
 
+As decided (10.2-A, 10.3, 10.4 unpriced), with `#minActivationDelay = 3`:
+
 ```
-head 99   install v2: @meteringModel[2] = A, @modelWeight[2‖*] complete; #minActivationDelay = 3 → A ≥ 103; choose A = 103
-          install with a missing weight → InvalidArgument, nothing committed
-100–102   data commits priced by v1; receipts priced_at = 100..102
-103       branch based at 102 → target 103 → priced by v2 (10.2-B); priced_at = 103
-104+      v2
-          a node without v2 code: halts when its head reaches 102 and it must produce/validate 103 ("upgrade required")
+head 99   install v2: @meteringModel[2] = A, @modelWeight[2‖*]; A ≥ 99 + 1 + 3 = 103; choose A = 103
+          the admin tool, running v2 code, rejects a missing or misspelled weight name before sending
+          nodes replaying the install check only: version 2 > 1, A within bounds, cells well-formed
+100–102   calls priced by v1; priced_at = the branch base (99..101) or the head at admission
+103       head reaches 103: v2 is active. Branch work based on 102 that produces commit 103 was
+          still priced by v1 (priced_at = 102); calls admitted at head 103 use v2 (priced_at = 103)
+          a v2 weight with no value is unpriced: calls needing it fail with OutOfBudget{required: None},
+          and a warn log names the weight; an admin weight patch repairs it from the next head
+          a node without v2 code halts when its head reaches 103 ("upgrade required")
 ```
 
 ### Text to change on acceptance
@@ -1332,6 +1368,31 @@ head 99   install v2: @meteringModel[2] = A, @modelWeight[2‖*] complete; #minA
 ### Outcome
 
 _(architect fills in per 10.2, 10.3, 10.4)_
+
+- **10.1 (2026-10-10):** largely overtaken: the metering spec now exists and the design links to
+  it; the *Assumed metering interface* block is no longer needed as a premise.
+- **10.2 (2026-10-10): A**, the model active at the **branch base**. Metering D9 and the API spec
+  specify it: branch work based on head 99 that produces commit 100 uses the old schedule;
+  `priced_at` = base, and for calls without a branch the head at admission. Reason: the schedule
+  is captured once, before any work, from committed state, so a call never needs a schedule that
+  is not yet committed.
+- **10.3 (2026-10-10): adopted.** `#minActivationDelay` (`u32`, commits) in `#params`; install
+  requires `A ≥ head + 1 + #minActivationDelay`. Landed in design §4, metering D9 and the API's
+  *Administration*.
+- **10.4 (2026-10-10): neither A nor B nor C — missing weights are unpriced.** At activation, a
+  weight the model's code expects but that has no value makes every call needing it fail with
+  `OutOfBudget{required: None}`, also under `Unlimited`, like an arithmetic overflow. Nothing halts
+  or splits, the affected operations are unavailable rather than free (fails safe, R4), and the
+  admin repairs it with an unmetered weight patch while the chain runs. A default of 0 was
+  rejected: it makes the operation free and lets a block's budget no longer bound its work.
+  - Weight names are a fixed list coded with each model version. Patches to the active model
+    naming an undeclared weight are reverted (`InvalidArgument`). At install, nodes not yet
+    running the new code cannot check names, so the admin tool, which runs it, must reject
+    unknown or missing names before sending the install. Undeclared names are ignored at
+    activation.
+  - GolemDB writes warn logs for operators: at activation per missing or ignored name, and per
+    call failing on an unpriced weight.
+  - Landed in metering D8/D9, design §4 and the API's *Administration*.
 
 ---
 
@@ -1392,6 +1453,15 @@ B/modification ≈ 0.7 MB.
 ### Outcome
 
 _(architect fills in: 14.1 charge model; 14.2 which form the reference implementation uses)_
+
+- **14.1 (2026-10-10): the canonical count `⌈N log₂ N⌉ × S`**, as in metering D6, not a
+  per-record weight. Measuring actual comparisons would be non-deterministic, but a modeled count
+  is a fixed formula of N and so deterministic; unlike a flat per-record weight it scales with the
+  log N growth of work per record, so it neither overcharges small sorts nor undercharges large
+  ones (R4). A byte term for long sort keys can be added later.
+- **14.3, partly covered:** metering D2 now states that a cell's `CellHistory` bitmap grows with its
+  retained modifications and is rewritten on each, and covers it with a fixed part of `w_cell[op]`
+  calibrated for `#minRetention`. The §7 sentence is still to add.
 
 ---
 
@@ -1533,9 +1603,9 @@ on:** P07 (is a second conformant engine a goal?). Feeds S05.
 ### Question
 
 `#alloc`, `#roots`, `#recordKeys`, `#params`, `@meteringModel`, `@modelWeight` are committed cells,
-so `StateRoot` is a function of Golem DB's bookkeeping layout, not only of the logical database. A
+so `StateRoot` is a function of GolemDB's bookkeeping layout, not only of the logical database. A
 second engine holding the same records would not agree on a root unless it reproduced §4 byte for
-byte (Fable Athena). Is that the contract, or a Golem DB choice?
+byte (Fable Athena). Is that the contract, or a GolemDB choice?
 
 ### Alternatives
 
@@ -1544,8 +1614,8 @@ byte (Fable Athena). Is that the contract, or a Golem DB choice?
 | What a second engine reproduces | §2–§4, §8 exactly | §2–§3, §8 for user cells and the index; its own bookkeeping |
 | Cost now | none | a third trie (or a partition of `CellTrie` by ID range: system records route under one fixed prefix), one more root in `#roots`/head (96 B), a preimage change |
 | Proofs | unchanged | a proof of a user cell no longer transits system cells; a proof of the allocator or a key binding goes through `SystemRoot` |
-| Honest description | "Golem DB's root" | "the database's root, plus this engine's root" |
-| P07 default | matches ("not a goal for v1; §4 layout is Golem DB's") | prepares for a goal nobody has set |
+| Honest description | "GolemDB's root" | "the database's root, plus this engine's root" |
+| P07 default | matches ("not a goal for v1; §4 layout is GolemDB's") | prepares for a goal nobody has set |
 
 **Recommendation: A for v1**, stated plainly in the normative-surface appendix (S05): *the
 commitment binds the engine's bookkeeping; an engine that computes the same `GlobalRoot` is a
@@ -1591,7 +1661,7 @@ Tables Are Under Commitment*. `CHANGES.md` D18 and P07 are closed.
 question. `Conflict` then means exactly one thing, the provisional optimistic-concurrency guard,
 which is a different condition. `[API]`: error table and the `commit` row.
 
-**Outcome:** _(A/B)_
+**Outcome (2026-10-10): B.** A stale handle is `HandleInvalid` on every call, `commit` included; `Conflict` is reserved for an optimistic-concurrency mismatch. Deciding factor beyond the recommendation: with A, the error depended on which call happened to detect the stale branch first, so a host had to match both for one situation. Landed in the API spec, design §10 and metering D2/D8. Implementation: `commit` passes `HandleInvalid` instead of `Conflict` as its stale-branch error.
 
 ---
 
@@ -1616,7 +1686,7 @@ flags as the way to get it wrong; refusing an empty-frame rollback removes the f
 one-line rule and no state. If deep undo is ever wanted, `rollbackTo(checkpointNr)` is the honest
 API for it, not repeated blind pops. `[API]`: `rollback` row and a new error.
 
-**Outcome:** _(A/B/C)_
+**Outcome (2026-10-10): A**, keep multi-frame rollback, as implemented on `feature/golem-db-api`, with one refinement: once every frame has been rolled back, a further `rollback()` returns `NoFrameToRollback` instead of silently doing nothing. Documented in the API spec (*Branches*). `CHANGES.md` D16 can close.
 
 ---
 
@@ -1672,7 +1742,7 @@ fields; the starting ordinal bound in, so the same rows at a different position 
 
 | | A — **host** composes `AppHash = H(GlobalRoot ‖ logDigests)` and maintains that | B — **engine** writes commit `n`'s digests as cells at commit `n+1` (lag-one, like `#roots`), so the world-state root transitively commits the log |
 | --- | --- | --- |
-| Who builds | Arkiv | Golem DB |
+| Who builds | Arkiv | GolemDB |
 | Engine commits to log content | no — §11's stance today | yes, one commit late |
 | Cells per commit | none | one per segment (32 B), under a new system record `#logDigests` (id 5), same lag-one write as `#roots` |
 | Provable | against the host's `AppHash`, by host rules | against `GlobalRoot`, by the engine's ordinary cell proof; a light client with only the root can verify a receipt digest |
@@ -1728,10 +1798,10 @@ documents).
 | P04 | decided | Arkiv vocabulary inside a generic engine | **Reword the two definitional uses (§8 "block headers", §11 ¶1); keep examples** | Requirements: "Genericity … is the enforcement mechanism: an engine that can support a cycling-event tracker cannot have smuggled in a blockchain concept" | K1-sized edit, scheduled with the Phase 3 moves |
 | P05 | decided | §11 segments: adopted or still a proposal | **Adopted** as the design of a stated requirement, with two additions owed | Requirements SE-1 *Immutable log*: append-only, `(segment, ordinal)`, outside the root, pruned with retention, may contain its own commit's root, **and "for each commit the engine returns a deterministic digest of the rows appended to each log"** | §11 status `proposed` → `recorded, open`; catalogue rows lose *proposed*; D17 live; **D19** added for the digest; shard-mark survival stays in D05 |
 | P06 | done (2026-10-01) | "Full history" (§1 property 5) vs. a retention window | **A minimum retention window as an instance parameter; beyond it the consensus-path API refuses on every node; deeper history is a separate archival surface** | Requirements DI-7 *History*, CS-5 ("minimum retention window"), glossary *Retention window* | Property 5 qualified; D05 5.2 revised; history's *tier* stays open (OQ2 below) |
-| P07 | done (2026-10-01) | Is a second conformant engine a goal? | **Yes, and conformance includes the root** | Requirements: "Golem-DB is swappable … the first implementation of that contract"; NF-8: a second engine must pass "encodings, **commitment vectors**, query results, cost receipts"; DI-2: the commitment covers "every piece of engine state that affects results" | D18 = A; its partitioned-root alternative withdrawn — the reserved layout is normative *by requirement* |
+| P07 | done (2026-10-01) | Is a second conformant engine a goal? | **Yes, and conformance includes the root** | Requirements: "GolemDB is swappable … the first implementation of that contract"; NF-8: a second engine must pass "encodings, **commitment vectors**, query results, cost receipts"; DI-2: the commitment covers "every piece of engine state that affects results" | D18 = A; its partitioned-root alternative withdrawn — the reserved layout is normative *by requirement* |
 | **P08** | waiting | Standalone negation and existence terms: must the live DSL's `!=` / `!` on their own survive into v0.1? | **Recommend yes → adopt the live-set index term** (D01 1.1-B / 1.2-B): one engine-maintained term over all live `recordID`s, +1 container write per create and per delete; gives a universe for `NOT`, `!=`, `EXISTS`, match-all, and a free `count(*)`. D01 1.1-A would reject `status != "open"` as `InvalidQuery` | Live product: `!=` and `!` are first-class operators today; requirements OQ6 asks the same question | Product owner confirms. If yes: D01 1.1 → B, 1.2 → B, and the API's "≥ 1 positive literal" `[API]` change is dropped. Also record which `!=` semantics the live DSL has, SQL-style (excludes entities without the attribute) or MongoDB-style (includes them): the input to D01 1.5 |
 | **P09** | waiting | Glob `~`: general, prefix-only, or dropped? | **Recommend prefix-only**: a literal followed by one trailing wildcard compiles to the §5 prefix scan; any other pattern ⇒ `InvalidQuery` at the SDK. Interior or leading wildcards are unbounded scans with no deterministic cost shape | Live product has general glob; the target draft says "no glob … glob pricing is nontrivial" | Product owner accepts the regression; one sentence in D01; an SDK rule |
-| OQ3 | decided | Queries inside a branch (requirements open question 3) | **Keep the API rule — queries read committed state, `N−1` — and accept a one-block lag.** Arkiv's expiry must find entities with `expiresAtBlock ≤ N` while executing block `N`; an entity created and already-expired in the same block is collected at `N+1`. Nothing else in the live product queries during execution; extending `query` through the overlay would cost an index overlay read path and a second cost model for one edge case | Live product: "issues deterministic Golem-DB deletes during block processing" | No engine change; answer to be reflected into the requirements' OQ3 |
+| OQ3 | decided | Queries inside a branch (requirements open question 3) | **Keep the API rule — queries read committed state, `N−1` — and accept a one-block lag.** Arkiv's expiry must find entities with `expiresAtBlock ≤ N` while executing block `N`; an entity created and already-expired in the same block is collected at `N+1`. Nothing else in the live product queries during execution; extending `query` through the overlay would cost an index overlay read path and a second cost model for one edge case | Live product: "issues deterministic GolemDB deletes during block processing" | No engine change; answer to be reflected into the requirements' OQ3 |
 | OQ2 | open | History's tier: who reads past state, how far back, how often | Today's demand is **zero** — the live product exposes no as-of read, only events — so the minimum window can be small (a day of blocks) and D05 5.7-B (synced-node exemption) is safe. "How far back will RPC and light clients want" is a forward-looking product call | Live product (absence of the feature) | Product owner; sets `#minRetention` |
 | OQ5 | open | Namespacing / multi-tenancy: engine mechanism or business logic | Not a live feature; not blocking. If the engine route is taken it becomes a requirement and a new D-row (a scope parameter on every operation, partitioning keys and index terms) | — | Product owner; no deadline |
 

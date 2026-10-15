@@ -1,4 +1,4 @@
-# golemdb
+# GolemDB
 
 A Cargo workspace for GolemDB. Crates live under `crates/`. Production crates
 are registered as workspace members and `[workspace.dependencies]` path entries
@@ -33,11 +33,11 @@ The unpublished integration-test package is a workspace member only.
 
 ## Documentation
 
-- [Technical context](agent.md): crate boundaries, schema, encoding invariants,
-  operation lifecycle, and extension contracts for contributors and agents.
-- [Technical design](docs/golem-db-design.md): storage architecture, data model,
+- [API](docs/golemdb-api.md): the caller-facing interface and operation semantics.
+- [Technical design](docs/golemdb-design.md): storage architecture, data model,
   commitments, history, and query design.
-- [API](docs/golem-db-api.md): the caller-facing interface and operation semantics.
+- [Metering](docs/golemdb-metering.md): metering specification.
+- [Arkiv tokenomics](docs/arkiv-tokenomics.md): Arkiv fees, storage pricing etc based on GolemDB metering.
 
 ## Adding a crate
 

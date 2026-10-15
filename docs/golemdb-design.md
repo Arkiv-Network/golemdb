@@ -1,12 +1,12 @@
-# Golem DB — Technical Design
+# GolemDB — Technical Design
 
-This document is the **design record** of the Golem DB storage engine: the schema, the
+This document is the **design record** of the GolemDB database: the schema, the
 commitment, the history mechanism, and the reserved-record structure that carries the engine's own
 state. It supersedes the working draft [golem-db-architecture.md](../golem-db-architecture.md) and
 the change set collected in [golem-db-proposals.md](../golem-db-proposals.md) for everything it
 covers. Its status is tracked **per chapter** in the register below; no chapter is called settled
 until it has passed the acceptance checks in [CHANGES.md](CHANGES.md). Requirement IDs cited here
-(SE-1, CS-5 and others) refer to the Golem DB requirements document,
+(SE-1, CS-5 and others) refer to the GolemDB requirements document,
 `arkiv-source-of-truth/golem-db.md`, which is maintained outside this repository.
 
 One layer built on top of what is described here — **metering and cost** — is not yet decided and is
@@ -22,12 +22,12 @@ document and will be regenerated from the final text (`CHANGES.md` T03); until t
 This document is for people who build, verify or integrate the engine: its implementers and
 reviewers, the conformance engineer writing vectors against it, and the host engineer who needs to
 know what happens beneath a call. It is **not** the caller's contract — what a caller can say and
-what comes back is [golem-db-api.md](golem-db-api.md), which points back here only where a
+what comes back is [golemdb-api.md](golemdb-api.md), which points back here only where a
 mechanism explains an observable rule.
 
 | You want to | Read |
 | --- | --- |
-| **Use the engine** (host or SDK author) | [golem-db-api.md](golem-db-api.md) alone. Follow its _→ design §n_ pointers only when you need to know why |
+| **Use the engine** (host or SDK author) | [golemdb-api.md](golemdb-api.md) alone. Follow its _→ design §n_ pointers only when you need to know why |
 | **Get oriented** (first hour) | [§1](#1-fundamentals) · [§3](#3-records-and-cells) · the catalogue table in [§4](#record-classes-and-the-reserved-catalogue) · [Branches over the Head](#branches-over-the-head) and [Committing a Branch](#committing-a-branch) in §10 · [Resolving a Value as of a Commit](#resolving-a-value-as-of-a-commit) in §7 |
 | **Implement or review a component** | Its chapter, plus [§2](#2-system-schema) (every component), [§8](#8-state-commitment-and-global-root) (anything under commitment) and [§9](#9-trie-representation-canonical-vs-physical) (anything touching a trie). Check the chapter's line in [Status by Chapter](#status-by-chapter) before relying on a rule |
 | **Write conformance vectors** | [Bitmap Encoding](#bitmap-encoding) in §2 · the type grid in [§3](#cell-kinds-and-types) · reserved-record layouts in [§4](#4-system-admin-and-user-records) · [Domain Separation and Preimage Encoding](#domain-separation-and-preimage-encoding) in §8 — and `CHANGES.md` D09 for what is not yet pinned |
@@ -50,26 +50,26 @@ vectors, and a clean reader pass (`CHANGES.md`, Phase 5).
 | [1. Fundamentals](#1-fundamentals) | recorded, open | D05 (retention mechanism behind property 5); D13 (environment assumptions) |
 | [2. System Schema](#2-system-schema) | recorded, open | D09 (Roaring profile, encoding canon); D13 (MDBX durability model) |
 | [3. Records and Cells](#3-records-and-cells) | recorded, open | D09 (`bool` byte forms, shipped type-id map) |
-| [4. System, Admin and User Records](#4-system-admin-and-user-records) | recorded, open, depends-on-metering | D08 (`#recordKeys` on delete); D10 (model activation semantics); D09 (`#immutableDataSegments` layout); D19 (record 5, `#logDigests`); D05 (retention mechanism behind `#minRetention`) |
+| [4. System, Admin and User Records](#4-system-admin-and-user-records) | recorded, open, depends-on-metering | D09 (`#immutableDataSegments` layout); D19 (record 5, `#logDigests`); D05 (retention mechanism behind `#minRetention`) |
 | [5. Indexing Cells for Filtering](#5-indexing-cells-for-filtering) | recorded, open | D01 (filter evaluation: predicate combination, bounds, cost shape); D14 |
 | [6. Merkleizing the Posting List](#6-merkleizing-the-posting-list-bitmaptrie) | recorded, open | D09 (odd-nibble padding, `EMPTY_ROOT`) |
 | [7. Point-in-Time History](#7-point-in-time-history) | recorded, open | D05 (retention, historical discovery, `Pruned`); D12 |
 | [8. State Commitment and Global Root](#8-state-commitment-and-global-root) | recorded, open | D06 (proof scope, non-inclusion witness); D09 (reserved-layout tags, absent pre-image) |
 | [9. Trie Representation](#9-trie-representation-canonical-vs-physical) | recorded | — |
-| [10. Write Branches and Checkpoint Frames](#10-write-branches-and-checkpoint-frames) | recorded, open | D02 (`rewind`: not in v1; semantics still to specify); D03 (crash recovery); D04 (concurrency contract); D07 (branch transitions); D08; D15; D16 |
+| [10. Write Branches and Checkpoint Frames](#10-write-branches-and-checkpoint-frames) | recorded, open | D02 (`rewind`: not in v1; semantics still to specify); D03 (crash recovery); D04 (concurrency contract); D07 (branch transitions) |
 | [11. Commit Immutable-Data Segments](#11-commit-immutable-data-segments) | recorded, open | D17 (typed columns); D19 (per-commit log digest, required by SE-1); D05 (shard-mark survival); D02 (`rewind`: not in v1); T01, T02 (reth claims). Adopted per requirement SE-1 (P05) |
 | [12. Sorting](#12-sorting) | recorded, open | D14 (cost qualifications) |
 | [13. Paging](#13-paging) | recorded, open, depends-on-metering | D11 (cursor contract, fingerprint scope); D12 (live-paging guarantee) |
 | [Appendix A. Normative Surface](#appendix-a--normative-surface) | open | S05 (being assembled; the full list waits on D09) |
 
-The metering layer itself (property 7 in §1) is out of scope here: D10 records the shape this
-document assumes of it.
+The metering layer itself (property 7 in §1) is out of scope here: it is specified in
+[golemdb-metering.md](golemdb-metering.md).
 
 ## Contents
 
 - **[Glossary](#glossary)**
 - **[1. Fundamentals](#1-fundamentals)**
-  - [What Golem DB Is For](#what-golem-db-is-for)
+  - [What GolemDB Is For](#what-golemdb-is-for)
   - [Abstract Primitives to Physical MDBX Mapping](#abstract-primitives-to-physical-mdbx-mapping)
 - **[2. System Schema](#2-system-schema)**
   - [Table Dictionary](#table-dictionary)
@@ -80,6 +80,7 @@ document assumes of it.
 - **[3. Records and Cells](#3-records-and-cells)**
   - [The Cell Key](#the-cell-key)
   - [Record Identity: the `#key` Cell](#record-identity-the-key-cell)
+  - [Record Shape: the `#meta` Cell](#record-shape-the-meta-cell)
   - [Cell Names](#cell-names)
   - [Cell Kinds and Types](#cell-kinds-and-types)
   - [Benefits and Trade-offs of the Cell Decomposition](#benefits-and-trade-offs-of-the-cell-decomposition)
@@ -119,7 +120,7 @@ document assumes of it.
 - **[11. Commit Immutable-Data Segments](#11-commit-immutable-data-segments)**
   - [Why Cells Are the Wrong Shape](#why-cells-are-the-wrong-shape)
   - [The Model](#the-model) · [On-Disk Form](#on-disk-form)
-  - [Writing Against a Sealed Commit](#writing-against-a-sealed-commit)
+  - [Appending to a Branch](#appending-to-a-branch)
   - [The System Segment](#the-system-segment)
   - [Operations](#operations)
   - [Genesis Declaration](#genesis-declaration)
@@ -192,17 +193,17 @@ adopted here is stated and the document follows it.
 
 ## 1. Fundamentals
 
-Golem DB is a generic database built on two abstractions: **records** and **cells**. A record is the
+GolemDB is a generic database built on two abstractions: **records** and **cells**. A record is the
 basic logical unit and acts as a container of cells. On top of that model the engine provides
 queries over records by their cell values — filtering, sorting and paging — and the ability to
 operate over historical states. Equally central are **determinism** and **commitment**: the state as
 of any point in history must be reproducible and cryptographically committed to.
 
-### What Golem DB Is For
+### What GolemDB Is For
 
 Taken one at a time, most of the seven properties below are unremarkable — each is standard
 somewhere, in some class of system, and several are standard everywhere. What no existing engine
-combines is **all seven at once**, and it is their combination — not any one of them — that Golem DB
+combines is **all seven at once**, and it is their combination — not any one of them — that GolemDB
 is built to deliver.
 
 | #   | Property                         | What it means here                                                                                                                                                                                                                       |
@@ -218,11 +219,11 @@ is built to deliver.
 The engine is built on top of [**libmdbx**](https://github.com/erthink/libmdbx) (Lightning
 Memory-Mapped Database Extended), an embedded key-value store structured as a collection of
 memory-mapped B+trees. To build a historised, Merkleized, cell-based database engine on top of MDBX,
-Golem DB translates abstract logical database primitives into low-level MDBX physical byte
+GolemDB translates abstract logical database primitives into low-level MDBX physical byte
 structures.
 
 A note on granularity: while the high-level description and interface in
-[golem-db-api.md](golem-db-api.md) present the **record** as the basic unit, the implementation
+[golemdb-api.md](golemdb-api.md) present the **record** as the basic unit, the implementation
 architecture operates on the **cell** as its basic unit. This carries a number of physical
 advantages (detailed in [§3](#3-records-and-cells)) and is the natural decomposition when building
 on a key-value store.
@@ -237,13 +238,13 @@ it — the cost model and its op classes — is not yet decided and is not part 
 
 ### Abstract Primitives to Physical MDBX Mapping
 
-To realise the record-level API of [golem-db-api.md](golem-db-api.md) on a cell-based low-level
+To realise the record-level API of [golemdb-api.md](golemdb-api.md) on a cell-based low-level
 architecture, the engine introduces a schema of abstract entities — **tables**, each with one or
 more key parts and an assigned value. Those abstract entities map onto the physical MDBX layer as
 follows:
 
 1. **Tables (namespaces).** An abstract table maps directly to an individual named B+tree within a
-   single MDBX database environment (`mdbx_dbi_open`). This lets multiple isolated indices and state
+   single MDBX environment (`mdbx_dbi_open`). This lets multiple isolated indices and state
    tables co-exist within the same unified transactional boundaries and memory-mapped file.
 2. **Keys.** Logical composite keys are constructed by concatenating the encoded bytes of their
    constituent parts, in a fixed order. Parts are written back to back where every preceding part is
@@ -280,7 +281,7 @@ Three rules make codecs load-bearing rather than an implementation detail:
 
 ```mermaid
 flowchart LR
-    subgraph ABS["Abstract Golem DB schema"]
+    subgraph ABS["Abstract GolemDB schema"]
         T["<b>Tablename</b><br/>PK · keyPart1<br/>PK · keyPart2<br/>PK · …<br/>PK · keyPartN<br/>[type] · data"]
     end
 
@@ -302,7 +303,7 @@ flowchart LR
     class CODEC codec
 ```
 
-_Figure 1 — An abstract Golem DB table — one to N key parts plus a typed value — maps to one
+_Figure 1 — An abstract GolemDB table — one to N key parts plus a typed value — maps to one
 namespaced B+tree inside a single MDBX environment. A composite key is the concatenation of its
 encoded parts, and the value is a byte payload; both sides pass through the type's codec._
 
@@ -540,7 +541,7 @@ so a deployment's choice is discoverable before any decoding takes place.
 
 ## 3. Records and Cells
 
-While client-facing APIs operate on standard entity objects (**records**), Golem DB internally
+While client-facing APIs operate on standard entity objects (**records**), GolemDB internally
 decomposes every record into discrete **cells**. A record's internal **`recordID`** acts as a
 namespace prefix for a set of independent keys.
 
@@ -634,8 +635,54 @@ Three things follow from identity being an ordinary cell rather than a side tabl
 content: `create` may supply zero user cells, and removing the last user cell through
 `patch` does not delete the record. Its `#key`, `#recordKeys` binding and engine-maintained
 metadata remain; `get` succeeds for the existing record. Only `delete` removes its
-identity and binding from live state. The per-record `#meta` counts and charges for
-empty records are specified in the [metering record model](golem-db-metering.md#record-model).
+identity and binding from live state. Its [`#meta`](#record-shape-the-meta-cell) counters
+are all zero; the charges for empty records are in the
+[metering record model](golemdb-metering.md#record-model).
+
+### Record Shape: the `#meta` Cell
+
+Every user record carries a second reserved meta cell beside `#key`: four counters over its user
+cells.
+
+```
+Cell:  recordID ‖ "#meta"   →   typeTag(field, bytes32) ‖ cells ‖ cellBytes ‖ indexedCells ‖ indexBytes
+                                                          (four u64, big-endian)
+```
+
+| Counter        | Counts                                                     |
+| -------------- | ---------------------------------------------------------- |
+| `cells`        | live user cells                                            |
+| `cellBytes`    | Σ `(8 + \|name\|) + (1 + \|value\|)` over those cells      |
+| `indexedCells` | live user cells of kind `attribute`                        |
+| `indexBytes`   | Σ `\|name\| + 2 + \|value\|` over those cells (their index term keys) |
+
+The sizes follow the [metering size rules](golemdb-metering.md#d4-storage-and-size-counting):
+cell key plus value, and the full term key, counted per record. System cells are never counted.
+
+`#meta` gives the engine and the host a record's shape without reading the record. A `patch` reads
+only the cells it touches, so without `#meta` it could neither check the per-record caps nor keep a
+record's maximum deletion cost computable; and a host pricing storage over time, such as Arkiv's
+`extend`, would have to read the whole record to learn its size. What metering uses each counter
+for is in the [metering record model](golemdb-metering.md#the-meta-cell).
+
+- **User records only.** System and admin records carry `#key` but no `#meta`: they are exempt from
+  the caps and never deleted ([§4](#structural-invariants)).
+- **Engine-maintained.** `create` writes it, `patch` updates it when a count changes, `delete`
+  removes it with the record. Like `#key`, it is a `field` whose `#` name no user cell may take, so
+  the data plane cannot write it. It is committed, historised and rolled back like any cell.
+- **No overflow.** Every counter is bounded by the per-record caps times the length ceilings of
+  [`#params`](#params-recordid-0), far below `u64`.
+- **Read with `get`**, at a branch or a commit: a full read includes `#meta`, and a projection can name it alone ([API](golemdb-api.md#meta)).
+- **Distinct from the global counters** in [`#alloc`](#alloc-recordid-1), which count the leaves of
+  the whole tries.
+
+**Record completeness proofs.** Cell paths are `Hash(recordID ‖ cellKey)`
+([§8](#the-two-tries)), so a record's cells are scattered through the `CellTrie` and the trie alone
+offers no proof that a set of cells is all of them. `#meta` closes that gap indirectly: a client
+holding an inclusion proof of `#meta` at commit _c_ can check that a whole-record read at _c_
+withholds no user cell, because the proven cells must match `cells` (and `cellBytes`). This covers
+whole-record reads only; projections use per-name non-inclusion proofs, and index queries are a
+separate question (D06).
 
 ### Cell Names
 
@@ -654,7 +701,7 @@ DIGIT  = %x30-39                    ; 0–9
   (`#key`, `#nextRecordID`, …); `@` denotes admin names. Neither may begin a caller-supplied cell
   name. Named engine cells use an identifier after their reserved prefix; raw keys in reserved
   records follow their own layouts ([§4](#record-classes-and-the-reserved-catalogue)).
-- **`$` is ordinary to Golem DB.** A single leading `$` is allowed before the initial letter and
+- **`$` is ordinary to GolemDB.** A single leading `$` is allowed before the initial letter and
   counts toward the length cap. It grants no privilege and assigns no record class. A host protocol
   may reserve it for its own attributes and enforce who may write them; Arkiv uses `$owner`,
   `$expiresAt` and `$payload` directly. `$` alone, repeated prefixes and interior `$` are invalid.
@@ -673,7 +720,7 @@ Names remain byte-exact, with no ambiguity at any point in the pipeline.
 ### Cell Kinds and Types
 
 Every cell value is prefixed by a single **type tag** byte carrying both properties
-[golem-db-api.md](golem-db-api.md) attaches to a cell:
+[golemdb-api.md](golemdb-api.md) attaches to a cell:
 
 ```
         bit   7   6   5   4   3   2   1   0
@@ -694,7 +741,7 @@ Kind and type are declared **per write** and stored **per cell**, never bound gl
 same cell name may be an `i32` in one record and a `dec256` in another, because a global name→type
 binding would let the first writer of `price` permanently deny that name to every other user. A later
 write to the same cell may declare a different kind or type — retyping is an ordinary write
-([golem-db-api.md](golem-db-api.md#cells)). The tag therefore lives at exactly the granularity of the
+([golemdb-api.md](golemdb-api.md#cell-types-and-kinds)). The tag therefore lives at exactly the granularity of the
 `Cell` table itself and needs no registry: a value is validated against the codec its own write
 declares, and the existing tag is read only as the pre-image the change-set needs — the point lookup
 of `(recordID, cellKey)` that the mutation performs anyway.
@@ -731,7 +778,7 @@ ascending id means ascending width.
 
 **Bold marks the initial implementation target.** These are the types the Arkiv client vocabulary
 requires ([arkiv-node-api.md §2](../arkiv-node-api.md#2-type-vocabulary)), and therefore the set the
-**first Golem DB version must implement**: `bool`, `str`, `bytes`, `bytes32`, `u256`, `i32` and
+**first GolemDB version must implement**: `bool`, `str`, `bytes`, `bytes32`, `u256`, `i32` and
 `dec256`, plus `bytes20` — Arkiv's `addr`; its `key` is `bytes32`, and its `dec` is `dec256` (`i256`
 at 18 dp). Every other id in the grid is **assigned now and implemented later**, when a deployment
 needs it; adding one is a release, not a redesign, since its codec, ordering and index class are
@@ -771,7 +818,7 @@ Notes on the three additions beyond the obvious integers and strings:
   `u64` so tooling can render it and unit confusion (seconds vs. millis) is a type error rather than
   a runtime bug.
 - **Floats `f32`/`f64`.** The usual reason consensus systems ban floats is nondeterministic
-  _computation_ — but Golem DB stores and compares, it never computes on values. Storage and
+  _computation_ — but GolemDB stores and compares, it never computes on values. Storage and
   ordering are exact.
 
 **Attributes must use order-preserving encodings.** The free range queries of
@@ -888,7 +935,7 @@ The `head` row is the entry point for everything: current roots for proofs and r
 current `commitNr` that keys the history tables, and crash recovery on restart.
 
 The metering model is deliberately _not_ a superblock row: its versioning is committed state
-(`@meteringModel` below), and a node that finds an activated model version its code does not
+(`@meteringModel` below), and a node that finds an activated model version whose metering code it does not
 implement halts — the same "upgrade required" behaviour as a fork activation.
 
 ### Record Classes and the Reserved Catalogue
@@ -919,7 +966,7 @@ stored cells also changes commitment paths. Raw binary keys inside reserved reco
 | 4        | system | `#rootIndex`     | `GlobalRoot → commitNr` reverse index ([§11](#what-this-assumes-of-the-schema)) |
 | 5        | system | `#logDigests` — _open_ | per-commit digest of each segment's appended rows, lag-one (`CHANGES.md` D19) |
 | 6–31     | system | _reserved_       |                                                          |
-| 32       | admin  | `@meteringModel` | model activation index: modelVersion → activation commit |
+| 32       | admin  | `@meteringModel` | model activation index: modelVersion → activation commit, code versions |
 | 33       | admin  | `@modelWeight`   | individual weights, per model                            |
 | 34–63    | admin  | _reserved_       |                                                          |
 
@@ -927,8 +974,8 @@ Record 5 is reserved for the log digest that requirement SE-1 asks of [§11](#11
 its layout is decided in `CHANGES.md` D19.
 
 System records are ordered by **ascending mutability**: record 0 never changes and describes the
-deployment itself; 1–2 are touched by the commit machinery (2 at every commit, 1 at every commit
-that creates a record); 3 grows per item. Bootstrap
+deployment itself; 1–2 are touched by the commit machinery (both at every commit: 2 gains a cell, and that cell
+changes 1's `#liveCells`); 3 grows per item. Bootstrap
 order happens to match — a node validates `#params` first, needs the allocator before it can create
 anything, roots before it can prove anything, and mappings last.
 
@@ -967,9 +1014,29 @@ anything, roots before it can prove anything, and mappings last.
 | `#maxStrLen`      | `u32` (BE) | cap on `str` values (attribute values land in index keys) |
 | `#maxBytesLen`    | `u32` (BE) | cap on `bytes` values (field-only, never in an index key) |
 | `#maxCellNameLen` | `u32` (BE) | cap on user cell names                                    |
+| `#keyMode`        | `u32` (BE) | record-key mode: 0 caller-assigned, 1 generated ([below](#record-key-modes)) |
+| `#keySeed`        | `bytes32`  | seed of generated keys; present only in the generated mode |
+| `#maxRecordCells` | `u32` (BE) | cap on user cells per user record ([metering D5](golemdb-metering.md#d5-record-shape-and-deletion-bound)) |
+| `#maxRecordIndexedCells` | `u32` (BE) | cap on `attribute` cells per user record ([metering D5](golemdb-metering.md#d5-record-shape-and-deletion-bound)) |
+| `#minActivationDelay` | `u32` (BE) | minimum commits between installing a metering model and its activation: install requires `A ≥ head + 1 + #minActivationDelay` ([`@meteringModel`](#meteringmodel-recordid-32), metering D9) |
 | `#minRetention`   | `u64` (BE) | minimum retention window, in commits: the consensus-path API refuses reads at commits before `head − #minRetention`, identically on every node ([§1](#1-fundamentals) property 5; mechanism D05) |
 | `#shardSpan`      | `u64` (BE) | commits per segment shard file ([§11](#genesis-declaration)) |
 | `#immutableDataSegments` | layout open (D09) | segment declarations `(name, columns, compression)` ([§11](#genesis-declaration)) |
+
+##### Record-key modes
+
+A database assigns record keys in exactly one mode, fixed at genesis by `#keyMode`:
+
+- **Caller-assigned** (0): every `create` names its key; an existing key fails with
+  `AlreadyExists`.
+- **Generated** (1): a `create` names no key, and the engine derives it as
+  `H("golemdb/record-key/v1" ‖ #keySeed ‖ recordID)`, with the deployment's hash and the new
+  record's `recordID` as `u64` big-endian. Keys are deterministic, unique within the database
+  (IDs are never reused), and differ between deployments with different seeds.
+
+The modes are exclusive because generated keys are predictable: the seed is a readable `#params`
+cell, so if callers could also assign keys, one could claim a future generated key first. A
+`create` that does not match the mode fails with `KeyModeMismatch` before anything is written.
 
 **Chain parameters** — a third kind of configuration beside _code_ (protocol rules, changed by
 upgrade) and _governance data_ (weights, tuned at runtime): fixed per deployment at genesis,
@@ -997,10 +1064,21 @@ underneath.
 | Cell key        | Value      | Semantics                             |
 | --------------- | ---------- | ------------------------------------- |
 | `#nextRecordID` | `u64` (BE) | next `recordID` to mint (genesis: 64) |
+| `#liveCells`    | `u64` (BE) | number of `CellTrie` leaves           |
+| `#indexTerms`   | `u64` (BE) | number of `IndexTrie` leaves          |
 
-Read-modify-written in the branch overlay during execution; a discarded branch's allocations vanish
-with its records, and concurrent branches resolve through the ordinary single-winner commit — no
-bespoke allocator rules.
+`#nextRecordID` is read-modify-written in the branch overlay during execution; a discarded branch's
+allocations vanish with its records, and concurrent branches resolve through the ordinary
+single-winner commit — no bespoke allocator rules.
+
+`#liveCells` and `#indexTerms` are the **global counters** from which metering derives the modeled
+trie depth ([metering D3](golemdb-metering.md#d3-write-metering-and-modeled-trie-depth)). They
+count every leaf of each trie, across all record classes — user cells, `#key` and `#meta` cells,
+bindings, root history, weights, and these counters themselves — because the depth they model is
+the depth of the whole trie. They are not per-record counts; those are in
+[`#meta`](#record-shape-the-meta-cell). The engine updates them once per commit, from the net diff
+([§10](#committing-a-branch) step 4), so a branch prices against the values at its origin commit.
+Genesis sets them to the leaf counts of the genesis state.
 
 #### `#roots` (recordID 2)
 
@@ -1025,10 +1103,10 @@ The `recordKey → recordID` lookup is a `Cell` point read at
 `recordID(#recordKeys) ‖ recordKey` — the same cost as a dedicated side table, with three
 properties such a table could not offer:
 
-- **Historised re-creation.** The binding is an ordinary cell: re-creating a deleted key `patch`es it
-  to the new `recordID`, the old incarnation's ID lands in the change-set, and historical
-  key-addressed reads of deleted records resolve through standard cell time-travel — no bespoke
-  rules for removal.
+- **Historised re-creation.** The binding is an ordinary cell: `delete` removes it, and re-creating
+  the key is an ordinary `create` that writes a new binding to a fresh `recordID` (D08). The removed
+  binding stays in history, so historical key-addressed reads of deleted records resolve through
+  standard cell time-travel — no bespoke rules for removal.
 - **Non-existence proofs.** "No record with key K" is a trie non-inclusion proof at
   `Hash(recordID(#recordKeys) ‖ K)` — impossible with an uncommitted map.
 - **Both directions committed.** `#key` cells give ID → key (record content, used by reads) and
@@ -1037,19 +1115,20 @@ properties such a table could not offer:
 
 #### `@meteringModel` (recordID 32)
 
-| Cell key (u64 BE) | Value                          | Semantics                            |
-| ----------------- | ------------------------------ | ------------------------------------ |
-| `modelVersion`    | `activationCommitNr: u64` (BE) | when this model version takes effect |
+| Cell key (u64 BE) | Value | Semantics |
+| --- | --- | --- |
+| `modelVersion` | `A: u64` ‖ `G: u64` ‖ `H: u64` (BE, 24 bytes) | activation commit, GolemDB code version, host code version (`0` = none); see [metering D9](golemdb-metering.md#d9-cost-schedules) |
 
 The activation index — tiny and append-only. The active model at commit `c` is the greatest version
 with `activation ≤ c`; at most one **pending** model (activation > head) may exist. Nothing executes
 at the activation commit: the flip is a pure boundary event, a consequence of commit numbering.
 
-**A model version is a code version.** Everything structural about a metering model — the op-class
-taxonomy, the counting rules, the byte-term definition, the set of weight names it expects — is code,
-identified by `modelVersion`; there is no data representation of it. The only _data_ in the model
-layer is the weights below, and any tunable constant (a modeled depth, a calibration factor) is
-expressed as a named weight, which is what keeps the split clean.
+**A model version names its code.** A metering model is code plus weights. `G` and `H`
+identify the code: op classes, counting rules, byte terms, expected weight names, with no data
+representation. Several model versions can share the same code versions and differ only in
+weights. The only _data_ is the weights below, and any tunable constant is a named weight.
+Models, code versions and host weights are specified in
+[metering D9](golemdb-metering.md#d9-cost-schedules).
 
 #### `@modelWeight` (recordID 33)
 
@@ -1069,19 +1148,23 @@ trailing name):
   the engine's own history mechanism versions the weights and no explicit weight-version scheme is
   needed. The flip side, accepted deliberately: deep pricing audit is a _historical_ read, and past
   the retention window it becomes an archival-node service.
-- **Completeness is validated against the weight names the model's code expects** — at _activation_
-  for a new model, and on every patch of the active model (no removing or adding names the code does
-  not declare); violations ⇒ `InvalidArgument`.
+- **Weight names are a fixed list coded with each code version (`G`, `H`).** A patch of the active model
+  that names a weight its code does not declare, or removes one, is reverted with
+  `InvalidArgument`. At a new model's activation, a declared weight without a value is
+  **unpriced** — any call needing it fails with `OutOfBudget` — and undeclared names are ignored,
+  each with a warn log ([metering D9](golemdb-metering.md#d9-cost-schedules)).
 
 **Lifecycle rules, spanning the two records:**
 
 1. **Install, then validate at activation.** Creating model `v+1` writes, in one admin commit, its
-   `@meteringModel` activation `A` > head and its `@modelWeight` set. At install, only what _any_
-   node can check is checked — `v+1` > current, `A` > head, cells parseable — because a node not yet
-   running `v+1` code cannot know the expected weight names. Completeness is checked at `A`: an
-   incomplete set fails the activation, deterministically for every node running `v+1` code; nodes
-   that are not halt at `A` regardless ("upgrade required"). Deferring the check is what preserves
-   the upgrade window between install and `A`.
+   `@meteringModel` entry with activation `A ≥ head + 1 + #minActivationDelay` and its `@modelWeight` set. At
+   install, only what _any_ node can check is checked — `v+1` > current, `A` within that bound,
+   cells parseable — because a node not yet
+   running `v+1`'s code cannot know the expected weight names. The admin tool, which runs `v+1`'s
+   code, rejects unknown or missing names before sending the install. At `A`, a missing weight
+   is unpriced rather than failing the activation, so nothing halts or splits and the admin
+   repairs it with a patch; nodes not running code for its `G` and `H` halt at `A` ("upgrade
+   required"); a model on the active `(G, H)` changes weights only and halts no node.
 2. **Current model → immediate only.** Weight patches on the active model take effect at the next
    commit; there is no future scheduling for the current model, so no queue of pending tweaks can
    race or contradict. Future work is staged only under the pending model's prefix.
@@ -1093,7 +1176,7 @@ trailing name):
 
 #### The embedded-store model
 
-Golem DB follows MDBX, SQLite and RocksDB. **A process that can open the database files and link the
+GolemDB follows MDBX, SQLite and RocksDB. **A process that can open the database files and link the
 library can read and write everything.** There are no users, roles, credentials or ACLs inside the
 engine; it authenticates nothing and sees operations, not identities. Securing an instance is the
 job of the application that embeds it and of its deployment — for Arkiv, the node.
@@ -1132,8 +1215,9 @@ As a matrix:
 | metering API      | n/a                                              | allowed, validated             | n/a       |
 
 **The `Reserved` error.** One entry in the shared error set: _the operation addresses a reserved
-record through a surface that may not modify it._ It is raised at admission, before any work, so the
-receipt reports zero cost. It is distinct from `InvalidArgument` so a host can tell malformed input
+record through a surface that may not modify it._ It is raised at admission, after the branch handle is
+validated and before any record state is read, and is charged the admission work done
+([metering D8](golemdb-metering.md#d8-budget-rollback-and-commit)). It is distinct from `InvalidArgument` so a host can tell malformed input
 from a reserved-structure violation.
 
 **Determinism.** Every invariant is a pure function of the operation and of state (a record's class
@@ -1174,10 +1258,11 @@ Ergonomics that make the invariants easy to honour — not security boundaries:
 ### Genesis, and Roots as Cells
 
 **Genesis (commit 0)** performs, in order: `Superblock` format rows written; every assigned reserved
-record created with its `#key` cell; `#params` written from the genesis file and
-validated against the physical ceilings; `#alloc` initialized (`#nextRecordID = 64`); `#roots` and
-`#recordKeys` empty; model version 1 installed complete (`@meteringModel` activation 0, full
-`@modelWeight` set); `head = (0, SR_0, IR_0)`.
+record created with its `#key` cell; `#params` written from the genesis file, including
+`#keyMode` and, in the generated mode, `#keySeed`, and validated against the physical ceilings; `#alloc` initialized (`#nextRecordID = 64`, `#liveCells` and `#indexTerms` set to the genesis
+state's leaf counts); `#roots` and
+`#recordKeys` empty; model version 1 installed complete (`@meteringModel` `(A: 0, G: 1, H: 1)`, or `H: 0` for a
+host without weights; full `@modelWeight` set); `head = (0, SR_0, IR_0)`.
 
 **Worked example — root history as cells.** State of the world just after commit **100** is sealed:
 
@@ -1213,7 +1298,7 @@ Three uses follow directly:
 - **Current roots:** the `Superblock` `head`.
 
 **Per-commit overhead** is one `#roots` cell plus its trie path, plus one small rewrite each for the
-touched `#alloc` cell — a handful of rows. Mapping writes
+touched `#alloc` cells — a handful of rows. Mapping writes
 gain one `CellTrie` path each over an uncommitted predecessor: the price of making bindings provable
 and historised.
 
@@ -1230,7 +1315,7 @@ the list of records matching that term lives behind the commitment in the second
 > **Notation.** `WHERE …`, `SELECT …`, `FIND RECORDS … AT COMMIT …` and similar fragments throughout
 > this document are illustrative pseudo-syntax for a predicate, projection or historical read. Golem
 > DB has no query language; the caller's surface is the structured `query` call of
-> [golem-db-api.md](golem-db-api.md#query). Filter evaluation itself is specified in `CHANGES.md` D01.
+> [golemdb-api.md](golemdb-api.md#query). Filter evaluation itself is specified in `CHANGES.md` D01.
 
 ### Structural Index Key Formulation
 
@@ -1494,7 +1579,7 @@ structural deduplication for free — the general mechanism is discussed in
 
 ## 7. Point-in-Time History
 
-Golem DB implements native point-in-time state resolution across both primary cells and index terms.
+GolemDB implements native point-in-time state resolution across both primary cells and index terms.
 There is **one time axis: the commit number.** The engine records when each item changed and what it
 held before; it has no notion of a value's validity period independent of the commit that wrote it, so
 this is not bitemporality in the temporal-database sense (transaction time plus valid time) — a host
@@ -2089,7 +2174,7 @@ migrated between them, which makes the consequences concrete:
 
 The pattern is consistent: path-based storage wins on the footprint of the _current_ state, then has
 to re-acquire history through a second structure — reverse diffs, change-sets, or a versioned node
-store. Golem DB deliberately takes the other branch. Content-addressing keeps every historical root
+store. GolemDB deliberately takes the other branch. Content-addressing keeps every historical root
 directly walkable, so a proof at commit 150 is the same operation as a proof at the tip, and the
 change-set tables of [§7](#7-point-in-time-history) exist to time-travel _values_, not to
 reconstruct tries. The bill for that choice is the disk footprint and the garbage collection named
@@ -2171,7 +2256,7 @@ as stale by inspection. `branchNr` is assigned monotonically and never reused wi
 **First-committer-wins.** Concurrent branches are candidates for the same next commit, and the guard
 resolves the race with no coordination: whichever branch commits first advances the head to
 `commitNr + 1`, and every other open handle now names a `commitNr` that is no longer the head. Their
-`commit` calls fail with `Conflict`.
+calls, `commit` included, fail with `HandleInvalid` (D15).
 
 **Losing branches are invalidated, not rebased.** This is the sharper consequence: a branch is a _diff
 overlay_ over its origin commit, and every read that misses the overlay falls through to committed
@@ -2216,7 +2301,7 @@ Depth is cheap. The change-set log is a single ordered list held for the branch'
 and stepping further back is the same reverse replay continuing through more entries. Depth costs only
 the operations actually undone.
 
-**Why the engine exposes frames at all.** Golem DB is budget-driven: every data-plane call either
+**Why the engine exposes frames at all.** GolemDB is budget-driven: every data-plane call either
 completes or aborts with `OutOfBudget`, and that abort is atomic _for the single call_. Nothing in the
 engine extends atomicity across calls, because the engine has no concept of a **batch** — a batch is a
 client-side grouping of several operations that must land together or not at all. Frames are the
@@ -2247,7 +2332,7 @@ Everything above is visible in a single block being built by a host chain:
 ```mermaid
 sequenceDiagram
     participant H as Host — Arkiv / other chain
-    participant G as Golem DB
+    participant G as GolemDB
 
     Note over G: Commit 1 … Commit N is the head
 
@@ -2319,7 +2404,7 @@ Four things in the figure are worth reading closely:
 ```mermaid
 sequenceDiagram
     participant H as Host — Arkiv / other chain
-    participant G as Golem DB
+    participant G as GolemDB
 
     Note over G: branch B(N,1), TX1 applied
 
@@ -2349,8 +2434,9 @@ host puts a second checkpoint inside the transaction, after its pre-execution pa
 `rollback()` after `OutOfBudget` undoes only the user operations. The engine reports the cost in
 `OutOfBudget{spent}`; it never charges anyone itself, so the settlement is an ordinary host write.
 A second `rollback()` would reach past `checkpoint 2` and undo the fee as well (see
-"`rollback()` is not idempotent" above). If D16 is decided as recommended, a rollback on the
-now-empty frame is instead an error and pops nothing._
+"`rollback()` is not idempotent" above). D16 keeps this behaviour: `rollback()` stays
+multi-frame, and only once every frame is undone does a further call fail with
+`NoFrameToRollback`._
 
 > **Checkpoints rather than `fork` / `merge`.** A checkpoint frame _is_ a forked child branch, minus
 > the handle and minus the second overlay, and the nesting any real caller needs is strictly
@@ -2546,13 +2632,13 @@ The rules that keep it safe:
 #### Why the Split Exists
 
 Nothing in the cell model needs it, and a caller doing ordinary reads and writes never will. Two
-situations do, and both arise from embedding Golem DB in something larger.
+situations do, and both arise from embedding GolemDB in something larger.
 
 **1 — Writing data that contains the commitment.** A host may have to store something carrying the
 root of the very commit it belongs to; a block header carries the state root of its own block. That
 is unsatisfiable in one phase: the root is not known until the commit has been computed, and by then
 a single-phase commit has already persisted everything. `seal` opens a window in which the root
-exists and nothing is durable, which is exactly where such data can be written. Golem DB's own
+exists and nothing is durable, which is exactly where such data can be written. GolemDB's own
 facility for holding it is [§11](#11-commit-immutable-data-segments): append-only segments attached to a
 commit, written in exactly this window.
 
@@ -2562,7 +2648,7 @@ adopted. A sealed branch is precisely a **computed-but-not-adopted state**: a no
 over the same head at once — competing candidates — and whichever is adopted commits while the rest
 die by first-committer-wins, leaving no trace. For a blockchain host the correspondence is exact:
 
-| Ethereum Engine API                          | ABCI 2.0 (CometBFT v0.38)                          | Golem DB                                      |
+| Ethereum Engine API                          | ABCI 2.0 (CometBFT v0.38)                          | GolemDB                                      |
 | -------------------------------------------- | -------------------------------------------------- | --------------------------------------------- |
 | `forkchoiceUpdated(head, payloadAttributes)` | `PrepareProposal`                                  | `begin()`                                     |
 | execute the transactions                     | inside `PrepareProposal` (immediate execution)     | writes on the branch                          |
@@ -2600,7 +2686,7 @@ simultaneously live candidates is bounded by memory.
 Nine steps, of which **1–6 are the seal** and **7–9 the commit**. A caller that never calls `seal`
 experiences all nine as one operation.
 
-1. **Guard.** `b.commitNr == head`, else `Conflict`. No other check is needed; the handle carries its
+1. **Guard.** `b.commitNr == head`, else `HandleInvalid`. No other check is needed; the handle carries its
    own origin.
 2. **Assign** `commitNr = head + 1`.
 3. **System write.** Insert the `#roots` cell for the _previous_ commit, taking its value from the
@@ -2610,7 +2696,9 @@ experiences all nine as one operation.
    surviving operation; a cell written five times appears once. The branch's `#alloc` cell is one of
    those overlay cells — advanced per `create` ([above](#the-in-memory-overlay)) — so the allocator's
    high-water mark enters the net diff here and is covered by the root like any other touched cell.
-   The log plays no part here. Its one
+   The global counters `#liveCells` and `#indexTerms` ([§4](#alloc-recordid-1)) are then advanced
+   by the net number of leaves the diff adds or removes, step 3's `#roots` cell included, and join
+   the diff themselves. The log plays no part here. Its one
    contribution is free: the **oldest** log entry touching a given cell holds that cell's value at the
    origin commit, which is exactly the pre-image `CellChangeSet` needs — so the change-set pre-images
    require no additional reads of committed state.
@@ -2651,7 +2739,7 @@ prefix, pays for one root-to-leaf rewrite per distinct leaf rather than one per 
 
 Everything up to here stores **state**: records decomposed into cells, indexed, committed and historised. A host built on this engine may also produce data that is not state at all. The motivating case is a blockchain — block headers, transaction bodies and receipts — but the shape generalises: an append-only log of large opaque values, produced one batch per commit, never queried by content, outside the commitment, and useful only for as long as the commits it belongs to are retained.
 
-This chapter gives such data a home that leaves Golem DB a generic engine — the **immutable log** of requirement SE-1. The engine gains **append-only, ordinal-addressed byte segments attached to commits**; it learns nothing about what any row means.
+This chapter gives such data a home that leaves GolemDB a generic engine — the **immutable log** of requirement SE-1. The engine gains **append-only, ordinal-addressed byte segments attached to commits**; it learns nothing about what any row means.
 
 ### Why Cells Are the Wrong Shape
 
@@ -2659,7 +2747,7 @@ Five properties put this data outside the cell model, and each is a separate arg
 
 - **Never queried by content.** No predicate ever selects a receipt by its fields, so every index term it would produce is dead weight. The `attribute`/`field` distinction of [§3](#cell-kinds-and-types) already lets a caller opt out of indexing, but that is the only cost it removes.
 - **Individually large.** A block body is orders of magnitude larger than a typical cell value.
-- **Outside the commitment.** Golem DB's `GlobalRoot` commits present state. A block body is not state; a chain commits it through its own header, not through the state root. The rows themselves never enter the state trie. Whether a per-commit _digest_ of them does, and whether the engine or the host commits it, is open (`CHANGES.md` D19; record 5 is reserved for it).
+- **Outside the commitment.** GolemDB's `GlobalRoot` commits present state. A block body is not state; a chain commits it through its own header, not through the state root. The rows themselves never enter the state trie. Whether a per-commit _digest_ of them does, and whether the engine or the host commits it, is open (`CHANGES.md` D19; record 5 is reserved for it).
 - **Retention-bound lifetime.** Its useful life tracks the commit-history retention window, not any record's lifetime.
 - **It may have to contain the commitment itself.** A block header carries the state root of the very commit it belongs to. Written as a cell that is circular — the cell would be part of the state whose root it is recording, so the root would have to be known before the cell that changes it. This is the same self-reference that keeps the head out of committed state, and unlike the four above it is not a matter of cost: it is structurally impossible.
 
@@ -2695,7 +2783,7 @@ Ordinals run across a segment, not within a shard, so a shard covers a contiguou
 
 The shape mirrors the primary store one level down: **a row is to a segment what a record is to `Cell`, and a column is to a row what a cell is to a record.** The differences are exactly the ones that make a segment cheap — cells are named and sparse, columns are positional and fixed; cells are typed, columns are not; cells are mutable and historised, rows are written once.
 
-A row is addressed by `(segment, ordinal)` and by nothing else. There is no key, no index and no scan-by-value — anything more is the host's to build, on top of what the engine stores.
+A row is addressed by `(segment, ordinal)`, and optionally by a host-supplied key ([Row keys](#row-keys)). There is no scan-by-value — anything more is the host's to build, on top of what the engine stores.
 
 #### On-Disk Form
 
@@ -2710,20 +2798,30 @@ The intended implementation is **reth's NippyJar**, the format behind its static
 
 > **Open — are columns typed?** Moved to [Open Questions](#open-questions), D17.
 
-### Writing Against a Sealed Commit
+### Appending to a Branch
 
-Immutable-data rows are appended in the window `seal` opens ([§10](#sealing-a-branch)) — after the roots
-are computed, before anything is durable:
+Immutable-data rows can be appended to a branch at any time before `commit`: while the branch is
+open, alongside record writes, and after `seal`, when its state is frozen
+([§10](#sealing-a-branch)):
 
 ```
-begin(at?)  → BranchHandle       mutable overlay
-  … writes, checkpoints, rollbacks …
-seal(b)     → SealedCommit       overlay frozen; roots computed; nothing durable
-  … immutable_data_append(b, seg, row) …    may reference stateRoot
+begin(at?)  → BranchHandle       open: record writes and appends, checkpoints, rollbacks
+seal(b)     → SealedCommit       state frozen, roots computed, nothing durable
+  … immutable_data_append(b, seg, key?, row) …    appends only; may reference stateRoot
 commit(b)   → CommitId           fsync segments, MDBX txn, head advances
 ```
 
-Three properties of that window are load-bearing here. The head does not move until `commit`, so a
+- **Before `seal`,** an append belongs to the current frame like any write. `rollback()` drops the
+  rows the undone frame staged: a checkpoint records each segment's count of staged rows, and
+  rollback truncates the staged run to it. Rows are staged, not written, so no pre-image is needed,
+  and rollback stays uncharged.
+- **After `seal`,** only appends are allowed. This is what lets a row contain the root of its own
+  commit, which `seal` computes, such as a block header carrying the state root. Rows are outside
+  the commitment, so appending them never changes the sealed roots.
+- **Staged rows are not readable** until `commit`: `immutable_data_get` and the other reads see
+  committed rows only.
+
+Three properties of the window between `seal` and `commit` are load-bearing here. The head does not move until `commit`, so a
 crash between the two loses only the window. A sealed branch that loses the first-committer-wins race
 takes its staged rows with it. And `commit` without a prior `seal` implies one, so a caller storing
 no immutable data never sees the split.
@@ -2740,7 +2838,7 @@ This is load-bearing rather than an optimisation. Several branches may be sealed
 
 - **The ordinal `immutable_data_append` returns is provisional** — `mark + i`, valid only if this branch commits. Consistent with how branch handles already behave: a branch that loses the race was never real.
 - **A losing branch leaves no trace in the segment file.** Truncation is therefore only ever needed for crash recovery and `rewind`, never to clean up after a lost race.
-- **A commit's immutable-data rows are held in memory between `seal` and `commit`**, which bounds how much one commit can carry by RAM rather than by disk.
+- **A commit's immutable-data rows are held in memory until `commit`**, which bounds how much one commit can carry by RAM rather than by disk.
 
 ### The System Segment
 
@@ -2815,10 +2913,31 @@ That is deliberate. A `one-per-commit` declaration would be marginally faster �
 
 | op                        | signature                      | notes                                   |
 | ------------------------- | ------------------------------ | --------------------------------------- |
-| `immutable_data_append`   | `(b, seg, row) → ordinal`      | sealed branch only; staged, provisional |
-| `immutable_data_get`      | `(seg, ordinal) → row`         |                                         |
+| `immutable_data_append`   | `(b, seg, key?, row) → ordinal` | open or sealed branch; staged, provisional |
+| `immutable_data_get`      | `(seg, ordinal \| key) → row`  |                                         |
 | `immutable_data_range_of` | `(seg, commitNr) → [from, to)` | reads the system segment                |
 | `immutable_data_rows_of`  | `(seg, commitNr) → [row]`      | the whole run, one contiguous read      |
+
+#### Row keys
+
+A host serving lookups by its own identifiers, such as a chain's `eth_getTransactionByHash`, can
+give a row an optional 32-byte key at append. The engine keeps a per-segment **key index**
+from key to ordinal:
+
+- **Uncommitted.** The index is outside the state commitment, like the segments themselves.
+  It is written in the same MDBX transaction as the commit, so it is atomic with it, and it is
+  pruned with the shards its rows live in. This is reth's model: static files for the rows, a
+  separate uncommitted table for hash lookups.
+- **Per segment.** The same key may appear in several segments, so a transaction's body and
+  receipt can both be keyed by its hash.
+- **Uniqueness is the host's job.** The engine does not check it. An append whose key already
+  exists points the index at the new row: **the newest row wins**. Older rows are never
+  overwritten and stay readable by ordinal until their shard is pruned. An append never fails
+  because of its key, so no commit outcome depends on how much history a node retains.
+- **Pruned keys** disappear with their index entries, so a lookup of a pruned row by key
+  returns `NotFound`, not `Pruned`.
+
+The physical layout of the key index is open.
 
 **`truncate` and `prune` are not in the API.** Truncation is internal to crash recovery and `rewind`; pruning is the engine's existing retention mechanism, extended to drop whole shards whose commit span has fallen entirely outside the window. A host never asks for either.
 
@@ -2827,7 +2946,7 @@ That is deliberate. A `one-per-commit` declaration would be marginally faster �
 Two additions to the shared surfaces:
 
 - **`Pruned`**, a new error — the ordinal existed but is beyond the retention window — distinct from `NotFound`, which means it never existed. A node serving historical reads needs to tell a caller which of the two happened.
-- **Metering.** Appends consume disk, so under the security property of [architecture §10](../golem-db-architecture.md#what-cost-must-be) they must be charged: a `immutable_data_append` op class plus the byte term, and `immutable_data_read` plus `bytes_read` on the way out.
+- **Metering.** Appends consume disk, so under the security property of [architecture §10](../golem-db-architecture.md#what-cost-must-be) they are metered: a `immutable_data_append` op class plus the byte term, and `immutable_data_read` plus `bytes_read` on the way out ([metering D7](golemdb-metering.md#d7-immutable-log-metering)). Who pays is the host's decision: a deployment may pass the cost to its clients, absorb it, or set the weights to zero when its clients already pay for the same bytes elsewhere.
 
 ### Genesis Declaration
 
@@ -2836,7 +2955,7 @@ Two additions to the shared surfaces:
 #params.#immutableDataSegments   →  [ (name, columns, compression) , … ]
 ```
 
-- **`shardSpan` is global**, a single Golem DB parameter the pruning strategy reads. It is not per segment: shards from different segments covering the same commit span expire together, which is what makes pruning a single decision.
+- **`shardSpan` is global**, a single GolemDB parameter the pruning strategy reads. It is not per segment: shards from different segments covering the same commit span expire together, which is what makes pruning a single decision.
 - **Retention is not declared here.** How long a segment's rows survive is a matter for the pruning configuration and strategy, which decides when a shard is safe to delete. What genesis fixes is only the shape of a segment, not its lifetime. Note that a strategy will want to distinguish segments — a chain keeps headers far longer than bodies and receipts, and any host with a compact index over a bulky log will want the same asymmetry — but that is the pruning layer's decision to express, not a field of the declaration.
 - **Compression is engine-owned**, declared per segment (`none` / `lz4` / `zstd` / `zstd-dict`). Rows go in and come out as plain bytes. This is where dictionary compression pays, and it needs to see across rows to work at all — which is exactly what the cell model cannot offer. **One constraint, not a tuning choice: compression must permit single-row decode.** If a shard compressed as a unit, a point read would decompress the whole shard.
 - **No row-size cap.** An oversize row surfaces at `commit` rather than at `immutable_data_append` — the same late-failure class [§10](#committing-a-branch) already documents for MDBX's own key and value limits, so it is consistent with the existing stance rather than a new hole.
@@ -2855,7 +2974,7 @@ Two additions beyond the segments themselves.
 
 Written lag-one alongside `#roots`; the `#recordKeys` construction of [§4](#recordkeys-recordid-3) applied to commits. It is well-defined because every commit writes the previous commit's `#roots` cell, so state changes at every commit and roots are therefore unique. It costs one cell and one trie path per commit, and buys root → commit lookup plus non-inclusion proofs for roots.
 
-What this gives a host is a **commit lookup by hash**, which is the shape a chain API needs to resolve a block number from a block hash. Whether it serves that directly depends on the host: `GlobalRoot` is the engine's own commit identity, so it works when the application defines its block hash as that root, and does not when the application's block hash covers a header carrying `parentHash`, `transactionsRoot`, a timestamp and other things Golem DB knows nothing about. In the second case the host keeps its own mapping and `#rootIndex` remains a general utility — a way to ask which commit produced a given root, and to prove that no commit produced one.
+What this gives a host is a **commit lookup by hash**, which is the shape a chain API needs to resolve a block number from a block hash. Whether it serves that directly depends on the host: `GlobalRoot` is the engine's own commit identity, so it works when the application defines its block hash as that root, and does not when the application's block hash covers a header carrying `parentHash`, `transactionsRoot`, a timestamp and other things GolemDB knows nothing about. In the second case the host keeps its own mapping and `#rootIndex` remains a general utility — a way to ask which commit produced a given root, and to prove that no commit produced one.
 
 ### Rejected Alternatives
 
@@ -3324,17 +3443,13 @@ onto chapters.
 | D03 | Crash recovery: restart from the `Superblock` head; segment truncation; behaviour on segment-fsync or MDBX-write failure; retry idempotence; already-issued receipts | §10, §11 |
 | D04 | Concurrency contract: one MDBX read snapshot per branch and per query; where the commit guard's critical section starts relative to segment appends; arbitration of two sealed candidates | §10 |
 | D05 | Retention. **Decided (P06):** the minimum window is `#minRetention`, in commits, in `#params`, and the consensus path refuses beyond it on every node. Open: which structures survive per read class (point, filtered, proof, segments); earliest supported commit; reader and cursor protection from GC; `Pruned` vs `NotFound`; discovering terms and cell names deleted since T; where a shard's starting mark survives once the previous system-segment shard is pruned | §7, §11, §13 |
-| D06 | Proof scope: which classes are proven (membership, non-inclusion; not range completeness); how the server obtains a mismatching virtual leaf's tagged value at head and historically; cost | §8 |
+| D06 | Proof scope: which classes are proven (membership, non-inclusion; not range completeness — though whole-record completeness follows indirectly from a proof of the record's `#meta` counts, [metering](golemdb-metering.md#the-meta-cell)); how the server obtains a mismatching virtual leaf's tagged value at head and historically; cost | §8 |
 | D07 | Branch transitions: delete visibility over real overlay values; the net diff with restored or no-op entries after rollback; history of cancelled changes; create-then-delete in one commit | §10 |
-| D08 | `#recordKeys` on delete: does the binding survive (§4: re-creation `patch`es it) or is it removed (§10: the inverse of delete restores it)? | §4, §10 |
 | D09 | The normative encoding profile: Roaring version, container selection and run-opt rule; odd-nibble padding; `EMPTY_ROOT`; `typeTag` for reserved-record layouts; the absent pre-image encoding for `IndexChangeSet`; `bool` byte forms; the shipped type-id map; change-set key caps | §2, §3, §4, §6, §8 |
-| D10 | The metering shape this document assumes (op classes, byte term, budget abort, receipt); activation at `A` relative to producing vs. observing commit `A`; minimum install→activation window; behaviour on incomplete weights | §4, §5, §10, §13 |
 | D11 | Cursor contract: is the cursor in the receipt (then `machineId` must be deterministic); fingerprint scope — **same-sequence** (only what fixes membership and order, so `projection` and `limit` may vary) or **same-query** (everything but the paging position); whichever, expressed as an exclusion, not an enumeration; cursor + `offset` + `at` precedence. The argument is in [Open Question on Paging](#open-question-on-paging) | §13 |
 | D12 | Live paging guarantee: narrow "anomaly-free" to position-shift anomalies; membership and projection may still change; does a pinned cursor lease retention? | §13 |
 | D13 | Environment assumptions: MDBX durability and fsync model; who owns RAM caps for overlays, undo logs, sealed candidates, staged segment rows, warm sequences | §1, §2, §10 |
 | D14 | Cost qualifications: sort is N fetches plus O(N log N) comparisons; does the warm cache hold keys or refetch; history-bitmap growth | §12, §13 |
-| D15 | Stale handle: `Conflict` on commit vs `HandleInvalid` elsewhere — intentional? | §10 |
-| D16 | Should the engine refuse a second consecutive `rollback()`? | §10 |
 | D17 | Are segment columns typed? As written, no: a column is raw bytes and the application owns the format, which keeps the engine ignorant of what a receipt is. The alternative declares a §3 type per column, so a column carries a `typeTag` as a cell does — self-describing segments, tooling without application code, a complete record/cell parallel — at the cost of dragging the type system into a structure built for opaque payloads and pinning at genesis an encoding the application may want to version independently | §11 |
 | D19 | Per-commit log digest (requirement SE-1): how a digest of each segment's appended rows is defined, and whether the engine commits it (lag-one, in `#logDigests`, record 5) or the host does | §4, §11 |
 | P08 | **Standalone negation.** Arkiv's live DSL accepts `status != "open"` and `!` on its own; the API admits negated literals; nothing here says what a negation-only query is a complement *of*. Beside a positive predicate, negation is set difference from the running intermediate and needs nothing new. Standalone negation, `EXISTS` and match-all all need a posting list of every live record — an engine-maintained `#live` index term, one container write per create and per delete. Adopt it, or drop standalone `!=` from the product. Either way, record whether the live DSL's `!=` includes records without the attribute (D01) | §5, §6, §12 |
