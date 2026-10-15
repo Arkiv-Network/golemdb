@@ -37,6 +37,7 @@ The unpublished integration-test package is a workspace member only.
 - [Technical design](docs/golemdb-design.md): storage architecture, data model,
   commitments, history, and query design.
 - [Metering](docs/golemdb-metering.md): metering specification.
+- [Arkiv tokenomics](docs/arkiv-tokenomics.md): Arkiv fees, storage pricing etc based on GolemDB metering.
 
 ## Adding a crate
 
