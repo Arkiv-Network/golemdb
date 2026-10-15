@@ -1,5 +1,5 @@
 use crate::{CELL_BRANCH_DOMAIN, CELL_LEAF_DOMAIN};
-use golemdb_merkle::{Hash, HashProvider, LeafRef, RootRef, Trie};
+use golemdb_merkle::{BranchRef, Hash, HashProvider, LeafRef, RootRef, Trie};
 use golemdb_storage::{ReadCursor, ReadTransaction, WriteTransaction};
 
 use crate::{CELL_TRIE_PATH_BYTES, CellError, CellKey, CellValue, Result, tables};
@@ -20,16 +20,22 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         }
     }
 
+    pub(crate) fn at(self, commit: u64) -> Self {
+        Self {
+            trie: self.trie.at(commit),
+            ..self
+        }
+    }
+
     /// Construct a virtual leaf binding the complete routing path to the tagged
     /// cell value: `H(CELL_LEAF_DOMAIN || path || typeTag || value)`.
     /// The caller supplies `path = H(encoded CellKey)`; no leaf row is written.
     fn leaf(&self, path: Hash, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
-        LeafRef {
+        LeafRef::new(
             path,
-            hash: self
-                .hasher
+            self.hasher
                 .hash_parts(&[&[CELL_LEAF_DOMAIN], &path, value.encoded_bytes()]),
-        }
+        )
     }
 
     /// Verify that the leaf at `H(key)` commits to the value read from the `Cell` table.
@@ -68,7 +74,8 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         Ok(self.trie.apply(tx, root, edits)?)
     }
 
-    /// Recover root metadata from a digest and the transaction's snapshot.
+    /// Recover root metadata from a digest, the commit that stored it if it is
+    /// a branch, and the transaction's snapshot.
     /// The empty-root digest requires an empty `Cell` table. An existing branch
     /// is validated at its root row only, without auditing its subtree or the
     /// `Cell` table. Otherwise the `Cell` table must contain exactly one valid
@@ -79,6 +86,7 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         &self,
         tx: &impl ReadTransaction,
         hash: Hash,
+        branch_commit: Option<u64>,
     ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
         if hash == self.hasher.hash(&[]) {
             if tx.cursor(tables::CELL, b"")?.next()?.is_some() {
@@ -86,8 +94,8 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
             }
             return Ok(RootRef::Empty);
         }
-        if tx.get(tables::CELL_TRIE, &hash)?.is_some() {
-            let root = RootRef::Branch(hash);
+        if let Some(commit) = branch_commit {
+            let root = RootRef::Branch(BranchRef { hash, commit });
             self.trie.validate_root(tx, root)?;
             return Ok(root);
         }

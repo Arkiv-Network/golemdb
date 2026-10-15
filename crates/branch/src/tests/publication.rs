@@ -14,7 +14,7 @@ use std::{
 };
 
 const SUPERBLOCK: Table = Table("Superblock");
-const TABLES: [Table; 7] = [
+const TABLES: [Table; 8] = [
     tables::CELL,
     tables::CELL_TRIE,
     golemdb_index::tables::INDEX,
@@ -22,6 +22,7 @@ const TABLES: [Table; 7] = [
     golemdb_index::tables::BITMAP_TRIE,
     golemdb_index::tables::BITMAP_CONTAINER,
     SUPERBLOCK,
+    Table("Roots"),
 ];
 fn key(id: u64, name: &[u8]) -> CellKey {
     CellKey::new(id, CellNameRef::raw(name))
@@ -31,17 +32,27 @@ fn value(text: &str, indexed: bool) -> CellValue {
         .unwrap()
         .into()
 }
-fn head(tx: &mut impl WriteTransaction, id: u64, state: Hash, index: Hash) {
-    tx.put(
-        SUPERBLOCK,
-        b"head",
-        &[id.to_be_bytes().as_slice(), &state, &index].concat(),
-    )
-    .unwrap();
+/// Head row plus the `Roots` row that locates its tries.
+fn head(
+    tx: &mut impl WriteTransaction,
+    hash: &impl HashProvider,
+    id: u64,
+    state: RootRef<32>,
+    index: RootRef<32>,
+) {
+    let commit_id = crate::CommitId::new(id);
+    let head = crate::Head {
+        commit_id,
+        state_root: state.hash(hash),
+        index_root: index.hash(hash),
+    };
+    crate::write_head(tx, &head).unwrap();
+    crate::write_roots(tx, commit_id, &crate::Roots { state, index }).unwrap();
 }
 fn seed(db: &impl Store, hash: &impl HashProvider, id: u64, rows: &[(CellKey, CellValue)]) {
     let mut tx = db.begin_write().unwrap();
     let cells = Cells::new(hash)
+        .at(id)
         .apply(
             &mut tx,
             RootRef::Empty,
@@ -64,9 +75,10 @@ fn seed(db: &impl Store, hash: &impl HashProvider, id: u64, rows: &[(CellKey, Ce
             record_id: key.record_id(),
         });
     let index = Index::new(hash)
+        .at(id)
         .apply(&mut tx, RootRef::Empty, postings)
         .unwrap();
-    head(&mut tx, id, cells.root.hash(hash), index.root.hash(hash));
+    head(&mut tx, hash, id, cells.root, index.root);
     tx.commit().unwrap();
 }
 fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
@@ -181,7 +193,13 @@ fn stale_sealed_branches_and_commit_number_overflow_are_rejected() {
         key(2, &1u64.to_be_bytes())
     );
     let mut tx = db.begin_write().unwrap();
-    head(&mut tx, u64::MAX, sealed.state_root, sealed.index_root);
+    head(
+        &mut tx,
+        &Keccak256Hasher,
+        u64::MAX,
+        sealed.cells.root,
+        sealed.index.root,
+    );
     tx.commit().unwrap();
     let last = branches.begin().unwrap();
     assert!(matches!(
@@ -197,7 +215,11 @@ fn wrong_roots_and_duplicate_lag_one_cell_fail_without_freezing() {
     seed(&db, &Blake3Hasher, 0, &[]);
     let branches = Branches::new(ReadOnly::new(db), Keccak256Hasher).unwrap();
     let branch = branches.begin().unwrap();
-    assert!(matches!(branches.seal(branch), Err(BranchError::Cells(_))));
+    // The seeded roots were hashed with another algorithm, so `Roots[head]` disagrees.
+    assert!(matches!(
+        branches.seal(branch),
+        Err(BranchError::InvalidRoots(0))
+    ));
     assert!(!branches.branch_info(branch).unwrap().sealed);
 
     let db = MemoryStore::new();
@@ -270,38 +292,71 @@ fn implicit_seal_failure_keeps_branch_open_and_never_opens_writer() {
     branches.discard(branch).unwrap();
 }
 
-/// Branch rows of `table`, whose paths have `N` bytes, reachable from `roots`;
-/// leaf and empty roots have no row.
+/// Row keys of `table`, whose paths have `N` bytes, reachable from `roots`,
+/// each in its namespace: `commit ‖ namespace ‖ route length ‖ packed route`.
 fn reachable_rows<const N: usize>(
     tx: &impl golemdb_storage::ReadTransaction,
     table: Table,
-    roots: &[Hash],
+    roots: &[(Vec<u8>, RootRef<N>)],
 ) -> std::collections::BTreeSet<Vec<u8>> {
+    let pack = |route: &[u8]| -> Vec<u8> {
+        let packed = route
+            .chunks(2)
+            .map(|pair| (pair[0] << 4) | pair.get(1).copied().unwrap_or(0));
+        [vec![route.len() as u8], packed.collect()].concat()
+    };
     let mut seen = std::collections::BTreeSet::new();
-    let mut stack = roots.to_vec();
-    while let Some(hash) = stack.pop() {
-        let Some(bytes) = tx.get(table, &hash).unwrap() else {
+    let mut stack: Vec<_> = roots
+        .iter()
+        .map(|(ns, root)| (ns.clone(), *root, Vec::new()))
+        .collect();
+    while let Some((ns, root, route)) = stack.pop() {
+        let RootRef::Branch(branch) = root else {
             continue;
         };
-        if !seen.insert(hash.to_vec()) {
+        let key = golemdb_merkle::version_key(branch.commit, &ns, &pack(&route));
+        let bytes = tx
+            .get(table, &key)
+            .unwrap()
+            .expect("reachable row is stored");
+        if !seen.insert(key) {
             continue;
         }
         let node = golemdb_merkle::BranchNodeCompact::<N>::decode(&bytes).unwrap();
+        let prefix = (0..node.prefix_len() as usize)
+            .map(|i| (node.prefix()[i / 2] >> (4 * (1 - i % 2))) & 15);
+        let base: Vec<u8> = route.iter().copied().chain(prefix).collect();
         for slot in 0..16 {
-            if let Some(RootRef::Branch(child)) = node.child(slot) {
-                stack.push(child);
+            if let Some(child) = node.child(slot) {
+                stack.push((ns.clone(), child, [&base[..], &[slot]].concat()));
             }
         }
     }
     seen
 }
 
-/// The bitmap root of every term in the committed index.
-fn bitmap_roots(db: &impl Store) -> Vec<Hash> {
+/// The bitmap root of every term in the committed index, namespaced by the
+/// term's routing path. Index rows hold `hash ‖ commit [‖ container path]`.
+fn bitmap_roots(
+    db: &impl Store,
+) -> Vec<(Vec<u8>, RootRef<{ golemdb_index::BITMAP_TRIE_PATH_BYTES }>)> {
     let tx = db.begin_read().unwrap();
     scan_prefix(&tx, golemdb_index::tables::INDEX, vec![])
         .unwrap()
-        .map(|row| row.unwrap().1.try_into().unwrap())
+        .map(|row| {
+            let (term, value) = row.unwrap();
+            let ns = IndexTerm::decode(&term)
+                .unwrap()
+                .routing_path(&Keccak256Hasher)
+                .to_vec();
+            let hash: Hash = value[..32].try_into().unwrap();
+            let commit = u64::from_be_bytes(value[32..40].try_into().unwrap());
+            let root = match value[40..].try_into() {
+                Ok(path) => RootRef::Leaf(golemdb_merkle::LeafRef { path, hash, commit }),
+                Err(_) => RootRef::Branch(golemdb_merkle::BranchRef { hash, commit }),
+            };
+            (ns, root)
+        })
         .collect()
 }
 
@@ -310,8 +365,7 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
     let branches = Branches::new(db, Keccak256Hasher).unwrap();
-    let genesis = crate::head::read_head_state(&branches.store().begin_read().unwrap()).unwrap();
-    let (mut states, mut indexes) = (vec![genesis.state_root], vec![genesis.index_root]);
+    let (mut states, mut indexes) = (Vec::new(), Vec::new());
     let mut bitmaps = bitmap_roots(branches.store());
     // Commit 1 creates 40 records; commit 2 rewrites most of them and removes some cells.
     for round in 0..2u64 {
@@ -337,8 +391,8 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
             })
             .unwrap();
         let sealed = branches.seal(branch).unwrap();
-        states.push(sealed.state_root);
-        indexes.push(sealed.index_root);
+        states.push((vec![], sealed.cells.root));
+        indexes.push((vec![], sealed.index.root));
         branches.commit(branch).unwrap();
         bitmaps.extend(bitmap_roots(branches.store()));
     }
@@ -374,7 +428,10 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
     // every current term's posting list loads.
     let head = crate::head::read_head_state(&tx).unwrap();
     let hasher = Keccak256Hasher;
-    let root = Cells::new(&hasher).reopen(&tx, head.state_root).unwrap();
+    let (state_commit, _) = crate::root_commits(&tx, &head, &hasher).unwrap();
+    let root = Cells::new(&hasher)
+        .reopen(&tx, head.state_root, state_commit)
+        .unwrap();
     let trie = golemdb_merkle::Trie::<_, { golemdb_cells::CELL_TRIE_PATH_BYTES }>::new(
         tables::CELL_TRIE,
         golemdb_cells::CELL_BRANCH_DOMAIN,
@@ -396,5 +453,161 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
                 .treemap()
                 .is_empty()
         );
+    }
+}
+
+#[test]
+fn every_row_a_commit_writes_is_keyed_by_its_commit_number() {
+    let db = MemoryStore::new();
+    seed(&db, &Keccak256Hasher, 0, &[]);
+    let branches = Branches::new(db, Keccak256Hasher).unwrap();
+    let versioned = [
+        tables::CELL_TRIE,
+        golemdb_index::tables::INDEX_TRIE,
+        golemdb_index::tables::BITMAP_TRIE,
+        golemdb_index::tables::BITMAP_CONTAINER,
+    ];
+    let keys = |table| {
+        let tx = branches.store().begin_read().unwrap();
+        scan_prefix(&tx, table, vec![])
+            .unwrap()
+            .map(|row| row.unwrap().0)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    for commit in 1..=3u64 {
+        let before = versioned.map(keys);
+        let branch = branches.begin().unwrap();
+        branches
+            .write(branch, |cells| {
+                for i in 64..80u64 {
+                    // Three bitmap containers per term, so every table gets rows.
+                    let id = golemdb_index::path::join(i % 3, i as u16).unwrap();
+                    cells.put(
+                        key(id, b"tag"),
+                        value(&format!("t{}", (i + commit) % 2), true),
+                    );
+                }
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(
+            branches.commit(branch).unwrap(),
+            crate::CommitId::new(commit)
+        );
+        let tx = branches.store().begin_read().unwrap();
+        // The state root is rewritten by every commit; this batch also changes the index.
+        let roots = crate::read_roots(&tx, crate::CommitId::new(commit))
+            .unwrap()
+            .unwrap();
+        assert_eq!(roots.state.branch_commit(), Some(commit));
+        assert_eq!(roots.index.branch_commit(), Some(commit));
+        drop(tx);
+        for (table, before) in versioned.into_iter().zip(before) {
+            let after = keys(table);
+            assert!(before.is_subset(&after));
+            let added: Vec<_> = after.difference(&before).cloned().collect();
+            assert!(!added.is_empty());
+            for key in added {
+                assert_eq!(key[..8], commit.to_be_bytes());
+            }
+        }
+    }
+}
+
+#[test]
+fn every_commit_records_roots_that_keep_its_tries_walkable() {
+    let db = MemoryStore::new();
+    seed(&db, &Keccak256Hasher, 0, &[]);
+    let branches = Branches::new(db, Keccak256Hasher).unwrap();
+    let mut published = Vec::new();
+    for commit in 1..=3 {
+        let text = format!("v{commit}");
+        let branch = stage(&branches, &text);
+        let sealed = branches.seal(branch).unwrap();
+        branches.commit(branch).unwrap();
+        let roots = crate::Roots {
+            state: sealed.cells.root,
+            index: sealed.index.root,
+        };
+        published.push((crate::CommitId::new(commit), roots, value(&text, true)));
+    }
+    let tx = branches.store().begin_read().unwrap();
+    // The seeded empty state has no branch rows to locate.
+    let genesis = crate::read_roots(&tx, crate::CommitId::new(0))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (genesis.state, genesis.index),
+        (RootRef::Empty, RootRef::Empty)
+    );
+    let cell_trie = golemdb_merkle::Trie::<_, { golemdb_cells::CELL_TRIE_PATH_BYTES }>::new(
+        tables::CELL_TRIE,
+        golemdb_cells::CELL_BRANCH_DOMAIN,
+        &Keccak256Hasher,
+    );
+    let index_trie = golemdb_merkle::Trie::<_, { golemdb_index::INDEX_TRIE_PATH_BYTES }>::new(
+        golemdb_index::tables::INDEX_TRIE,
+        golemdb_index::INDEX_BRANCH_DOMAIN,
+        &Keccak256Hasher,
+    );
+    let path = Keccak256Hasher.hash(&key(64, b"name").encode());
+    for (commit, roots, value) in published {
+        assert_eq!(crate::read_roots(&tx, commit).unwrap(), Some(roots));
+        // Each old state trie still holds that commit's value, after later commits.
+        let leaf = cell_trie.get(&tx, roots.state, &path).unwrap().unwrap();
+        let expected = Keccak256Hasher.hash_parts(&[
+            &[golemdb_cells::CELL_LEAF_DOMAIN],
+            &path,
+            value.encoded_bytes(),
+        ]);
+        assert_eq!(leaf.hash, expected);
+        assert_eq!(index_trie.walk(&tx, roots.index).count(), 1);
+    }
+}
+
+#[test]
+fn head_roots_must_exist_and_match_the_head() {
+    let hasher = Keccak256Hasher;
+    let empty = hasher.hash(&[]);
+    let branch_at = |commit| {
+        RootRef::Branch(golemdb_merkle::BranchRef {
+            hash: [7; 32],
+            commit,
+        })
+    };
+    let check = |head: crate::Head, roots: Option<crate::Roots>| {
+        let db = MemoryStore::new();
+        let mut tx = db.begin_write().unwrap();
+        crate::write_head(&mut tx, &head).unwrap();
+        if let Some(roots) = roots {
+            crate::write_roots(&mut tx, head.commit_id, &roots).unwrap();
+        }
+        crate::root_commits(&tx, &head, &hasher)
+    };
+    let head = |state_root| crate::Head {
+        commit_id: crate::CommitId::new(5),
+        state_root,
+        index_root: empty,
+    };
+    // Empty tries need no row; a branch root does.
+    assert_eq!(check(head(empty), None).unwrap(), (None, None));
+    assert!(matches!(
+        check(head([7; 32]), None),
+        Err(BranchError::MissingRoots(5))
+    ));
+    let roots = |state| crate::Roots {
+        state,
+        index: RootRef::Empty,
+    };
+    assert_eq!(
+        check(head([7; 32]), Some(roots(branch_at(5)))).unwrap(),
+        (Some(5), None)
+    );
+    // A row for other roots, or a state root not written at the head's commit.
+    for state in [branch_at(4), RootRef::Empty] {
+        assert!(matches!(
+            check(head([7; 32]), Some(roots(state))),
+            Err(BranchError::InvalidRoots(5))
+        ));
     }
 }

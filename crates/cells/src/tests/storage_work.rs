@@ -148,7 +148,12 @@ fn abort_after_a_flat_write_failure_discards_intermediate_trie_nodes() {
         Some("original")
     );
     assert!(cells.get(&read, &key(b"b")).unwrap().is_none());
-    assert_eq!(cells.reopen(&read, root.hash(&HASH)).unwrap(), root);
+    assert_eq!(
+        cells
+            .reopen(&read, root.hash(&HASH), root.branch_commit())
+            .unwrap(),
+        root
+    );
 }
 
 struct FailingRead;

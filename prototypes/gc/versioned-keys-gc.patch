@@ -1,0 +1,989 @@
+diff --git a/crates/branch/src/commit.rs b/crates/branch/src/commit.rs
+index a97977d..680e6d8 100644
+--- a/crates/branch/src/commit.rs
++++ b/crates/branch/src/commit.rs
+@@ -53,6 +53,9 @@ fn stage(tx: &mut impl WriteTransaction, origin: CommitId, sealed: &SealedCommit
+         index: sealed.index.root,
+     };
+     write_roots(tx, sealed.commit_id, &roots)?;
++    crate::gcproto::collect(tx, sealed.commit_id.get(), &sealed.dead)?;
++    crate::gcproto::mark_sweep(tx, sealed)?;
++    crate::gcproto::diff_walk(tx, sealed)?;
+     write_head(
+         tx,
+         &Head {
+diff --git a/crates/branch/src/gcproto.rs b/crates/branch/src/gcproto.rs
+new file mode 100644
+index 0000000..77398ea
+--- /dev/null
++++ b/crates/branch/src/gcproto.rs
+@@ -0,0 +1,534 @@
++//! GC prototypes for benchmarking only. Selected by environment:
++//! `GOLEMDB_GC` = `none` (default) | `stale` | `sweep`, `GOLEMDB_GC_W` (retention
++//! window in commits, default 0 = head-only), `GOLEMDB_GC_K` (sweep batch, default 50).
++//!
++//! `stale`: commit `h` writes `Stale[h]`, the keys its seal superseded, and deletes
++//! the rows listed in `Stale[h − W]`, in key order. With `W` = 0 it deletes its own
++//! list directly. `sweep`: every `K` commits, merge `K` lists in key order and delete
++//! a `1/K` slice per commit.
++use std::sync::{Mutex, OnceLock};
++
++use golemdb_storage::{Table, WriteTransaction};
++
++use crate::Result;
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum Mode {
++    None,
++    Stale,
++    Sweep,
++    MarkSweep,
++    DiffWalk,
++    DiffSweep,
++}
++
++struct Config {
++    mode: Mode,
++    w: u64,
++    k: u64,
++}
++
++fn config() -> &'static Config {
++    static CONFIG: OnceLock<Config> = OnceLock::new();
++    CONFIG.get_or_init(|| {
++        let var = |name: &str, default: u64| {
++            std::env::var(name)
++                .ok()
++                .map(|v| v.parse().unwrap())
++                .unwrap_or(default)
++        };
++        let mode = match std::env::var("GOLEMDB_GC").as_deref() {
++            Ok("stale") => Mode::Stale,
++            Ok("sweep") => Mode::Sweep,
++            Ok("marksweep") => Mode::MarkSweep,
++            Ok("diffwalk") => Mode::DiffWalk,
++            Ok("diffsweep") => Mode::DiffSweep,
++            _ => Mode::None,
++        };
++        Config {
++            mode,
++            w: var("GOLEMDB_GC_W", 0),
++            k: var("GOLEMDB_GC_K", 50),
++        }
++    })
++}
++
++/// Whether seal must record superseded rows (only the `Stale` modes use them).
++pub(crate) fn enabled() -> bool {
++    matches!(config().mode, Mode::Stale | Mode::Sweep)
++}
++
++const STALE: Table = Table("Stale");
++const TABLES: [Table; 4] = [
++    golemdb_cells::tables::CELL_TRIE,
++    golemdb_index::tables::INDEX_TRIE,
++    golemdb_index::tables::BITMAP_TRIE,
++    golemdb_index::tables::BITMAP_CONTAINER,
++];
++
++/// Dead keys as (table index, key), sorted.
++fn sorted(dead: &[(Table, Vec<Vec<u8>>)]) -> Vec<(u8, Vec<u8>)> {
++    let mut keys: Vec<(u8, Vec<u8>)> = dead
++        .iter()
++        .flat_map(|(table, keys)| {
++            let tag = TABLES.iter().position(|t| t == table).unwrap() as u8;
++            keys.iter().map(move |key| (tag, key.clone()))
++        })
++        .collect();
++    keys.sort();
++    keys
++}
++
++fn encode(keys: &[(u8, Vec<u8>)]) -> Vec<u8> {
++    let mut bytes = Vec::new();
++    for (tag, key) in keys {
++        bytes.push(*tag);
++        bytes.push(key.len() as u8);
++        bytes.extend_from_slice(key);
++    }
++    bytes
++}
++
++fn decode(mut bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
++    let mut keys = Vec::new();
++    while let [tag, len, rest @ ..] = bytes {
++        let len = *len as usize;
++        keys.push((*tag, rest[..len].to_vec()));
++        bytes = &rest[len..];
++    }
++    keys
++}
++
++fn delete(tx: &mut impl WriteTransaction, keys: &[(u8, Vec<u8>)]) -> Result<()> {
++    for (tag, key) in keys {
++        tx.delete(TABLES[*tag as usize], key)?;
++    }
++    Ok(())
++}
++
++#[derive(Default)]
++struct Sweep {
++    last: u64,
++    swept: u64,
++    batch: Option<(u64, Vec<(u8, Vec<u8>)>, usize, usize)>, // (end, keys, next, quota)
++}
++
++/// Run in commit `h`'s write transaction, after its rows.
++pub(crate) fn collect(
++    tx: &mut impl WriteTransaction,
++    h: u64,
++    dead: &[(Table, Vec<Vec<u8>>)],
++) -> Result<()> {
++    let config = config();
++    if config.mode == Mode::None {
++        return Ok(());
++    }
++    let keys = sorted(dead);
++    match config.mode {
++        Mode::Stale if config.w == 0 => delete(tx, &keys),
++        Mode::Stale => {
++            tx.append(STALE, &h.to_be_bytes(), &encode(&keys))?;
++            if let Some(s) = h.checked_sub(config.w) {
++                if let Some(bytes) = tx.get(STALE, &s.to_be_bytes())? {
++                    delete(tx, &decode(&bytes))?;
++                    tx.delete(STALE, &s.to_be_bytes())?;
++                }
++            }
++            Ok(())
++        }
++        Mode::Sweep => {
++            tx.append(STALE, &h.to_be_bytes(), &encode(&keys))?;
++            static STATE: OnceLock<Mutex<Sweep>> = OnceLock::new();
++            let mut state = STATE.get_or_init(Default::default).lock().unwrap();
++            if h <= state.last {
++                *state = Sweep::default(); // a new database in this process
++            }
++            state.last = h;
++            let horizon = h.saturating_sub(config.w);
++            if state.batch.is_none() && horizon >= state.swept + config.k {
++                let end = state.swept + config.k;
++                let mut batch = Vec::new();
++                for s in state.swept + 1..=end {
++                    if let Some(bytes) = tx.get(STALE, &s.to_be_bytes())? {
++                        batch.extend(decode(&bytes));
++                    }
++                }
++                batch.sort();
++                let quota = batch.len().div_ceil(config.k as usize).max(1);
++                state.batch = Some((end, batch, 0, quota));
++            }
++            if let Some((end, batch, next, quota)) = &mut state.batch {
++                let to = (*next + *quota).min(batch.len());
++                delete(tx, &batch[*next..to])?;
++                *next = to;
++                if *next == batch.len() {
++                    let (end, swept) = (*end, state.swept);
++                    for s in swept + 1..=end {
++                        tx.delete(STALE, &s.to_be_bytes())?;
++                    }
++                    state.swept = end;
++                    state.batch = None;
++                }
++            }
++            Ok(())
++        }
++        Mode::None | Mode::MarkSweep | Mode::DiffWalk | Mode::DiffSweep => Ok(()),
++    }
++}
++
++fn pack(route: &[u8]) -> Vec<u8> {
++    let packed = route
++        .chunks(2)
++        .map(|pair| (pair[0] << 4) | pair.get(1).copied().unwrap_or(0));
++    [vec![route.len() as u8], packed.collect()].concat()
++}
++
++/// Mark the rows one trie reaches: branches, and container leaves for bitmap tries.
++fn mark<const N: usize>(
++    tx: &impl golemdb_storage::ReadTransaction,
++    table: Table,
++    ns: &[u8],
++    root: golemdb_merkle::RootRef<N>,
++    containers: Option<&mut std::collections::HashSet<Vec<u8>>>,
++    marked: &mut std::collections::HashSet<Vec<u8>>,
++) -> Result<()> {
++    use golemdb_merkle::{BranchNodeCompact, RootRef, version_key};
++    let mut leaves = containers;
++    let mut stack = vec![(root, Vec::new())];
++    while let Some((root, route)) = stack.pop() {
++        match root {
++            RootRef::Empty => {}
++            RootRef::Leaf(leaf) => {
++                if let Some(set) = leaves.as_deref_mut() {
++                    set.insert(version_key(leaf.commit, ns, &leaf.path));
++                }
++            }
++            RootRef::Branch(branch) => {
++                let key = version_key(branch.commit, ns, &pack(&route));
++                let bytes = tx.get(table, &key)?.expect("reachable branch");
++                if !marked.insert(key) {
++                    continue;
++                }
++                let node = BranchNodeCompact::<N>::decode(&bytes).expect("valid branch");
++                let base: Vec<u8> = route
++                    .iter()
++                    .copied()
++                    .chain((0..node.prefix_len() as usize).map(|i| (node.prefix()[i / 2] >> (4 * (1 - i % 2))) & 15))
++                    .collect();
++                for slot in 0..16 {
++                    if let Some(child) = node.child(slot) {
++                        stack.push((child, [&base[..], &[slot]].concat()));
++                    }
++                }
++            }
++        }
++    }
++    Ok(())
++}
++
++fn sweep_table(
++    tx: &mut impl WriteTransaction,
++    table: Table,
++    live: &std::collections::HashSet<Vec<u8>>,
++) -> Result<()> {
++    let dead: Vec<Vec<u8>> = golemdb_storage::scan_prefix(tx, table, vec![])?
++        .map(|row| row.map(|(key, _)| key))
++        .collect::<std::result::Result<Vec<_>, _>>()?
++        .into_iter()
++        .filter(|key| !live.contains(key))
++        .collect();
++    for key in dead {
++        tx.delete(table, &key)?;
++    }
++    Ok(())
++}
++
++/// Head-only periodic mark-and-sweep: every `GOLEMDB_GC_N` commits (default 50).
++pub(crate) fn mark_sweep(tx: &mut impl WriteTransaction, sealed: &crate::SealedCommit) -> Result<()> {
++    use golemdb_merkle::{Keccak256Hasher, RootRef};
++    use std::collections::HashSet;
++    if config().mode != Mode::MarkSweep {
++        return Ok(());
++    }
++    static N: OnceLock<u64> = OnceLock::new();
++    let n = *N.get_or_init(|| std::env::var("GOLEMDB_GC_N").ok().map(|n| n.parse().unwrap()).unwrap_or(50));
++    if sealed.commit_id.get() % n != 0 {
++        return Ok(());
++    }
++    let (mut cells, mut index, mut bitmaps, mut containers) =
++        (HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new());
++    mark(tx, TABLES[0], &[], sealed.cells.root, None, &mut cells)?;
++    mark(tx, TABLES[1], &[], sealed.index.root, None, &mut index)?;
++    // Benchmarks hash with Keccak-256; a real implementation takes the hasher.
++    let roots: Vec<(Vec<u8>, RootRef<{ golemdb_index::BITMAP_TRIE_PATH_BYTES }>)> =
++        golemdb_storage::scan_prefix(tx, golemdb_index::tables::INDEX, vec![])?
++            .map(|row| {
++                row.map(|(term, value)| {
++                    let ns = golemdb_index::IndexTerm::decode(&term)
++                        .unwrap()
++                        .routing_path(&Keccak256Hasher)
++                        .to_vec();
++                    (ns, RootRef::decode(&value).unwrap())
++                })
++            })
++            .collect::<std::result::Result<_, _>>()?;
++    for (ns, root) in roots {
++        mark(tx, TABLES[2], &ns, root, Some(&mut containers), &mut bitmaps)?;
++    }
++    sweep_table(tx, TABLES[0], &cells)?;
++    sweep_table(tx, TABLES[1], &index)?;
++    sweep_table(tx, TABLES[2], &bitmaps)?;
++    sweep_table(tx, TABLES[3], &containers)?;
++    Ok(())
++}
++
++pub(crate) fn diff_walk_enabled() -> bool {
++    matches!(config().mode, Mode::DiffWalk | Mode::DiffSweep)
++}
++
++/// `diffsweep`: diff-walk results gathered over `K` commits, then deleted in key
++/// order, a `1/K` slice per commit (the same deletion as `sweep`).
++#[derive(Default)]
++struct Gather {
++    last: u64,
++    pending: Vec<(u8, Vec<u8>)>,
++    commits: u64,
++    batch: Vec<(u8, Vec<u8>)>,
++    next: usize,
++    quota: usize,
++}
++
++const TERM_ROOTS: Table = Table("TermRoots");
++
++fn encode_term_roots(terms: &[(Vec<u8>, Vec<u8>, Vec<u8>)]) -> Vec<u8> {
++    let mut bytes = Vec::new();
++    for (ns, before, after) in terms {
++        bytes.extend_from_slice(ns);
++        bytes.push(before.len() as u8);
++        bytes.extend_from_slice(before);
++        bytes.push(after.len() as u8);
++        bytes.extend_from_slice(after);
++    }
++    bytes
++}
++
++fn decode_term_roots(mut bytes: &[u8]) -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> {
++    let mut out = Vec::new();
++    while bytes.len() >= 32 {
++        let ns = bytes[..32].to_vec();
++        let b = bytes[32] as usize;
++        let before = bytes[33..33 + b].to_vec();
++        let a = bytes[33 + b] as usize;
++        let after = bytes[34 + b..34 + b + a].to_vec();
++        bytes = &bytes[34 + b + a..];
++        out.push((ns, before, after));
++    }
++    out
++}
++
++/// One trie's diff: rows reachable from `old` but not from `new`.
++struct Diff<'t, T, const N: usize> {
++    tx: &'t T,
++    /// The new trie's root, for absolute lookups.
++    new: golemdb_merkle::RootRef<N>,
++    table: Table,
++    ns: Vec<u8>,
++    leaf_rows: bool,
++    dead: Vec<(u8, Vec<u8>)>,
++    tag: u8,
++    /// Decoded new-trie nodes already read during this diff, by row key.
++    cache: std::cell::RefCell<std::collections::HashMap<Vec<u8>, std::rc::Rc<golemdb_merkle::BranchNodeCompact<N>>>>,
++}
++
++impl<T: golemdb_storage::ReadTransaction, const N: usize> Diff<'_, T, N> {
++    fn node(&self, branch: golemdb_merkle::BranchRef, route: &[u8]) -> Result<std::rc::Rc<golemdb_merkle::BranchNodeCompact<N>>> {
++        let key = golemdb_merkle::version_key(branch.commit, &self.ns, &pack(route));
++        if let Some(node) = self.cache.borrow().get(&key) {
++            return Ok(node.clone());
++        }
++        let bytes = self.tx.get(self.table, &key)?.expect("diffed branch is stored");
++        let node = std::rc::Rc::new(golemdb_merkle::BranchNodeCompact::<N>::decode(&bytes).expect("valid branch"));
++        self.cache.borrow_mut().insert(key, node.clone());
++        Ok(node)
++    }
++
++    fn prefix(node: &golemdb_merkle::BranchNodeCompact<N>) -> Vec<u8> {
++        (0..node.prefix_len() as usize).map(|i| (node.prefix()[i / 2] >> (4 * (1 - i % 2))) & 15).collect()
++    }
++
++    /// The pointer of the new trie at exactly `target`, starting from `ptr` located at
++    /// `route`, plus the deepest new pointer passed on the way (where to resume below).
++    fn locate(
++        &self,
++        mut ptr: golemdb_merkle::RootRef<N>,
++        mut route: Vec<u8>,
++        target: &[u8],
++    ) -> Result<(golemdb_merkle::RootRef<N>, golemdb_merkle::RootRef<N>, Vec<u8>)> {
++        use golemdb_merkle::RootRef;
++        loop {
++            if route.len() == target.len() {
++                let found = if route == target { ptr } else { RootRef::Empty };
++                return Ok((found, ptr, route));
++            }
++            let RootRef::Branch(branch) = ptr else { return Ok((RootRef::Empty, ptr, route)) };
++            let node = self.node(branch, &route)?;
++            let full: Vec<u8> = route.iter().copied().chain(Self::prefix(&node)).collect();
++            if full.len() >= target.len() || !target.starts_with(&full) {
++                return Ok((RootRef::Empty, ptr, route));
++            }
++            let slot = target[full.len()];
++            ptr = node.child(slot).unwrap_or(RootRef::Empty);
++            route = [&full[..], &[slot]].concat();
++        }
++    }
++
++    /// Whether the new subtree at `route` still holds this exact leaf row.
++    fn holds_leaf(&self, mut ptr: golemdb_merkle::RootRef<N>, mut route: Vec<u8>, leaf: golemdb_merkle::LeafRef<N>) -> Result<bool> {
++        use golemdb_merkle::RootRef;
++        let path: Vec<u8> = leaf.path.iter().flat_map(|b| [b >> 4, b & 15]).collect();
++        loop {
++            match ptr {
++                RootRef::Leaf(other) => return Ok(other == leaf),
++                RootRef::Empty => return Ok(false),
++                RootRef::Branch(branch) => {
++                    let node = self.node(branch, &route)?;
++                    let full: Vec<u8> = route.iter().copied().chain(Self::prefix(&node)).collect();
++                    if !path.starts_with(&full) || full.len() >= path.len() {
++                        return Ok(false);
++                    }
++                    let slot = path[full.len()];
++                    ptr = node.child(slot).unwrap_or(RootRef::Empty);
++                    route = [&full[..], &[slot]].concat();
++                }
++            }
++        }
++    }
++
++    fn walk(&mut self, old: golemdb_merkle::RootRef<N>, route: Vec<u8>) -> Result<()> {
++        self.walk_from(old, route, self.new, Vec::new())
++    }
++
++    /// `anc` is the deepest new-trie pointer whose route prefixes `route`: collapses
++    /// and splits move parents, never the rows below them, so lookups resume there.
++    fn walk_from(
++        &mut self,
++        old: golemdb_merkle::RootRef<N>,
++        route: Vec<u8>,
++        anc: golemdb_merkle::RootRef<N>,
++        anc_route: Vec<u8>,
++    ) -> Result<()> {
++        use golemdb_merkle::RootRef;
++        let (new, deepest, deepest_route) = self.locate(anc, anc_route, &route)?;
++        if old == new {
++            return Ok(());
++        }
++        match old {
++            RootRef::Empty => {}
++            RootRef::Leaf(leaf) => {
++                if self.leaf_rows && !self.holds_leaf(deepest, deepest_route, leaf)? {
++                    self.dead.push((3, golemdb_merkle::version_key(leaf.commit, &self.ns, &leaf.path)));
++                }
++            }
++            RootRef::Branch(branch) => {
++                // A node never moves without its content changing: a different pointer
++                // at its own route means it died. The old node is read once and dropped
++                // from the cache: it is never looked up again.
++                let key = golemdb_merkle::version_key(branch.commit, &self.ns, &pack(&route));
++                self.dead.push((self.tag, key));
++                let bytes = self.tx.get(self.table, &self.dead.last().unwrap().1)?.expect("old branch is stored");
++                let node = golemdb_merkle::BranchNodeCompact::<N>::decode(&bytes).expect("valid branch");
++                let full: Vec<u8> = route.iter().copied().chain(Self::prefix(&node)).collect();
++                // Same shape: the new node sits at this route with the same prefix, so
++                // children compare slot by slot. Otherwise each child is located.
++                let same = match new {
++                    RootRef::Branch(new_branch) => {
++                        let new_node = self.node(new_branch, &route)?;
++                        (Self::prefix(&new_node) == Self::prefix(&node)).then_some(new_node)
++                    }
++                    _ => None,
++                };
++                for slot in 0..16u8 {
++                    let Some(child) = node.child(slot) else { continue };
++                    if let (RootRef::Leaf(_), false) = (child, self.leaf_rows) {
++                        continue; // virtual leaves have no rows
++                    }
++                    let child_route = [&full[..], &[slot]].concat();
++                    if let Some(new_node) = &same {
++                        let other = new_node.child(slot).unwrap_or(RootRef::Empty);
++                        if child == other {
++                            continue; // shared subtree
++                        }
++                        self.walk_from(child, child_route.clone(), other, child_route)?;
++                    } else {
++                        self.walk_from(child, child_route, deepest, deepest_route.clone())?;
++                    }
++                }
++            }
++        }
++        Ok(())
++    }
++}
++
++/// Diff walk (Cosmos IAVL v1 style) with a window `W` >= 1: commit `h` writes
++/// `TermRoots[h]`, then deletes what died at `s = h - W` by diffing the tries of
++/// `s - 1` and `s`.
++pub(crate) fn diff_walk(tx: &mut impl WriteTransaction, sealed: &crate::SealedCommit) -> Result<()> {
++    use golemdb_merkle::RootRef;
++    if !diff_walk_enabled() {
++        return Ok(());
++    }
++    let h = sealed.commit_id.get();
++    tx.append(TERM_ROOTS, &h.to_be_bytes(), &encode_term_roots(&sealed.term_roots))?;
++    let w = config().w.max(1);
++    let Some(s) = h.checked_sub(w).filter(|&s| s >= 1) else { return Ok(()) };
++    let (Some(old), Some(new)) = (
++        crate::read_roots(tx, crate::CommitId::new(s - 1))?,
++        crate::read_roots(tx, crate::CommitId::new(s))?,
++    ) else {
++        return Ok(());
++    };
++    let mut dead = Vec::new();
++    let mut cells = Diff::<_, 32> { tx: &*tx, new: new.state, table: TABLES[0], ns: Vec::new(), leaf_rows: false, dead: Vec::new(), tag: 0, cache: Default::default() };
++    cells.walk(old.state, Vec::new())?;
++    dead.append(&mut cells.dead);
++    let mut index = Diff::<_, 32> { tx: &*tx, new: new.index, table: TABLES[1], ns: Vec::new(), leaf_rows: false, dead: Vec::new(), tag: 1, cache: Default::default() };
++    index.walk(old.index, Vec::new())?;
++    dead.append(&mut index.dead);
++    if let Some(bytes) = tx.get(TERM_ROOTS, &s.to_be_bytes())? {
++        for (ns, before, after) in decode_term_roots(&bytes) {
++            let decode = |b: &[u8]| RootRef::<{ golemdb_index::BITMAP_TRIE_PATH_BYTES }>::decode(b).unwrap();
++            let mut bitmap = Diff::<_, { golemdb_index::BITMAP_TRIE_PATH_BYTES }> {
++                tx: &*tx, new: decode(&after), table: TABLES[2], ns, leaf_rows: true, dead: Vec::new(), tag: 2, cache: Default::default(),
++            };
++            bitmap.walk(decode(&before), Vec::new())?;
++            dead.append(&mut bitmap.dead);
++        }
++        tx.delete(TERM_ROOTS, &s.to_be_bytes())?;
++    }
++    dead.sort();
++    dead.dedup();
++    if config().mode == Mode::DiffWalk {
++        return delete(tx, &dead);
++    }
++    static STATE: OnceLock<Mutex<Gather>> = OnceLock::new();
++    let mut state = STATE.get_or_init(Default::default).lock().unwrap();
++    if h <= state.last {
++        *state = Gather::default(); // a new database in this process
++    }
++    state.last = h;
++    state.pending.append(&mut dead);
++    state.commits += 1;
++    if state.next >= state.batch.len() && state.commits >= config().k {
++        let mut batch = std::mem::take(&mut state.pending);
++        batch.sort();
++        state.quota = batch.len().div_ceil(config().k as usize).max(1);
++        state.batch = batch;
++        state.next = 0;
++        state.commits = 0;
++    }
++    let to = (state.next + state.quota).min(state.batch.len());
++    let slice = state.batch[state.next..to].to_vec();
++    state.next = to;
++    drop(state);
++    delete(tx, &slice)
++}
+diff --git a/crates/branch/src/lib.rs b/crates/branch/src/lib.rs
+index d87ed02..29224a0 100644
+--- a/crates/branch/src/lib.rs
++++ b/crates/branch/src/lib.rs
+@@ -129,6 +129,7 @@
+ mod buffer;
+ mod commit;
+ mod error;
++mod gcproto;
+ mod head;
+ mod journal;
+ mod manager;
+diff --git a/crates/branch/src/seal.rs b/crates/branch/src/seal.rs
+index 8fba061..8d7646a 100644
+--- a/crates/branch/src/seal.rs
++++ b/crates/branch/src/seal.rs
+@@ -25,6 +25,11 @@ pub struct SealedCommit {
+     pub index: IndexUpdate,
+     // Replayed by commit inside the head-checked writer.
+     pub(crate) writes: Writes,
++    /// GC prototype: rows this commit superseded, by table.
++    pub(crate) dead: Vec<(golemdb_storage::Table, Vec<Vec<u8>>)>,
++    /// GC prototype (diff walk): each changed term's namespace and its bitmap
++    /// roots before and after this commit, encoded.
++    pub(crate) term_roots: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+ }
+ 
+ pub(crate) fn compute(
+@@ -84,6 +89,31 @@ pub(crate) fn compute(
+         }
+     }
+     let index_update = index.apply(&mut tx, index_root, postings)?;
++    let gc_on = crate::gcproto::enabled();
++    let dead = if gc_on {
++        let [index_trie, bitmap_trie, containers] = index.take_dead();
++        vec![
++            (golemdb_cells::tables::CELL_TRIE, cells.take_dead()),
++            (golemdb_index::tables::INDEX_TRIE, index_trie),
++            (golemdb_index::tables::BITMAP_TRIE, bitmap_trie),
++            (golemdb_index::tables::BITMAP_CONTAINER, containers),
++        ]
++    } else {
++        Vec::new()
++    };
++    let term_roots = if crate::gcproto::diff_walk_enabled() {
++        let mut out = Vec::new();
++        for change in &index_update.changed_terms {
++            let key = change.term.as_bytes();
++            let before = origin.get(golemdb_index::tables::INDEX, key)?.unwrap_or_default();
++            let after = golemdb_storage::ReadTransaction::get(&tx, golemdb_index::tables::INDEX, key)?
++                .unwrap_or_default();
++            out.push((change.term.routing_path(hasher).to_vec(), before, after));
++        }
++        out
++    } else {
++        Vec::new()
++    };
+     Ok(SealedCommit {
+         commit_id,
+         state_root: cells_update.root.hash(hasher),
+@@ -91,6 +121,8 @@ pub(crate) fn compute(
+         cells: cells_update,
+         index: index_update,
+         writes: tx.into_writes(),
++        dead,
++        term_roots,
+     })
+ }
+ 
+diff --git a/crates/cells/src/cell_trie.rs b/crates/cells/src/cell_trie.rs
+index f3ea217..daa1a2e 100644
+--- a/crates/cells/src/cell_trie.rs
++++ b/crates/cells/src/cell_trie.rs
+@@ -20,6 +20,10 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
+         }
+     }
+ 
++    pub(crate) fn take_dead(&self) -> Vec<Vec<u8>> {
++        self.trie.take_dead()
++    }
++
+     pub(crate) fn at(self, commit: u64) -> Self {
+         Self {
+             trie: self.trie.at(commit),
+diff --git a/crates/cells/src/cells.rs b/crates/cells/src/cells.rs
+index 0499369..c805145 100644
+--- a/crates/cells/src/cells.rs
++++ b/crates/cells/src/cells.rs
+@@ -46,6 +46,11 @@ impl<'h, H: HashProvider> Cells<'h, H> {
+         }
+     }
+ 
++    /// GC prototype: keys of `CellTrie` rows superseded so far.
++    pub fn take_dead(&self) -> Vec<Vec<u8>> {
++        self.trie.take_dead()
++    }
++
+     /// Store new trie rows at `commit`, the commit this batch publishes.
+     pub fn at(self, commit: u64) -> Self {
+         Self {
+diff --git a/crates/index/src/bitmap_trie.rs b/crates/index/src/bitmap_trie.rs
+index 7724abd..d0133c8 100644
+--- a/crates/index/src/bitmap_trie.rs
++++ b/crates/index/src/bitmap_trie.rs
+@@ -11,11 +11,13 @@ use crate::{
+ pub(crate) struct BitmapTrie<'h, H: HashProvider> {
+     hasher: &'h H,
+     commit: u64,
++    /// GC prototype: superseded `BitmapTrie` and `BitmapContainer` keys.
++    pub(crate) dead: std::cell::RefCell<(Vec<Vec<u8>>, Vec<Vec<u8>>)>,
+ }
+ 
+ impl<'h, H: HashProvider> BitmapTrie<'h, H> {
+     pub(crate) fn new(hasher: &'h H) -> Self {
+-        Self { hasher, commit: 0 }
++        Self { hasher, commit: 0, dead: Default::default() }
+     }
+ 
+     pub(crate) fn at(self, commit: u64) -> Self {
+@@ -95,7 +97,8 @@ impl<'h, H: HashProvider> BitmapTrie<'h, H> {
+             }
+             previous = Some(hi);
+             let path = path::path_bytes(hi)?;
+-            let mut container = match trie.get(tx, root, &path)? {
++            let old = trie.get(tx, root, &path)?;
++            let mut container = match old {
+                 Some(leaf) => self.load(tx, term, leaf)?,
+                 None => BitmapContainer::empty(hi)?,
+             };
+@@ -110,6 +113,9 @@ impl<'h, H: HashProvider> BitmapTrie<'h, H> {
+             if !changed {
+                 continue;
+             }
++            if let Some(leaf) = old.filter(|leaf| leaf.commit != self.commit) {
++                (self.dead.borrow_mut().1).push(version_key(leaf.commit, term, &leaf.path));
++            }
+             if container.is_empty() {
+                 edits.push((path, None));
+             } else {
+@@ -124,6 +130,7 @@ impl<'h, H: HashProvider> BitmapTrie<'h, H> {
+             }
+         }
+         let root = trie.apply(tx, root, edits)?;
++        (self.dead.borrow_mut().0).extend(trie.take_dead());
+         Ok((root != RootRef::Empty).then_some(root))
+     }
+ }
+diff --git a/crates/index/src/index/mod.rs b/crates/index/src/index/mod.rs
+index 1f42b24..a3d8e22 100644
+--- a/crates/index/src/index/mod.rs
++++ b/crates/index/src/index/mod.rs
+@@ -32,6 +32,12 @@ impl<'h, H: HashProvider> Index<'h, H> {
+         }
+     }
+ 
++    /// GC prototype: superseded `IndexTrie`, `BitmapTrie` and `BitmapContainer` keys.
++    pub fn take_dead(&self) -> [Vec<Vec<u8>>; 3] {
++        let (bitmap, containers) = std::mem::take(&mut *self.bitmaps.dead.borrow_mut());
++        [self.trie.take_dead(), bitmap, containers]
++    }
++
+     /// Store new trie rows and containers at `commit`, the commit this batch
+     /// publishes.
+     pub fn at(self, commit: u64) -> Self {
+diff --git a/crates/index/src/index_trie.rs b/crates/index/src/index_trie.rs
+index dd180b4..e09408a 100644
+--- a/crates/index/src/index_trie.rs
++++ b/crates/index/src/index_trie.rs
+@@ -17,6 +17,10 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
+         }
+     }
+ 
++    pub(crate) fn take_dead(&self) -> Vec<Vec<u8>> {
++        self.trie.take_dead()
++    }
++
+     pub(crate) fn at(self, commit: u64) -> Self {
+         Self {
+             trie: self.trie.at(commit),
+diff --git a/crates/integration-tests/tests/gcproto.rs b/crates/integration-tests/tests/gcproto.rs
+new file mode 100644
+index 0000000..e4a7785
+--- /dev/null
++++ b/crates/integration-tests/tests/gcproto.rs
+@@ -0,0 +1,193 @@
++//! GC prototype check (benchmark scratch copy only). Run with GOLEMDB_GC=stale|sweep,
++//! GOLEMDB_GC_W and GOLEMDB_GC_K set. After every commit, stored trie rows must be
++//! exactly the rows reachable from the retained roots (`stale`), or lie between the
++//! rows reachable from the head and those reachable from the last W + 2K roots (`sweep`).
++use std::collections::{BTreeMap, BTreeSet};
++
++use golemdb_branch::{Branches, CommitId, Head, read_roots, write_head};
++use golemdb_cells::{CellKey, CellNameRef, CellType, CellValue, CellValueRef, tables};
++use golemdb_index::{BITMAP_TRIE_PATH_BYTES, IndexTerm, tables as itables};
++use golemdb_merkle::{BranchNodeCompact, HashProvider, Keccak256Hasher, RootRef, version_key};
++use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
++
++const HASH: Keccak256Hasher = Keccak256Hasher;
++
++fn pack(route: &[u8]) -> Vec<u8> {
++    let packed = route
++        .chunks(2)
++        .map(|pair| (pair[0] << 4) | pair.get(1).copied().unwrap_or(0));
++    [vec![route.len() as u8], packed.collect()].concat()
++}
++
++/// Rows reachable from `root` in `table` (and, for bitmap tries, their containers).
++fn reach<const N: usize>(
++    tx: &impl ReadTransaction,
++    table: Table,
++    ns: &[u8],
++    root: RootRef<N>,
++    containers: bool,
++    strict: bool,
++    out: &mut BTreeSet<(Table, Vec<u8>)>,
++) {
++    let mut stack = vec![(root, Vec::new())];
++    while let Some((root, route)) = stack.pop() {
++        match root {
++            RootRef::Empty => {}
++            RootRef::Leaf(leaf) => {
++                if containers {
++                    out.insert((
++                        itables::BITMAP_CONTAINER,
++                        version_key(leaf.commit, ns, &leaf.path),
++                    ));
++                }
++            }
++            RootRef::Branch(branch) => {
++                let key = version_key(branch.commit, ns, &pack(&route));
++                let Some(bytes) = tx.get(table, &key).unwrap() else {
++                    assert!(!strict, "reachable row {key:?} in {table:?} is not stored");
++                    continue;
++                };
++                if !out.insert((table, key)) {
++                    continue;
++                }
++                let node = BranchNodeCompact::<N>::decode(&bytes).unwrap();
++                let prefix = (0..node.prefix_len() as usize)
++                    .map(|i| (node.prefix()[i / 2] >> (4 * (1 - i % 2))) & 15);
++                let base: Vec<u8> = route.iter().copied().chain(prefix).collect();
++                for slot in 0..16 {
++                    if let Some(child) = node.child(slot) {
++                        stack.push((child, [&base[..], &[slot]].concat()));
++                    }
++                }
++            }
++        }
++    }
++}
++
++/// Rows reachable from commit `c`'s roots, given that commit's bitmap roots.
++fn reachable(
++    tx: &impl ReadTransaction,
++    c: u64,
++    bitmaps: &[(Vec<u8>, RootRef<BITMAP_TRIE_PATH_BYTES>)],
++    strict: bool,
++    out: &mut BTreeSet<(Table, Vec<u8>)>,
++) {
++    let roots = read_roots(tx, CommitId::new(c)).unwrap().unwrap();
++    reach(tx, tables::CELL_TRIE, &[], roots.state, false, strict, out);
++    reach(tx, itables::INDEX_TRIE, &[], roots.index, false, strict, out);
++    for (ns, root) in bitmaps {
++        reach(tx, itables::BITMAP_TRIE, ns, *root, true, strict, out);
++    }
++}
++
++fn stored(tx: &impl ReadTransaction) -> BTreeSet<(Table, Vec<u8>)> {
++    let mut rows = BTreeSet::new();
++    for table in [
++        tables::CELL_TRIE,
++        itables::INDEX_TRIE,
++        itables::BITMAP_TRIE,
++        itables::BITMAP_CONTAINER,
++    ] {
++        for row in scan_prefix(tx, table, vec![]).unwrap() {
++            rows.insert((table, row.unwrap().0));
++        }
++    }
++    rows
++}
++
++fn bitmap_roots(tx: &impl ReadTransaction) -> Vec<(Vec<u8>, RootRef<BITMAP_TRIE_PATH_BYTES>)> {
++    scan_prefix(tx, itables::INDEX, vec![])
++        .unwrap()
++        .map(|row| {
++            let (term, value) = row.unwrap();
++            let ns = IndexTerm::decode(&term).unwrap().routing_path(&HASH).to_vec();
++            (ns, RootRef::decode(&value).unwrap())
++        })
++        .collect()
++}
++
++#[test]
++fn gc_prototype_keeps_exactly_the_retained_rows() {
++    let mode = std::env::var("GOLEMDB_GC").unwrap_or_default();
++    if mode.is_empty() || mode == "none" {
++        return;
++    }
++    let env = |name: &str, default: u64| {
++        std::env::var(name).ok().map(|v| v.parse().unwrap()).unwrap_or(default)
++    };
++    let (w, k) = (env("GOLEMDB_GC_W", 0), env("GOLEMDB_GC_K", 50));
++    let db = MemoryStore::new();
++    let mut tx = db.begin_write().unwrap();
++    let empty = HASH.hash(&[]);
++    let head = Head {
++        commit_id: CommitId::new(0),
++        state_root: empty,
++        index_root: empty,
++    };
++    write_head(&mut tx, &head).unwrap();
++    tx.commit().unwrap();
++    let branches = Branches::new(db.clone(), HASH).unwrap();
++    let mut bitmaps = BTreeMap::new();
++    let mut seed = 1u64;
++    let mut rand = move |n: u64| {
++        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
++        (seed >> 33) % n
++    };
++    for commit in 1..=200u64 {
++        let branch = branches.begin().unwrap();
++        branches
++            .write(branch, |cells| {
++                for _ in 0..40 {
++                    // Records over three bitmap containers; a few terms per attribute.
++                    let id = golemdb_index::path::join(rand(3), 64 + rand(300) as u16).unwrap();
++                    let name = ["tag", "owner", "note"][rand(3) as usize];
++                    let key = CellKey::new(id, CellNameRef::raw(name.as_bytes()));
++                    if rand(4) == 0 {
++                        cells.delete(key);
++                    } else {
++                        let value: CellValue = CellValueRef::new(
++                            CellType::Str,
++                            format!("v{}", rand(6)).as_bytes(),
++                            name != "note",
++                        )
++                        .unwrap()
++                        .into();
++                        cells.put(key, value);
++                    }
++                }
++                Ok::<_, ()>(())
++            })
++            .unwrap();
++        assert_eq!(branches.commit(branch).unwrap(), CommitId::new(commit));
++        let tx = db.begin_read().unwrap();
++        bitmaps.insert(commit, bitmap_roots(&tx));
++        let rows = stored(&tx);
++        // Every root inside the window must be fully stored.
++        let mut retained = BTreeSet::new();
++        for c in commit.saturating_sub(w).max(1)..=commit {
++            reachable(&tx, c, &bitmaps[&c], true, &mut retained);
++        }
++        let mut window = BTreeSet::new();
++        let span = if mode == "sweep" { w + 2 * k } else { w };
++        for c in commit.saturating_sub(span).max(1)..=commit {
++            reachable(&tx, c, &bitmaps[&c], false, &mut window);
++        }
++        if mode == "marksweep" {
++            let n = env("GOLEMDB_GC_N", 50);
++            let mut head = BTreeSet::new();
++            reachable(&tx, commit, &bitmaps[&commit], true, &mut head);
++            if commit % n == 0 {
++                assert_eq!(rows, head, "commit {commit}: sweep left other rows than the head's");
++            } else {
++                assert!(head.is_subset(&rows), "commit {commit}: a live row was deleted");
++            }
++        } else if mode == "stale" || mode == "diffwalk" {
++            assert_eq!(rows, window, "commit {commit}: stored rows differ from the window's");
++        } else {
++            assert!(retained.is_subset(&rows), "commit {commit}: a live row was deleted");
++            if commit % 50 == 0 {
++                eprintln!("commit {commit}: {} stored, {} retained", rows.len(), retained.len());
++            }
++        }
++    }
++}
+diff --git a/crates/merkle/src/trie.rs b/crates/merkle/src/trie.rs
+index c204f85..9a1dca2 100644
+--- a/crates/merkle/src/trie.rs
++++ b/crates/merkle/src/trie.rs
+@@ -1,3 +1,5 @@
++use std::cell::RefCell;
++
+ use crate::{BranchNodeCompact, Hash, HashProvider, MerkleError, Result, path};
+ use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
+ 
+@@ -107,6 +109,8 @@ pub struct Trie<'h, H: HashProvider, const N: usize> {
+     commit: u64,
+     namespace: Vec<u8>,
+     leaf_rows: bool,
++    /// GC prototype: keys of stored rows this trie's updates superseded.
++    dead: RefCell<Vec<Vec<u8>>>,
+ }
+ 
+ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
+@@ -140,6 +144,19 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
+             commit: 0,
+             namespace: Vec::new(),
+             leaf_rows: false,
++            dead: RefCell::default(),
++        }
++    }
++
++    /// GC prototype: take the keys of rows superseded since the last call.
++    pub fn take_dead(&self) -> Vec<Vec<u8>> {
++        std::mem::take(&mut self.dead.borrow_mut())
++    }
++
++    fn died(&self, branch: BranchRef, route: &[u8]) {
++        // Rows written earlier by this same commit never reach disk.
++        if branch.commit != self.commit {
++            self.dead.borrow_mut().push(self.node_key(branch.commit, route));
+         }
+     }
+ 
+@@ -511,6 +528,9 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
+                 None => Edited::New(prefix, Box::new(children)),
+             });
+         }
++        if let Some(branch) = stored {
++            self.died(branch, route);
++        }
+         self.collapse(tx, prefix, edited_children, child_route)
+     }
+ 
+@@ -538,6 +558,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
+                     Edited::Stored(RootRef::Branch(branch)) => {
+                         child_route.push(slot as u8);
+                         let child = self.load(tx, branch, &child_route)?;
++                        self.died(branch, &child_route);
+                         (child.unpack_prefix(), Box::new(child.children()))
+                     }
+                     leaf => return Ok(leaf),

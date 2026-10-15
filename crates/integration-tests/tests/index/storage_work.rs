@@ -205,7 +205,12 @@ fn failure_after_both_tries_change_is_rolled_back_with_flat_state() {
             old
         );
     }
-    assert_eq!(index.reopen(&latest, root.hash(&HASH)).unwrap(), root);
+    assert_eq!(
+        index
+            .reopen(&latest, root.hash(&HASH), root.branch_commit())
+            .unwrap(),
+        root
+    );
     let bitmap = index.bitmap(&latest, &term(0)).unwrap().unwrap();
     assert!(!bitmap.treemap().contains(65536));
     assert!(bitmap.treemap().contains(1));

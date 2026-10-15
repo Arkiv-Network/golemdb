@@ -39,11 +39,14 @@ pub(crate) fn compute(
         .checked_add(1)
         .map(crate::CommitId::new)
         .ok_or(BranchError::CommitNumberExhausted)?;
-    let cells = Cells::new(hasher);
-    let index = Index::new(hasher);
+    // Competing seals share this commit number, but only the published one
+    // leaves its buffer.
+    let cells = Cells::new(hasher).at(commit_id.get());
+    let index = Index::new(hasher).at(commit_id.get());
     // Reopen against the committed origin, before applying ANY staged cell.
-    let cell_root = cells.reopen(origin, head.state_root)?;
-    let index_root = index.reopen(origin, head.index_root)?;
+    let (state_commit, index_commit) = crate::root_commits(origin, &head, hasher)?;
+    let cell_root = cells.reopen(origin, head.state_root, state_commit)?;
+    let index_root = index.reopen(origin, head.index_root, index_commit)?;
     let roots_key = CellKey::new(
         system::ROOTS.id,
         CellNameRef::raw(&head.commit_id.get().to_be_bytes()),

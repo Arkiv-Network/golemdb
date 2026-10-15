@@ -1,8 +1,8 @@
 use crate::INDEX_BRANCH_DOMAIN;
-use golemdb_merkle::{Hash, HashProvider, LeafRef, RootRef, Trie};
+use golemdb_merkle::{BranchRef, Hash, HashProvider, LeafRef, RootRef, Trie};
 use golemdb_storage::{ReadCursor, ReadTransaction, WriteTransaction};
 
-use crate::{INDEX_TRIE_PATH_BYTES, IndexError, IndexTerm, Result, tables};
+use crate::{BITMAP_TRIE_PATH_BYTES, INDEX_TRIE_PATH_BYTES, IndexError, IndexTerm, Result, tables};
 
 pub(crate) struct IndexTrie<'h, H: HashProvider> {
     trie: Trie<'h, H, INDEX_TRIE_PATH_BYTES>,
@@ -17,11 +17,18 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
         }
     }
 
-    fn leaf(&self, term: &IndexTerm, bitmap: Hash) -> LeafRef<INDEX_TRIE_PATH_BYTES> {
-        LeafRef {
-            path: term.routing_path(self.hasher),
-            hash: term.leaf_hash(&bitmap, self.hasher),
+    pub(crate) fn at(self, commit: u64) -> Self {
+        Self {
+            trie: self.trie.at(commit),
+            ..self
         }
+    }
+
+    fn leaf(&self, term: &IndexTerm, bitmap: Hash) -> LeafRef<INDEX_TRIE_PATH_BYTES> {
+        LeafRef::new(
+            term.routing_path(self.hasher),
+            term.leaf_hash(&bitmap, self.hasher),
+        )
     }
 
     pub(crate) fn check(
@@ -61,6 +68,7 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
         &self,
         tx: &impl ReadTransaction,
         hash: Hash,
+        branch_commit: Option<u64>,
     ) -> Result<RootRef<INDEX_TRIE_PATH_BYTES>> {
         if hash == self.hasher.hash(&[]) {
             if tx.cursor(tables::INDEX, b"")?.next()?.is_some() {
@@ -68,8 +76,8 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
             }
             return Ok(RootRef::Empty);
         }
-        if tx.get(tables::INDEX_TRIE, &hash)?.is_some() {
-            let root = RootRef::Branch(hash);
+        if let Some(commit) = branch_commit {
+            let root = RootRef::Branch(BranchRef { hash, commit });
             self.trie.validate_root(tx, root)?;
             return Ok(root);
         }
@@ -89,12 +97,20 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
     }
 }
 
-pub(crate) fn decode_root(bytes: &[u8], hasher: &impl HashProvider) -> Result<Hash> {
-    let hash: Hash = bytes
-        .try_into()
-        .map_err(|_| IndexError::Corruption("bitmap root is not 32 bytes"))?;
-    if hash == hasher.hash(&[]) {
+/// An Index row holds the encoded bitmap root (see [`RootRef::encode`]); only
+/// its hash is committed, through the term's IndexTrie leaf.
+pub(crate) fn decode_bitmap_root(
+    bytes: &[u8],
+    hasher: &impl HashProvider,
+) -> Result<RootRef<BITMAP_TRIE_PATH_BYTES>> {
+    let root = RootRef::decode(bytes)
+        .map_err(|_| IndexError::Corruption("malformed bitmap root in Index row"))?;
+    if root == RootRef::Empty || root.hash(hasher) == hasher.hash(&[]) {
         return Err(IndexError::Corruption("empty bitmap root in Index row"));
     }
-    Ok(hash)
+    Ok(root)
+}
+
+pub(crate) fn decode_root(bytes: &[u8], hasher: &impl HashProvider) -> Result<Hash> {
+    Ok(decode_bitmap_root(bytes, hasher)?.hash(hasher))
 }

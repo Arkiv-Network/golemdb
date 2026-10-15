@@ -27,7 +27,7 @@
 //! tx.commit()?;
 //! let read = store.begin_read()?;
 //! assert!(index.bitmap(&read, &term)?.unwrap().treemap().contains(42));
-//! assert_eq!(index.reopen(&read, update.root.hash(&hasher))?, update.root);
+//! assert_eq!(index.reopen(&read, update.root.hash(&hasher), update.root.branch_commit())?, update.root);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -98,7 +98,7 @@ pub const INDEX_BRANCH_DOMAIN: u8 = 0x03;
 /// Prepended to the container's six-byte record-ID prefix and canonical Roaring
 /// bytes: `H(BITMAP_LEAF_DOMAIN || hi48 || roaring)`. This identifies a bitmap
 /// leaf independently of index leaves and branch nodes; including `hi48` binds
-/// the container to its routing path. The digest also keys its stored row.
+/// the container to its routing path.
 /// See [Domain Separation and Preimage Encoding](https://github.com/golemfactory/golem-db/blob/main/docs/golem-db-design.md#domain-separation-and-preimage-encoding).
 pub const BITMAP_LEAF_DOMAIN: u8 = 0x04;
 

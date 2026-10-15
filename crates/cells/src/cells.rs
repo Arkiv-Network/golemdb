@@ -46,6 +46,13 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         }
     }
 
+    /// Store new trie rows at `commit`, the commit this batch publishes.
+    pub fn at(self, commit: u64) -> Self {
+        Self {
+            trie: self.trie.at(commit),
+        }
+    }
+
     /// Read a value from the snapshot's `Cell` table. The owned result outlives the transaction.
     /// This is not a proof or an authenticated read against a supplied root.
     pub fn get(&self, tx: &impl ReadTransaction, key: &CellKey) -> Result<Option<CellValue>> {
@@ -70,8 +77,9 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         &self,
         tx: &impl ReadTransaction,
         hash: Hash,
+        branch_commit: Option<u64>,
     ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
-        self.trie.reopen(tx, hash)
+        self.trie.reopen(tx, hash, branch_commit)
     }
 
     /// Apply each key's final value once, skipping no-ops and absent deletions.

@@ -1,0 +1,132 @@
+diff --git a/crates/branch/src/commit.rs b/crates/branch/src/commit.rs
+index e1ffcd3..2d4dd44 100644
+--- a/crates/branch/src/commit.rs
++++ b/crates/branch/src/commit.rs
+@@ -41,6 +41,7 @@ fn stage(tx: &mut impl WriteTransaction, origin: CommitId, sealed: &SealedCommit
+             }
+         }
+     }
++    crate::msweep::collect(tx, sealed)?;
+     // History and change-set tables remain deferred. Allocator/binding changes
+     // already staged as cells participate in the same sealed write set.
+     write_head(
+diff --git a/crates/branch/src/lib.rs b/crates/branch/src/lib.rs
+index 58ca591..aea228c 100644
+--- a/crates/branch/src/lib.rs
++++ b/crates/branch/src/lib.rs
+@@ -131,6 +131,7 @@ mod commit;
+ mod error;
+ mod head;
+ mod journal;
++mod msweep;
+ mod manager;
+ mod overlay;
+ mod scan;
+diff --git a/crates/branch/src/msweep.rs b/crates/branch/src/msweep.rs
+new file mode 100644
+index 0000000..46996d8
+--- /dev/null
++++ b/crates/branch/src/msweep.rs
+@@ -0,0 +1,102 @@
++//! Benchmark prototype: head-only periodic mark-and-sweep on hash-keyed tries.
++//! `GOLEMDB_GC=marksweep`, `GOLEMDB_GC_N` = period in commits (default 50).
++//! Every N commits, mark every row reachable from the new head, then delete the
++//! rest of the four trie tables, in key order, in the commit's transaction.
++use std::collections::HashSet;
++use std::sync::OnceLock;
++
++use golemdb_cells::{CELL_TRIE_PATH_BYTES, tables as cells};
++use golemdb_index::{BITMAP_TRIE_PATH_BYTES, INDEX_TRIE_PATH_BYTES, tables as index};
++use golemdb_merkle::{BranchNodeCompact, Hash, RootRef};
++use golemdb_storage::{ReadTransaction, Table, WriteTransaction, scan_prefix};
++
++use crate::{Result, SealedCommit};
++
++fn period() -> Option<u64> {
++    static P: OnceLock<Option<u64>> = OnceLock::new();
++    *P.get_or_init(|| {
++        (std::env::var("GOLEMDB_GC").as_deref() == Ok("marksweep")).then(|| {
++            std::env::var("GOLEMDB_GC_N").ok().map(|n| n.parse().unwrap()).unwrap_or(50)
++        })
++    })
++}
++
++/// Mark the branch rows of one trie, and (for bitmap tries) its container leaves.
++fn mark<const N: usize>(
++    tx: &impl ReadTransaction,
++    table: Table,
++    root: Option<Hash>,
++    containers: Option<&mut HashSet<Hash>>,
++    marked: &mut HashSet<Hash>,
++) -> Result<()> {
++    let mut leaves = containers;
++    let mut stack: Vec<Hash> = root.into_iter().collect();
++    while let Some(hash) = stack.pop() {
++        if !marked.insert(hash) {
++            continue;
++        }
++        let bytes = tx.get(table, &hash)?.expect("reachable branch");
++        let node = BranchNodeCompact::<N>::decode(&bytes).expect("valid branch");
++        for slot in 0..16 {
++            match node.child(slot) {
++                Some(RootRef::Branch(child)) => stack.push(child),
++                Some(RootRef::Leaf(leaf)) => {
++                    if let Some(set) = leaves.as_deref_mut() {
++                        set.insert(leaf.hash);
++                    }
++                }
++                _ => {}
++            }
++        }
++    }
++    Ok(())
++}
++
++fn sweep(tx: &mut impl WriteTransaction, table: Table, live: &HashSet<Hash>) -> Result<()> {
++    let dead: Vec<Vec<u8>> = scan_prefix(tx, table, vec![])?
++        .map(|row| row.map(|(key, _)| key))
++        .collect::<std::result::Result<Vec<_>, _>>()?
++        .into_iter()
++        .filter(|key| key.len() != 32 || !live.contains(&<Hash>::try_from(key.as_slice()).unwrap()))
++        .collect();
++    for key in dead {
++        tx.delete(table, &key)?;
++    }
++    Ok(())
++}
++
++pub(crate) fn collect(tx: &mut impl WriteTransaction, sealed: &SealedCommit) -> Result<()> {
++    let Some(n) = period() else { return Ok(()) };
++    if sealed.commit_id.get() % n != 0 {
++        return Ok(());
++    }
++    let branch = |root: RootRef<32>| match root {
++        RootRef::Branch(hash) => Some(hash),
++        _ => None,
++    };
++    let (mut cell_rows, mut index_rows, mut bitmap_rows, mut container_rows) =
++        (HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new());
++    mark::<CELL_TRIE_PATH_BYTES>(tx, cells::CELL_TRIE, branch(sealed.cells.root), None, &mut cell_rows)?;
++    mark::<INDEX_TRIE_PATH_BYTES>(tx, index::INDEX_TRIE, branch(sealed.index.root), None, &mut index_rows)?;
++    let roots: Vec<Hash> = scan_prefix(tx, index::INDEX, vec![])?
++        .map(|row| row.map(|(_, value)| <Hash>::try_from(value.as_slice()).unwrap()))
++        .collect::<std::result::Result<_, _>>()?;
++    for hash in roots {
++        if tx.get(index::BITMAP_CONTAINER, &hash)?.is_some() {
++            container_rows.insert(hash); // a single-container bitmap
++        } else {
++            mark::<BITMAP_TRIE_PATH_BYTES>(
++                tx,
++                index::BITMAP_TRIE,
++                Some(hash),
++                Some(&mut container_rows),
++                &mut bitmap_rows,
++            )?;
++        }
++    }
++    sweep(tx, cells::CELL_TRIE, &cell_rows)?;
++    sweep(tx, index::INDEX_TRIE, &index_rows)?;
++    sweep(tx, index::BITMAP_TRIE, &bitmap_rows)?;
++    sweep(tx, index::BITMAP_CONTAINER, &container_rows)?;
++    Ok(())
++}

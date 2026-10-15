@@ -121,6 +121,12 @@ pub trait WriteTransaction: ReadTransaction {
     /// Insert only, creating the table transactionally if needed.
     /// Existing keys return `AlreadyExists`, preserving the row.
     fn insert(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()>;
+    /// Insert a row whose key sorts after every key in the table, creating the
+    /// table transactionally if needed. A key equal to the last returns
+    /// `AlreadyExists`; backends may return `OutOfOrder` for an earlier key.
+    fn append(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()> {
+        self.insert(table, key, value)
+    }
     /// Return whether a row was removed. An absent table returns `false`
     /// without creating it.
     fn delete(&mut self, table: Table, key: &[u8]) -> Result<bool>;

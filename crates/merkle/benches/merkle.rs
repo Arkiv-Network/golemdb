@@ -78,10 +78,7 @@ fn leaf<const N: usize>(id: u32, clustered: bool, hasher: &impl HashProvider) ->
     }
     // Unique keys even for six-byte paths; clustered keys share the leading bytes.
     path[N - 4..].copy_from_slice(&id.to_be_bytes());
-    LeafRef {
-        path,
-        hash: hasher.hash_parts(&[&[BENCH_LEAF_DOMAIN], &path]),
-    }
+    LeafRef::new(path, hasher.hash_parts(&[&[BENCH_LEAF_DOMAIN], &path]))
 }
 
 fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider) {
@@ -122,15 +119,18 @@ fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashP
                     }
                 })
             });
+            // Timed writes belong to the next commit, as seal's do: new keys after the
+            // fixture's, never overwriting its rows in place.
+            let next = Trie::<_, N>::new(TABLE, BENCH_BRANCH_DOMAIN, hasher).at(1);
             for operation in ["insert", "replace", "delete"] {
                 let mut replacement = existing;
                 replacement.hash = hasher.hash(b"replacement payload");
                 // Verify fixture semantics outside measurements.
                 let mut check = db.begin_write().unwrap();
                 let changed = match operation {
-                    "insert" => trie.insert(&mut check, root, absent),
-                    "replace" => trie.insert(&mut check, root, replacement),
-                    _ => trie.remove(&mut check, root, &existing.path),
+                    "insert" => next.insert(&mut check, root, absent),
+                    "replace" => next.insert(&mut check, root, replacement),
+                    _ => next.remove(&mut check, root, &existing.path),
                 }
                 .unwrap();
                 assert_ne!(changed, root);
@@ -143,12 +143,12 @@ fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashP
                         |tx| {
                             black_box(
                                 match operation {
-                                    "insert" => trie.insert(tx, black_box(root), black_box(absent)),
+                                    "insert" => next.insert(tx, black_box(root), black_box(absent)),
                                     "replace" => {
-                                        trie.insert(tx, black_box(root), black_box(replacement))
+                                        next.insert(tx, black_box(root), black_box(replacement))
                                     }
                                     _ => {
-                                        trie.remove(tx, black_box(root), black_box(&existing.path))
+                                        next.remove(tx, black_box(root), black_box(&existing.path))
                                     }
                                 }
                                 .unwrap(),

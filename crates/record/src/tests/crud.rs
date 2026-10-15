@@ -5,7 +5,7 @@ use golemdb_cells::{
     reserved, system,
 };
 use golemdb_merkle::{HashProvider, Keccak256Hasher, RootRef};
-use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction};
+use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
 const OTHER: RecordKey = RecordKey([0x43; 32]);
@@ -152,17 +152,17 @@ fn initialize(db: &impl Store) {
     let update = Cells::new(&hash)
         .apply(&mut tx, RootRef::Empty, changes)
         .unwrap();
-    tx.put(
-        Table("Superblock"),
-        b"head",
-        &[
-            0u64.to_be_bytes().as_slice(),
-            &update.root.hash(&hash),
-            &hash.hash(&[]),
-        ]
-        .concat(),
-    )
-    .unwrap();
+    let head = golemdb_branch::Head {
+        commit_id: golemdb_branch::CommitId::new(0),
+        state_root: update.root.hash(&hash),
+        index_root: hash.hash(&[]),
+    };
+    golemdb_branch::write_head(&mut tx, &head).unwrap();
+    let roots = golemdb_branch::Roots {
+        state: update.root,
+        index: RootRef::Empty,
+    };
+    golemdb_branch::write_roots(&mut tx, head.commit_id, &roots).unwrap();
     tx.commit().unwrap();
 }
 

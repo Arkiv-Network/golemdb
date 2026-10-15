@@ -165,6 +165,15 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
             .as_bytes(),
         Some([genesis.state_root, genesis.index_root].concat().as_slice())
     );
+    // `#roots` commits the hashes; the Roots table locates both commits' tries.
+    let roots = |commit| golemdb_branch::read_roots(&tx, golemdb_branch::CommitId::new(commit));
+    let first = roots(0).unwrap().unwrap();
+    assert_eq!(first.state.hash(&hasher), genesis.state_root);
+    assert_eq!(first.index, golemdb_merkle::RootRef::Empty);
+    assert_eq!(
+        roots(1).unwrap().unwrap().state.hash(&hasher),
+        reopened.info().state_root
+    );
     genesis
 }
 
@@ -325,8 +334,9 @@ fn unsupported_format_ids_and_missing_trie_roots_are_rejected() {
         ));
     }
     let db = MemoryStore::new();
-    let opened = Database::from_store(db.clone(), &config()).unwrap();
-    let root = opened.info().state_root;
+    Database::from_store(db.clone(), &config()).unwrap();
+    // The genesis state root is a branch stored at commit 0, at the empty route.
+    let root = golemdb_merkle::version_key(0, &[], &[0]);
     let mut tx = db.begin_write().unwrap();
     assert!(tx.delete(tables::CELL_TRIE, &root).unwrap());
     tx.commit().unwrap();

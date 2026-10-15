@@ -3,7 +3,7 @@ use golemdb_cells::{
     CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, tables,
 };
 use golemdb_index::{Index, IndexTerm, PostingChange};
-use golemdb_merkle::{Blake3Hasher, Hash, HashProvider, Keccak256Hasher, RootRef};
+use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher, RootRef};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 use std::{
     collections::BTreeMap,
@@ -14,7 +14,7 @@ use std::{
 };
 
 const SUPERBLOCK: Table = Table("Superblock");
-const TABLES: [Table; 7] = [
+const TABLES: [Table; 8] = [
     tables::CELL,
     tables::CELL_TRIE,
     golemdb_index::tables::INDEX,
@@ -22,6 +22,7 @@ const TABLES: [Table; 7] = [
     golemdb_index::tables::BITMAP_TRIE,
     golemdb_index::tables::BITMAP_CONTAINER,
     SUPERBLOCK,
+    Table("Roots"),
 ];
 fn key(id: u64, name: &[u8]) -> CellKey {
     CellKey::new(id, CellNameRef::raw(name))
@@ -31,17 +32,27 @@ fn value(text: &str, indexed: bool) -> CellValue {
         .unwrap()
         .into()
 }
-fn head(tx: &mut impl WriteTransaction, id: u64, state: Hash, index: Hash) {
-    tx.put(
-        SUPERBLOCK,
-        b"head",
-        &[id.to_be_bytes().as_slice(), &state, &index].concat(),
-    )
-    .unwrap();
+/// Head row plus the `Roots` row that locates its tries.
+fn head(
+    tx: &mut impl WriteTransaction,
+    hash: &impl HashProvider,
+    id: u64,
+    state: RootRef<32>,
+    index: RootRef<32>,
+) {
+    let commit_id = golemdb_branch::CommitId::new(id);
+    let head = golemdb_branch::Head {
+        commit_id,
+        state_root: state.hash(hash),
+        index_root: index.hash(hash),
+    };
+    golemdb_branch::write_head(tx, &head).unwrap();
+    golemdb_branch::write_roots(tx, commit_id, &golemdb_branch::Roots { state, index }).unwrap();
 }
 fn seed(db: &impl Store, hash: &impl HashProvider, id: u64, rows: &[(CellKey, CellValue)]) {
     let mut tx = db.begin_write().unwrap();
     let cells = Cells::new(hash)
+        .at(id)
         .apply(
             &mut tx,
             RootRef::Empty,
@@ -64,9 +75,10 @@ fn seed(db: &impl Store, hash: &impl HashProvider, id: u64, rows: &[(CellKey, Ce
             record_id: key.record_id(),
         });
     let index = Index::new(hash)
+        .at(id)
         .apply(&mut tx, RootRef::Empty, postings)
         .unwrap();
-    head(&mut tx, id, cells.root.hash(hash), index.root.hash(hash));
+    head(&mut tx, hash, id, cells.root, index.root);
     tx.commit().unwrap();
 }
 fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
@@ -243,24 +255,45 @@ fn verify_rebuild(
     assert_eq!(sealed.index_root.as_slice(), &roots[40..72]);
     let tx = db.begin_read().unwrap();
     assert_eq!(
-        Cells::new(hash).reopen(&tx, sealed.state_root).unwrap(),
+        Cells::new(hash)
+            .reopen(&tx, sealed.state_root, sealed.cells.root.branch_commit())
+            .unwrap(),
         sealed.cells.root
     );
     assert_eq!(
-        Index::new(hash).reopen(&tx, sealed.index_root).unwrap(),
+        Index::new(hash)
+            .reopen(&tx, sealed.index_root, sealed.index.root.branch_commit())
+            .unwrap(),
         sealed.index.root
     );
+    // Index rows hold `hash ‖ commit [‖ singleton path]`. Only the commit that
+    // stored each bitmap root differs from the rebuilt store, and it is never
+    // later than the sealed commit.
+    fn without_commit(
+        tx: &impl ReadTransaction,
+        table: Table,
+        commit: u64,
+    ) -> Vec<(Vec<u8>, Vec<u8>)> {
+        scan_prefix(tx, table, vec![])
+            .unwrap()
+            .map(|row| {
+                let (key, mut value) = row.unwrap();
+                if table == golemdb_index::tables::INDEX {
+                    let stored = u64::from_be_bytes(value[32..40].try_into().unwrap());
+                    assert!(stored <= commit);
+                    value.drain(32..40);
+                }
+                (key, value)
+            })
+            .collect()
+    }
+    let commit = sealed.commit_id.get();
     for table in [tables::CELL, golemdb_index::tables::INDEX] {
-        let actual = scan_prefix(&tx, table, vec![])
-            .unwrap()
-            .collect::<golemdb_storage::Result<Vec<_>>>()
-            .unwrap();
         let expected_tx = expected.begin_read().unwrap();
-        let expected = scan_prefix(&expected_tx, table, vec![])
-            .unwrap()
-            .collect::<golemdb_storage::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(actual, expected);
+        assert_eq!(
+            without_commit(&tx, table, commit),
+            without_commit(&expected_tx, table, commit)
+        );
     }
     let term = IndexTerm::new("name", CellType::Str, b"old").unwrap();
     assert_eq!(
@@ -314,7 +347,11 @@ fn empty_seal_adds_only_lag_one_roots_and_supports_blake3() {
     branches.commit(branch).unwrap();
     assert_eq!(
         Cells::new(&hash)
-            .reopen(&db.begin_read().unwrap(), sealed.state_root)
+            .reopen(
+                &db.begin_read().unwrap(),
+                sealed.state_root,
+                sealed.cells.root.branch_commit()
+            )
             .unwrap(),
         sealed.cells.root
     );

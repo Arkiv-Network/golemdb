@@ -128,6 +128,19 @@ impl WriteTransaction for MemoryWriteTransaction<'_> {
         Ok(())
     }
 
+    fn append(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()> {
+        table.validate()?;
+        let rows = self.state.entry(table).or_default();
+        match rows.last_key_value() {
+            Some((last, _)) if last.as_slice() == key => Err(StorageError::AlreadyExists),
+            Some((last, _)) if last.as_slice() > key => Err(StorageError::OutOfOrder),
+            _ => {
+                rows.insert(key.to_vec(), value.to_vec());
+                Ok(())
+            }
+        }
+    }
+
     fn insert(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()> {
         table.validate()?;
         match self.state.entry(table).or_default().entry(key.to_vec()) {
