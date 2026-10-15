@@ -57,7 +57,7 @@ fn terms(field: &CellName, values: &[CellValue]) -> Result<BTreeSet<IndexTerm>> 
 /// The term `field = value` is indexed under, built as seal builds it, so
 /// queries and writes share one encoding.
 fn term(field: &CellName, value: &CellValue) -> Result<IndexTerm> {
-    IndexTerm::for_cell_name(field.as_view(), value.as_view()).map_err(|source| {
+    IndexTerm::from_cell_name(field.as_view(), value.as_view()).map_err(|source| {
         QueryError::InvalidArgument {
             field: field.clone(),
             source,
@@ -76,7 +76,7 @@ mod tests {
     fn valid_leaf_resolves_to_its_index_term() {
         let field: CellName = CellNameRef::raw(b"price").into();
         let value = CellValue::from_u32(7);
-        let expected = IndexTerm::for_value("price", value.as_view()).expect("valid term");
+        let expected = IndexTerm::from_str_name("price", value.as_view()).expect("valid term");
         assert_eq!(term(&field, &value).expect("valid leaf"), expected);
     }
 
@@ -121,7 +121,7 @@ mod tests {
     }
 
     fn term_of(value: &CellValue) -> IndexTerm {
-        IndexTerm::for_value("f", value.as_view()).expect("valid term")
+        IndexTerm::from_str_name("f", value.as_view()).expect("valid term")
     }
 
     #[test]

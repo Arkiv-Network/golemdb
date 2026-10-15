@@ -38,7 +38,7 @@ fn records_are_returned_as_get_returns_them() {
     let test = colors();
     let page = test
         .db
-        .query(ReadTarget::Head, QueryOp::filter(eq("color", blue())))
+        .query(ReadTarget::Head, QueryOp::from_filter(eq("color", blue())))
         .unwrap();
     let get = |n| {
         test.db
@@ -61,7 +61,7 @@ fn records_come_in_creation_order() {
 #[test]
 fn projection_selects_cells_as_get_does() {
     let test = colors();
-    let op = QueryOp::filter(eq("color", blue())).only(["size", "note", "missing"]);
+    let op = QueryOp::from_filter(eq("color", blue())).only(["size", "note", "missing"]);
     let page = test.db.query(ReadTarget::Head, op).unwrap();
     let get = |n| {
         let op = RecordOp::get(key(n)).only(["size", "note", "missing"]);
@@ -69,7 +69,7 @@ fn projection_selects_cells_as_get_does() {
     };
     assert_eq!(page.records, [get(1), get(3)]);
 
-    let empty = QueryOp::filter(eq("color", blue())).only(Vec::<&str>::new());
+    let empty = QueryOp::from_filter(eq("color", blue())).only(Vec::<&str>::new());
     let page = test.db.query(ReadTarget::Head, empty).unwrap();
     assert!(page.records.iter().all(|record| record.cells.is_empty()));
     assert_eq!(page.records.len(), 2);
@@ -80,10 +80,10 @@ fn total_matched_only_when_asked() {
     let test = colors();
     let query = |op| test.db.query(ReadTarget::Head, op).unwrap();
     assert_eq!(
-        query(QueryOp::filter(eq("color", blue()))).total_matched,
+        query(QueryOp::from_filter(eq("color", blue()))).total_matched,
         None
     );
-    let op = QueryOp::filter(eq("color", blue())).with_total();
+    let op = QueryOp::from_filter(eq("color", blue())).with_total();
     assert_eq!(query(op).total_matched, Some(2));
 }
 
@@ -94,7 +94,7 @@ fn pages_report_the_commit_they_read() {
     let head = test.db.head().unwrap();
     let page = test
         .db
-        .query(ReadTarget::Head, QueryOp::filter(eq("color", blue())))
+        .query(ReadTarget::Head, QueryOp::from_filter(eq("color", blue())))
         .unwrap();
     assert_eq!(page.evaluated_at, head);
     assert_eq!(page.records.len(), 3);
@@ -104,7 +104,7 @@ fn pages_report_the_commit_they_read() {
 fn the_head_commit_can_be_named() {
     let test = colors();
     let head = test.db.head().unwrap();
-    let op = QueryOp::filter(eq("color", blue()));
+    let op = QueryOp::from_filter(eq("color", blue()));
     let page = test.db.query(ReadTarget::Commit(head), op).unwrap();
     assert_eq!(page.evaluated_at, head);
     let count = test
@@ -124,7 +124,7 @@ fn other_commits_are_unavailable() {
     let older = CommitId::new(head.get() - 1);
     let result = test.db.query(
         ReadTarget::Commit(older),
-        QueryOp::filter(eq("color", blue())),
+        QueryOp::from_filter(eq("color", blue())),
     );
     assert!(matches!(
         result,
@@ -140,7 +140,9 @@ fn branches_are_not_queried() {
         ReadTarget::Branch(branch),
         ReadTarget::Branch(BranchId::new(u64::MAX)),
     ] {
-        let query = test.db.query(target, QueryOp::filter(eq("color", blue())));
+        let query = test
+            .db
+            .query(target, QueryOp::from_filter(eq("color", blue())));
         assert!(matches!(query, Err(ApiError::InvalidQuery { .. })));
         let count = test.db.count(target, CountOp::filter(eq("color", blue())));
         assert!(matches!(count, Err(ApiError::InvalidQuery { .. })));
@@ -169,14 +171,14 @@ fn a_target_error_comes_before_admission() {
     let invalid = eq("not valid", blue());
     let result = test
         .db
-        .query(ReadTarget::Branch(branch), QueryOp::filter(invalid));
+        .query(ReadTarget::Branch(branch), QueryOp::from_filter(invalid));
     assert!(matches!(result, Err(ApiError::InvalidQuery { .. })));
 }
 
 #[test]
 fn unbuilt_parts_are_not_implemented() {
     let test = colors();
-    let filter = || QueryOp::filter(eq("color", blue()));
+    let filter = || QueryOp::from_filter(eq("color", blue()));
     for (op, part) in [
         (
             filter().sort([SortKey::asc("size", CellType::Uint(Width::W4))]),
@@ -196,7 +198,7 @@ fn unbuilt_parts_are_not_implemented() {
 #[test]
 fn the_budget_is_accepted_but_not_enforced_yet() {
     let test = colors();
-    let op = QueryOp::filter(eq("color", blue())).budget(Budget::Limited(0));
+    let op = QueryOp::from_filter(eq("color", blue())).budget(Budget::Limited(0));
     let page = test.db.query(ReadTarget::Head, op).unwrap();
     assert_eq!(page.records.len(), 2);
     let op = CountOp::filter(eq("color", blue())).budget(Budget::Limited(0));
@@ -225,7 +227,7 @@ fn a_non_head_commit_is_checked_after_admission() {
     let head = test.db.head().unwrap();
     let older = ReadTarget::Commit(CommitId::new(head.get() - 1));
     let invalid = || eq("not valid", blue());
-    let query = test.db.query(older, QueryOp::filter(invalid()));
+    let query = test.db.query(older, QueryOp::from_filter(invalid()));
     assert!(matches!(query, Err(ApiError::InvalidArgument { .. })));
     let count = test.db.count(older, CountOp::filter(invalid()));
     assert!(matches!(count, Err(ApiError::InvalidArgument { .. })));
@@ -258,7 +260,7 @@ fn an_indexed_record_without_its_key_is_internal_corruption() {
         .unwrap();
     branches.commit(corrupt).unwrap();
 
-    let result = db.query(ReadTarget::Head, QueryOp::filter(eq("color", blue())));
+    let result = db.query(ReadTarget::Head, QueryOp::from_filter(eq("color", blue())));
     let Err(ApiError::Internal { source }) = result else {
         panic!("expected Internal, got {result:?}");
     };

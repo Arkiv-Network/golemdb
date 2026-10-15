@@ -41,7 +41,9 @@ impl TestDb {
 
     /// Keys of the records matching `filter` at the head, in query order.
     pub fn keys(&self, filter: Filter) -> Result<Vec<RecordKey>, ApiError> {
-        let page = self.db.query(ReadTarget::Head, QueryOp::filter(filter))?;
+        let page = self
+            .db
+            .query(ReadTarget::Head, QueryOp::from_filter(filter))?;
         Ok(page.records.into_iter().map(|record| record.key).collect())
     }
 

@@ -19,7 +19,7 @@ use golemdb_storage::Store;
 
 use crate::{
     CountOp, Filter, QueryError, QueryOp, QueryPage, Result, eval::match_set, plan::Plan,
-    source::IndexSource,
+    posting_source::IndexSource,
 };
 
 /// Query facade over the committed state behind a branch manager. Clones

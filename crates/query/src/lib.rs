@@ -44,9 +44,9 @@
 mod error;
 mod eval;
 mod plan;
+mod posting_source;
 mod queries;
 mod query_op;
-mod source;
 
 pub use error::{QueryError, Result};
 pub use queries::Queries;
