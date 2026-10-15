@@ -15,7 +15,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  PORTABILITY: target/debug/examples/portability
+  # Runs the `create` or `extend` test, which needs absolute paths.
+  PORTABILITY: cargo test -p golemdb-integration-tests --test portability -- --ignored --exact
 
 jobs:
   create:
@@ -30,14 +31,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p golemdb-integration-tests --example portability
+      - run: cargo test -p golemdb-integration-tests --test portability --no-run
       - name: OS page size
         run: getconf PAGESIZE
       - name: Create databases
         run: |
           mkdir reports
-          $PORTABILITY create db > "reports/create-on-${{ matrix.os }}.txt"
-          cat "reports/create-on-${{ matrix.os }}.txt"
+          report="reports/create-on-${{ matrix.os }}.txt"
+          PORTABILITY_DIR="$PWD/db" PORTABILITY_REPORT="$PWD/$report" $PORTABILITY create
+          cat "$report"
       - uses: actions/upload-artifact@v4
         with:
           name: db-${{ matrix.os }}
@@ -60,7 +62,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p golemdb-integration-tests --example portability
+      - run: cargo test -p golemdb-integration-tests --test portability --no-run
       - uses: actions/download-artifact@v4
         with:
           pattern: db-*
@@ -71,7 +73,7 @@ jobs:
           mkdir reports
           for db in dbs/db-*; do
             report="reports/extend-${db#dbs/db-}-on-${{ matrix.os }}.txt"
-            $PORTABILITY extend "$db" > "$report"
+            PORTABILITY_DIR="$PWD/$db" PORTABILITY_REPORT="$PWD/$report" $PORTABILITY extend
             echo "== $report" && cat "$report"
           done
       - uses: actions/upload-artifact@v4

@@ -1,23 +1,28 @@
 //! Checks that databases and their roots are the same on every platform.
 //!
-//! `create <dir>` writes a fixed workload into one fresh database per hash
-//! algorithm. `extend <dir>` reopens those databases, possibly copied from
-//! another platform, and writes more commits. Each report line shows a commit's
-//! roots; the `head` and `end` lines also hash every record read back. CI
-//! requires the reports of all platforms to match.
+//! `create` writes a fixed workload into one fresh database per hash
+//! algorithm under `$PORTABILITY_DIR`. `extend` reopens those databases,
+//! possibly copied from another platform, and writes more commits. Both write
+//! a report to `$PORTABILITY_REPORT`: each line shows a commit's roots, and the
+//! `head` and `end` lines also hash every record read back. The Portability
+//! workflow runs both on every platform and requires all reports to match, so
+//! they are ignored by default. Tests run in the crate directory, so give
+//! absolute paths.
 //!
 //! Only the public API is used, plus the storage adapter for the backend's
 //! key and value limits.
 //!
 //! ```text
-//! cargo run -p golemdb-integration-tests --example portability -- create <dir>
-//! cargo run -p golemdb-integration-tests --example portability -- extend <dir>
+//! PORTABILITY_DIR=<dir> PORTABILITY_REPORT=<file> \
+//!     cargo test -p golemdb-integration-tests --test portability -- --ignored --exact create
 //! ```
 
 use std::{
     error::Error,
+    fs::File,
+    io::Write,
     ops::{Range, RangeInclusive},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use golemdb_api::{
@@ -180,62 +185,81 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Print a head's roots, and the hash of its records if they were read back.
-fn print_head(hash: HashAlgorithm, event: &str, head: Head, contents: Option<u64>) {
+/// Report a head's roots, and the hash of its records if they were read back.
+fn report_head(
+    report: &mut File,
+    hash: HashAlgorithm,
+    event: &str,
+    head: Head,
+    contents: Option<u64>,
+) -> Result<()> {
     let (commit, state, index) = head;
     let contents = contents.map_or(String::new(), |hash| format!(" contents={hash:016x}"));
-    println!(
+    writeln!(
+        report,
         "{} {event} commit={commit} state_root={} index_root={}{contents}",
         label(hash),
         hex(&state),
         hex(&index),
-    );
+    )?;
+    Ok(())
 }
 
-/// For each hash, open the database under `dir`, write `commits`, and print
-/// the report. Records are read back only at the `head` line, which is the
-/// state `create` leaves and `extend` must find on reopening, and at the end.
-fn run(dir: &Path, mode: OpenMode, commits: RangeInclusive<u64>) -> Result<()> {
+/// For each hash, open the database under `$PORTABILITY_DIR`, write
+/// `commits`, and write the report. Records are read back only at the `head`
+/// line, which is the state `create` leaves and `extend` must find on
+/// reopening, and at the end.
+fn run(mode: OpenMode, commits: RangeInclusive<u64>) -> Result<()> {
+    let dir = env_path("PORTABILITY_DIR")?;
+    let mut report = File::create(env_path("PORTABILITY_REPORT")?)?;
     for hash in HASHES {
         let store = open_store(&dir.join(label(hash)))?;
-        println!(
+        writeln!(
+            report,
             "{} limits max_key_size={} max_value_size={}",
             label(hash),
             store.max_key_size(),
             store.max_value_size()
-        );
+        )?;
         let db = Database::from_store(store, &config(hash, mode))?;
         let opened = *db.info();
         let mut head = (opened.commit_id.get(), opened.state_root, opened.index_root);
         if mode == OpenMode::ExistingOnly {
-            print_head(hash, "head", head, Some(contents(&db, head.0)?));
+            report_head(
+                &mut report,
+                hash,
+                "head",
+                head,
+                Some(contents(&db, head.0)?),
+            )?;
         }
         for commit in commits.clone() {
             head = write_commit(&db, commit)?;
-            print_head(hash, "sealed", head, None);
+            report_head(&mut report, hash, "sealed", head, None)?;
         }
         let event = if mode == OpenMode::CreateNew {
             "head"
         } else {
             "end"
         };
-        print_head(hash, event, head, Some(contents(&db, head.0)?));
+        report_head(&mut report, hash, event, head, Some(contents(&db, head.0)?))?;
     }
     Ok(())
 }
 
-/// Run `create` or `extend` on the directory given on the command line.
-fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.as_slice() {
-        [command, dir] if command == "create" => {
-            run(Path::new(dir), OpenMode::CreateNew, 1..=CREATED_COMMITS)
-        }
-        [command, dir] if command == "extend" => run(
-            Path::new(dir),
-            OpenMode::ExistingOnly,
-            CREATED_COMMITS + 1..=TOTAL_COMMITS,
-        ),
-        _ => Err("usage: portability <create|extend> <dir>".into()),
-    }
+/// A path given by the workflow in an environment variable.
+fn env_path(name: &str) -> Result<PathBuf> {
+    Ok(std::env::var_os(name).ok_or(format!("set {name}"))?.into())
+}
+
+#[test]
+#[ignore = "run by the Portability workflow"]
+fn create() -> Result<()> {
+    run(OpenMode::CreateNew, 1..=CREATED_COMMITS)
+}
+
+#[test]
+#[ignore = "run by the Portability workflow"]
+fn extend() -> Result<()> {
+    run(OpenMode::ExistingOnly, CREATED_COMMITS + 1..=TOTAL_COMMITS)
 }
