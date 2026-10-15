@@ -8,7 +8,7 @@ Status: draft for discussion, 2026-10-09. How Arkiv turns these costs into fees 
 - **Foundation:** [D1. Where Metering Happens](#d1-where-metering-happens)
 - **Cell store**
   - Writes: [D2. Write Cost Model](#d2-write-cost-model) · [D3. Modeled Trie Depth](#d3-write-metering-and-modeled-trie-depth) · [D4. Storage and Size Counting](#d4-storage-and-size-counting) · [D5. Record Shape and Deletion Bound](#d5-record-shape-and-deletion-bound)
-  - Reads: [D6. Read Metering](#d6-read-metering)
+  - Reads: [D6. Read Cost Model](#d6-read-cost-model)
 - **Immutable log:** [D7. Immutable-Log Metering](#d7-immutable-log-metering)
 - **Cross-cutting:** [D8. Budget, Rollback and Commit](#d8-budget-rollback-and-commit) · [D9. Cost Schedules](#d9-cost-schedules) · [D10. GolemDB Weights](#d10-golemdb-weights)
 - **Illustration and open points:** [Worked Example](#worked-example-create-patch-delete) · [Open Questions](#open-questions)
@@ -30,10 +30,13 @@ Example attacks prevented:
 - Long cell names that inflate index keys.
 - Value rewrites that shrink live data but grow history.
 - Range queries over attributes with many distinct values, which step through many index terms; each term stepped over must be charged.
+- Queries that combine large posting sets: cheap per filter node, expensive in total; combining sets must be charged by their size.
 
 ## Principle
 
+- **Calls are made of steps, and every step has a charge.** A step is one unit of logical work: a key resolution, a cell read, a cell or index write, an index term stepped over. Its charge is what the step costs in cost units, fixed by the active cost schedule. A call's cost is the sum of the charges of the steps it performs, and its budget caps that sum.
 - **GolemDB** assesses what each call costs in compute and storage, with no notion of time. Like Ethereum's `SSTORE`, storage is a one-off cost. Full nodes keep a fixed history window, so that cost covers the write and its bounded history.
+- **Writes are priced before they apply; reads are charged as they run.** A write is planned and its full cost established before anything changes (D2). A read is charged step by step as it executes, and stops at the first step the remaining budget cannot pay (D6).
 - **A host** such as Arkiv builds its own pricing on top, for example adding duration to storage. Its weights may live in GolemDB's cost schedule as host-declared weights (D9): GolemDB stores, validates and activates them with its own, and never prices with them.
 
 ## Scope
@@ -57,14 +60,16 @@ expiry attribute in record-ID order and deletes one record at a time under its p
 lookups, including lookups of absent terms, and record-ID-ordered reads with a limit.
 
 **Resolution needed:** specify the complete read operation taxonomy and deterministic
-counting order. Define exact integer evaluation of the modeled sort cost, including
-the `N = 0` case, and add conformance examples for successful and budget-aborted reads.
-Arkiv's purge depends on the equality and absent-term charges being pinned first.
+counting order in D6, pricing the execution rules of the [query proposal](query-proposal.md#execution-rules-normative),
+which serve as the reference execution. Define exact integer evaluation of the modeled sort
+cost, including the `N = 0` case, and add conformance vectors (R13) for successful and
+budget-aborted reads. Arkiv's purge depends on the equality and absent-term charges being
+pinned first.
 
 ## Goals
 
 1. **Fair cost:** every call pays, accurately enough, for the compute and storage it causes.
-2. **Deterministic:** the same call against the same state costs the same on every instance and implementation.
+2. **Deterministic:** the same call against the same state gives the same result, costs the same and, if it runs out of budget, stops at the same step, on every instance and implementation.
 3. **Configurable history:** an instance keeps either the full history (archival use) or the last n commits (full node).
 4. **Useful to hosts:** a host like Arkiv gets what it needs to build its own pricing on top, such as time-based storage.
 5. **Bounded deletion:** removing a record never costs more than a maximum computable at any time from its shape and the current schedule.
@@ -74,27 +79,31 @@ Arkiv's purge depends on the equality and absent-term charges being pinned first
 
 Cost properties:
 
-- **R1 Deterministic:** identical on every implementation, machine and version, for the same call against the same state.
+- **R1 Deterministic:** for the same call against the same state and cost schedule, every implementation, machine and version returns the same result, including its order, at the same cost; or stops at the same step with the same cost spent so far and the same error.
 - **R2 Per call and additive:** a cost is attributable to exactly one call and summable across calls.
-- **R3 Bounded pricing:** with a limited budget, pricing work must stay within that budget. Host-authorized unlimited estimation is outside this budget-bounded guarantee (D8). Write cost may depend on the call's arguments and on state the call reads anyway, never on a read made only for pricing (the no-probe rule).
-- **R4 Rounds up:** no caller obtains unbounded work for bounded cost. Where cost is approximated, it is approximated upward: undercharging is an attack surface, overcharging only inefficiency.
+- **R3 Bounded pricing:** with a limited budget, pricing work must stay within that budget. Host-authorized unlimited estimation is outside this budget-bounded guarantee (D8). Write cost may depend on the call's arguments and on state the call reads anyway, never on a read made only for pricing (the no-probe rule). A read never looks anything up just to calculate its price: what each step costs is known from the request itself and from data the read has already fetched and paid for.
+- **R4 Rounds up:** no caller obtains unbounded work for bounded cost, also per step: the work of each charged step is bounded by its charge, so combining sets is charged by their size and a scan by every term it steps over. Where cost is approximated, it is approximated upward: undercharging is an attack surface, overcharging only inefficiency.
 - **R5 Defined, not measured:** cost counts logical work (rows, index terms, trie paths) as the reference execution performs it, never physical events (pages, cache hits, timing). A warm and a cold instance charge the same.
 - **R6 No refunds:** operations are metered regardless of whether their effects reach disk, including execution that only changes in-memory branch state. Rolling back a frame or discarding a branch does not refund charges already incurred. Rollback and branch discard carry no charge: rolled-back operations have already paid for deferred work (trie paths, history, persistence) that is never performed, which exceeds the in-memory undo (D8). Commit carries no additional data-plane charge: record-induced work is prepaid by calls, while block/commit overhead is host-funded (D8).
 
 Budget:
 
-- **R7:** every call accepts a budget. A write checks each planning charge before doing the work; a charge that would exceed a limited budget aborts with no writes or partial results. `OutOfBudget{spent, required?}` reports work already performed. For writes, `required` is present only when planning has established the full representable cost. D8 defines explicit unlimited planning for host-authorized estimation.
+- **R7:** every call requires a budget, with no default. A call without one fails with `InvalidArgument`; a caller who wants no limit passes `Budget::Unlimited` explicitly, which D8 reserves for host-authorized estimation. Every step has a known charge, checked before the step runs: a write's planning steps (D2), a read's execution steps (D6). If a step's charge exceeds the remaining limited budget, that step is not performed and the call stops, with no writes and no partial results. `OutOfBudget{spent, required?}` reports work already performed. For writes, `required` is present only when planning has established the full representable cost; a read stops as it goes and reports none. D8 defines explicit unlimited planning for host-authorized estimation.
 
 Coverage and reporting:
 
 - **R8:** every read and write call (`create`, `get`, `patch`, `delete`, `query`, `count`) is metered for compute, and writes also for storage. So are the immutable-log calls (`immutable_data_append`, `immutable_data_get`, `immutable_data_range_of`, `immutable_data_rows_of`; D7).
-- **R9:** every receipt reports the call's cost and the commit that priced it (`priced_at`). Details of cell and index data added and removed by write calls (D4) are opt-in per call on a transport, which keeps receipts small; every implementation must support the option and return the details when requested. An in-process API may return them with every receipt, as the [Rust API](golemdb-api.md#receipts) does.
+- **R9:** every receipt reports the call's cost and the commit that priced it (`priced_at`). A read also reports the commit it read (`evaluated_at`). Details of cell and index data added and removed by write calls (D4) are opt-in per call on a transport, which keeps receipts small; every implementation must support the option and return the details when requested. An in-process API may return them with every receipt, as the [Rust API](golemdb-api.md#receipts) does.
 - **R10:** every user record has a maximum deletion cost, computable at any time from its shape and the current schedule. Actual deletion may cost less.
 
 Cost schedules:
 
 - **R11:** a metering model (cost schedule) is code plus weights. The code (cost structure (D2), counting rules and expected weight names) is identified by a GolemDB code version and, if the host declares weights, a host code version; weights are committed data, one value per weight name: a price, or for host-declared weights also a host limit (D9). Several model versions can share the same code versions and differ only in weights.
 - **R12:** weights are adjustable at runtime through admin writes, without upgrading GolemDB, taking effect only at a committed head boundary. Branch calls use the schedule captured at their base commit; calls without a branch capture the schedule at the current head on admission. This applies to reads of historical data as well as current data. Calls are never re-priced in flight (D9). A weight change can also be scheduled: installed as a new model version on the same code versions, it takes effect at an activation commit at least `#minActivationDelay` ahead (D9).
+
+Conformance:
+
+- **R13:** the reference execution is pinned by conformance vectors: a state, a call and a cost schedule, with the expected result, cost and stopping point, including calls that end in `OutOfBudget`. They cover writes and reads, and every implementation must pass them.
 
 ## Record Model
 
@@ -425,19 +434,44 @@ Every leave costs the same, whether or not it empties the term (D2), and deleted
 - The cell caps bound a record's maximum deletion cost; the length ceilings bound the size of each write.
 - Caps are on counts and lengths rather than cost, so a weight increase cannot push existing records over a limit.
 
-## D6. Read Metering
+## D6. Read Cost Model
 
-Meets R5, R8.
+Meets R1, R3, R4, R5, R7, R8, R13.
 
-Reads are counted, not modeled: nothing on the read path is deferred, so cost accumulates as the work happens and the call aborts when it crosses its budget.
+Reads are counted, not modeled: nothing on the read path is deferred, so cost accumulates step by
+step as the work happens. Every step has a known charge, checked before the step runs; the first
+charge the remaining budget cannot pay stops the call without performing that step, with no
+partial result and the cost spent so far (R7). The steps and their order are those of the
+reference execution: for `get`, the key resolution and the cells read; for `query` and `count`,
+the execution rules of the [query proposal](query-proposal.md#execution-rules-normative).
 
-- Reads follow the D2 order of checks: the handle or snapshot first, free; then admission; then counted state reads.
-- The counted descent is the reference one, whether or not an implementation short-circuits it (D1).
-- Sort comparisons are the exception: modeled as `⌈N log₂ N⌉ × S` from the match count N and S sort terms, so the choice of sort algorithm stays out of the receipt.
-- Resolving an item at a past commit is a flat surcharge, independent of how far back.
-- Range scans charge every index term stepped over, so ranges over attributes with many distinct values pay for their width.
-- Reading `#meta` is a `get` of one cell; the full record includes it. The `id_of` and `key_of` accessors, to be specified with the proof API, are fixed-size point reads with a flat charge: `id_of` is one key resolution (`key_resolve`), `key_of` one cell read (`cell_read`).
-- Bulk deletion, such as a host's expiry purge, uses ordinary reads: Arkiv's purge queries one equality term of its expiry attribute in record-ID order and deletes record by record under its own budget ([tokenomics](arkiv-tokenomics.md#purge-budget)). No special scan is provided.
+- **Order of checks.** Top-level parts not implemented yet are rejected first, at no cost. Then
+  admission validates the whole request without reading state, charged as admission (D2). Then
+  one storage snapshot is opened, and the target commit is checked against its head; every state
+  read uses that snapshot.
+- **Logical steps only.** The counted descent is the reference one, whether or not an
+  implementation short-circuits it (D1, R5).
+- **Leaves.** An equality lookup is one term read, also when the term is absent. An `In` reads
+  each distinct term once, in term key order. A range scan charges every index term stepped
+  over, so ranges over attributes with many distinct values pay for their width.
+- **Early exit.** An `And` whose running set becomes empty skips its remaining children, which
+  are not charged.
+- **Combining sets** is charged by the size of the sets combined, so the work of one step stays
+  bounded by its charge (R4).
+- **Materialization** charges a point read per record and its cells, for the returned page only.
+- **Sort comparisons** are the exception to counting: modeled as `⌈N log₂ N⌉ × S` from the match
+  count N and S sort terms, so the choice of sort algorithm stays out of the receipt.
+- **Historical reads.** Resolving an item at a past commit is a flat surcharge, independent of how
+  far back.
+- Reading `#meta` is a `get` of one cell; the full record includes it. The `id_of` and `key_of`
+  accessors, to be specified with the proof API, are fixed-size point reads with a flat charge:
+  `id_of` is one key resolution (`key_resolve`), `key_of` one cell read (`cell_read`).
+- Bulk deletion, such as a host's expiry purge, uses ordinary reads: Arkiv's purge queries one
+  equality term of its expiry attribute in record-ID order and deletes record by record under its
+  own budget ([tokenomics](arkiv-tokenomics.md#purge-budget)). No special scan is provided.
+
+To be specified (finding F1): the read weights and their exact counting rules, the unit for
+combining sets, the integer evaluation of the sort model, and conformance vectors.
 
 ## D7. Immutable-Log Metering
 
