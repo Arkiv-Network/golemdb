@@ -83,13 +83,14 @@ pub trait Api {
 
     /// Committed records matching the operation's filter, in record ID order,
     /// projected as `get` projects. Matching and materialization share one
-    /// snapshot. Branch targets are invalid; explicit non-head commits are not
-    /// yet supported; sort, limit and offset return NotImplemented.
-    fn query(&self, target: ReadTarget, operation: QueryOp) -> Result<QueryPage>;
+    /// snapshot. `commit` names the commit to read, `None` the head; explicit
+    /// non-head commits are not yet supported; sort, limit and offset return
+    /// NotImplemented.
+    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Result<QueryPage>;
 
     /// The number of committed records matching the operation's filter, under
-    /// the same target rules as `query`.
-    fn count(&self, target: ReadTarget, operation: CountOp) -> Result<u64>;
+    /// the same commit rules as `query`.
+    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Result<u64>;
 
     // Branch lifecycle. IDs are valid only for their issuing engine.
     fn head(&self) -> Result<CommitId>;

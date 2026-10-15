@@ -38,8 +38,10 @@ impl Database {
     }
 
     /// Initialize or validate a caller-supplied store. Separate calls create
-    /// separate branch registries, even over shared storage.
-    pub fn from_store<S: Store + Send + Sync + 'static>(
+    /// separate branch registries, even over shared storage. The engine keeps
+    /// clones of `store`, so its clones must share state, as the clones of
+    /// `MemoryStore` and `MdbxStore` do.
+    pub fn from_store<S: Store + Clone + Send + Sync + 'static>(
         store: S,
         config: &OpenConfig,
     ) -> OpenResult<Self> {
@@ -73,7 +75,7 @@ impl Database {
         &self.info
     }
 
-    pub(crate) fn from_opened<S: Store + Send + Sync + 'static>(
+    pub(crate) fn from_opened<S: Store + Clone + Send + Sync + 'static>(
         opened: OpenedStore<S>,
     ) -> OpenResult<Self> {
         let genesis = *opened.genesis();
@@ -104,11 +106,11 @@ impl Api for Database {
     fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()> {
         self.inner.delete(branch, operation)
     }
-    fn query(&self, target: ReadTarget, operation: QueryOp) -> Result<QueryPage> {
-        self.inner.query(target, operation)
+    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Result<QueryPage> {
+        self.inner.query(commit_id, operation)
     }
-    fn count(&self, target: ReadTarget, operation: CountOp) -> Result<u64> {
-        self.inner.count(target, operation)
+    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Result<u64> {
+        self.inner.count(commit_id, operation)
     }
     fn head(&self) -> Result<CommitId> {
         self.inner.head()
@@ -167,19 +169,20 @@ impl Api for Database {
     }
 }
 
-/// All layers reference the same branch registry. Business rules, locking, and
-/// transaction boundaries remain in record, query and branch, not in this adapter.
+/// All layers share one store, through clones of its handle, and record and
+/// branch one branch registry. Business rules, locking, and transaction
+/// boundaries remain in record, query and branch, not in this adapter.
 struct Inner<S, H> {
     branches: Branches<S, H>,
     records: Records<S, H>,
     queries: Queries<S, H>,
 }
 
-impl<S: Store, H: HashProvider> Inner<S, H> {
+impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
     fn new(store: S, hasher: H) -> OpenResult<Self> {
-        let branches = Branches::new(store, hasher)?;
+        let branches = Branches::new(store.clone(), hasher.clone())?;
         let records = Records::new(branches.clone());
-        let queries = Queries::new(branches.clone());
+        let queries = Queries::new(store, hasher);
         Ok(Self {
             branches,
             records,
@@ -207,11 +210,11 @@ impl<S: Store, H: HashProvider> Api for Inner<S, H> {
             .delete(branch, operation.record_key())
             .map_err(Into::into)
     }
-    fn query(&self, target: ReadTarget, operation: QueryOp) -> Result<QueryPage> {
-        self.queries.query(target, operation).map_err(Into::into)
+    fn query(&self, commit: Option<CommitId>, operation: QueryOp) -> Result<QueryPage> {
+        self.queries.query(commit, operation).map_err(Into::into)
     }
-    fn count(&self, target: ReadTarget, operation: CountOp) -> Result<u64> {
-        self.queries.count(target, operation).map_err(Into::into)
+    fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Result<u64> {
+        self.queries.count(commit, operation).map_err(Into::into)
     }
     fn head(&self) -> Result<CommitId> {
         self.branches.head().map_err(Into::into)

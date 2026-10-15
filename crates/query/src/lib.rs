@@ -5,15 +5,16 @@
 //! the `i32` run of `amount`, so a cell of another type under the same name is
 //! treated as absent. Only attribute cells are indexed, so only they match.
 //!
-//! A branch target is rejected first, then the whole request is admitted
-//! before any state read. The filter's match set and the returned records are
-//! then read from one storage snapshot. Opening it reads the head, so a
-//! `Commit` target other than the head fails there, after admission. Filter
+//! Queries read committed state: the head (`None`), or a named commit. The
+//! whole request is admitted before any state read. The filter's match set and
+//! the returned records are then read from one storage snapshot. Opening it
+//! reads the head, so a requested commit other than the head fails there,
+//! after admission. Filter
 //! evaluation itself never touches storage: it reads the index through a
 //! private seam, so it is unit-tested with a fake.
 //!
 //! Callers reach queries through `golemdb_api::Database`, which builds its
-//! [`Queries`] over the branch manager it writes through:
+//! [`Queries`] over the store its branch manager writes through:
 //!
 //! ```
 //! use golemdb_api::{
@@ -36,7 +37,7 @@
 //!     field: CellNameRef::parse_user(b"color", 32)?.into(),
 //!     value: CellValue::from_str("blue"),
 //! };
-//! let page = db.query(ReadTarget::Head, QueryOp::from_filter(filter))?;
+//! let page = db.query(None, QueryOp::from_filter(filter))?;
 //! assert_eq!(page.records, [db.get(ReadTarget::Head, RecordOp::get(key))?]);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```

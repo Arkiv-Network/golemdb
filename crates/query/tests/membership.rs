@@ -61,8 +61,9 @@ fn malformed_in_is_an_invalid_query() {
     let test = TestDb::default();
     test.create([record(key(1), &[("f", CellValue::from_i32(1))])]);
     for filter in [
-        is_in("f", []),
         is_in("f", [CellValue::from_i32(1), CellValue::from_i64(1)]),
+        // Mixed types are reported before a value with no term.
+        is_in("f", [str("x"), CellValue::from_bytes(b"x")]),
     ] {
         assert!(
             matches!(
@@ -82,6 +83,14 @@ fn malformed_in_is_an_invalid_query() {
 }
 
 #[test]
+fn an_in_with_no_value_matches_nothing() {
+    let test = TestDb::default();
+    test.create([record(key(1), &[("f", CellValue::from_i32(1))])]);
+    assert!(test.keys(is_in("f", [])).unwrap().is_empty());
+    assert_eq!(test.count(is_in("f", [])).unwrap(), 0);
+}
+
+#[test]
 fn invalid_arguments_are_errors_not_empty_results() {
     let test = TestDb::default();
     let cause = |result: Result<Vec<RecordKey>, ApiError>| match result {
@@ -93,6 +102,10 @@ fn invalid_arguments_are_errors_not_empty_results() {
     };
     assert_eq!(
         cause(test.keys(is_in("not valid", [CellValue::from_i32(1)]))),
+        Some(TermError::InvalidName)
+    );
+    assert_eq!(
+        cause(test.keys(is_in("not valid", []))),
         Some(TermError::InvalidName)
     );
     assert_eq!(

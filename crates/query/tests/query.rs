@@ -2,7 +2,7 @@
 
 mod support;
 
-use golemdb_api::{Api, BranchId, CommitId, ReadTarget, RecordOp};
+use golemdb_api::{Api, CommitId, ReadTarget, RecordOp};
 use golemdb_api::{ApiError, Budget, CountOp, QueryOp, SortKey};
 use golemdb_api::{CellLimits, Database, Genesis, HashAlgorithm, OpenConfig};
 use golemdb_branch::{BranchError, Branches};
@@ -38,7 +38,7 @@ fn records_are_returned_as_get_returns_them() {
     let test = colors();
     let page = test
         .db
-        .query(ReadTarget::Head, QueryOp::from_filter(eq("color", blue())))
+        .query(None, QueryOp::from_filter(eq("color", blue())))
         .unwrap();
     let get = |n| {
         test.db
@@ -62,7 +62,7 @@ fn records_come_in_creation_order() {
 fn projection_selects_cells_as_get_does() {
     let test = colors();
     let op = QueryOp::from_filter(eq("color", blue())).only(["size", "note", "missing"]);
-    let page = test.db.query(ReadTarget::Head, op).unwrap();
+    let page = test.db.query(None, op).unwrap();
     let get = |n| {
         let op = RecordOp::get(key(n)).only(["size", "note", "missing"]);
         test.db.get(ReadTarget::Head, op).unwrap()
@@ -70,7 +70,7 @@ fn projection_selects_cells_as_get_does() {
     assert_eq!(page.records, [get(1), get(3)]);
 
     let empty = QueryOp::from_filter(eq("color", blue())).only(Vec::<&str>::new());
-    let page = test.db.query(ReadTarget::Head, empty).unwrap();
+    let page = test.db.query(None, empty).unwrap();
     assert!(page.records.iter().all(|record| record.cells.is_empty()));
     assert_eq!(page.records.len(), 2);
 }
@@ -78,7 +78,7 @@ fn projection_selects_cells_as_get_does() {
 #[test]
 fn total_matched_only_when_asked() {
     let test = colors();
-    let query = |op| test.db.query(ReadTarget::Head, op).unwrap();
+    let query = |op| test.db.query(None, op).unwrap();
     assert_eq!(
         query(QueryOp::from_filter(eq("color", blue()))).total_matched,
         None
@@ -94,7 +94,7 @@ fn pages_report_the_commit_they_read() {
     let head = test.db.head().unwrap();
     let page = test
         .db
-        .query(ReadTarget::Head, QueryOp::from_filter(eq("color", blue())))
+        .query(None, QueryOp::from_filter(eq("color", blue())))
         .unwrap();
     assert_eq!(page.evaluated_at, head);
     assert_eq!(page.records.len(), 3);
@@ -105,14 +105,11 @@ fn the_head_commit_can_be_named() {
     let test = colors();
     let head = test.db.head().unwrap();
     let op = QueryOp::from_filter(eq("color", blue()));
-    let page = test.db.query(ReadTarget::Commit(head), op).unwrap();
+    let page = test.db.query(Some(head), op).unwrap();
     assert_eq!(page.evaluated_at, head);
     let count = test
         .db
-        .count(
-            ReadTarget::Commit(head),
-            CountOp::filter(eq("color", blue())),
-        )
+        .count(Some(head), CountOp::filter(eq("color", blue())))
         .unwrap();
     assert_eq!(count, 2);
 }
@@ -122,31 +119,13 @@ fn other_commits_are_unavailable() {
     let test = colors();
     let head = test.db.head().unwrap();
     let older = CommitId::new(head.get() - 1);
-    let result = test.db.query(
-        ReadTarget::Commit(older),
-        QueryOp::from_filter(eq("color", blue())),
-    );
+    let result = test
+        .db
+        .query(Some(older), QueryOp::from_filter(eq("color", blue())));
     assert!(matches!(
         result,
         Err(ApiError::CommitUnavailable { requested, head: got }) if requested == older && got == head
     ));
-}
-
-#[test]
-fn branches_are_not_queried() {
-    let test = colors();
-    let branch = test.db.begin().unwrap();
-    for target in [
-        ReadTarget::Branch(branch),
-        ReadTarget::Branch(BranchId::new(u64::MAX)),
-    ] {
-        let query = test
-            .db
-            .query(target, QueryOp::from_filter(eq("color", blue())));
-        assert!(matches!(query, Err(ApiError::InvalidQuery { .. })));
-        let count = test.db.count(target, CountOp::filter(eq("color", blue())));
-        assert!(matches!(count, Err(ApiError::InvalidQuery { .. })));
-    }
 }
 
 #[test]
@@ -165,17 +144,6 @@ fn pending_branch_work_is_invisible() {
 }
 
 #[test]
-fn a_target_error_comes_before_admission() {
-    let test = colors();
-    let branch = test.db.begin().unwrap();
-    let invalid = eq("not valid", blue());
-    let result = test
-        .db
-        .query(ReadTarget::Branch(branch), QueryOp::from_filter(invalid));
-    assert!(matches!(result, Err(ApiError::InvalidQuery { .. })));
-}
-
-#[test]
 fn unbuilt_parts_are_not_implemented() {
     let test = colors();
     let filter = || QueryOp::from_filter(eq("color", blue()));
@@ -187,7 +155,7 @@ fn unbuilt_parts_are_not_implemented() {
         (filter().limit(1), "query: limit"),
         (filter().offset(1), "query: offset"),
     ] {
-        let result = test.db.query(ReadTarget::Head, op);
+        let result = test.db.query(None, op);
         assert!(
             matches!(result, Err(ApiError::NotImplemented { operation }) if operation == part),
             "{part}"
@@ -199,10 +167,10 @@ fn unbuilt_parts_are_not_implemented() {
 fn the_budget_is_accepted_but_not_enforced_yet() {
     let test = colors();
     let op = QueryOp::from_filter(eq("color", blue())).budget(Budget::Limited(0));
-    let page = test.db.query(ReadTarget::Head, op).unwrap();
+    let page = test.db.query(None, op).unwrap();
     assert_eq!(page.records.len(), 2);
     let op = CountOp::filter(eq("color", blue())).budget(Budget::Limited(0));
-    assert_eq!(test.db.count(ReadTarget::Head, op).unwrap(), 2);
+    assert_eq!(test.db.count(None, op).unwrap(), 2);
 }
 
 #[test]
@@ -225,7 +193,7 @@ fn count_is_the_size_of_the_match_set() {
 fn a_non_head_commit_is_checked_after_admission() {
     let test = colors();
     let head = test.db.head().unwrap();
-    let older = ReadTarget::Commit(CommitId::new(head.get() - 1));
+    let older = Some(CommitId::new(head.get() - 1));
     let invalid = || eq("not valid", blue());
     let query = test.db.query(older, QueryOp::from_filter(invalid()));
     assert!(matches!(query, Err(ApiError::InvalidArgument { .. })));
@@ -260,7 +228,7 @@ fn an_indexed_record_without_its_key_is_internal_corruption() {
         .unwrap();
     branches.commit(corrupt).unwrap();
 
-    let result = db.query(ReadTarget::Head, QueryOp::from_filter(eq("color", blue())));
+    let result = db.query(None, QueryOp::from_filter(eq("color", blue())));
     let Err(ApiError::Internal { source }) = result else {
         panic!("expected Internal, got {result:?}");
     };
