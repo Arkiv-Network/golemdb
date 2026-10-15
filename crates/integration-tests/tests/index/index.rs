@@ -366,7 +366,8 @@ fn typed_range_and_prefix_scans() {
 fn run_scans_stay_in_their_run_and_load_each_bitmap() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
-    let at = |name: &str, value: CellValue| IndexTerm::for_value(name, value.as_view()).unwrap();
+    let at =
+        |name: &str, value: CellValue| IndexTerm::from_str_name(name, value.as_view()).unwrap();
     let run = [0, 5, u32::MAX].map(|n| at("a", CellValue::from_u32(n)));
     let neighbours = [
         at("a", CellValue::from_u64(1)),

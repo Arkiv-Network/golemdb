@@ -78,7 +78,7 @@ impl IndexTerm {
         name: CellNameRef<'_>,
         value: CellValueRef<'_>,
     ) -> Result<Self, TermError> {
-        Self::from_value(name_str(name)?, value)
+        Self::from_str_name(name_str(name)?, value)
     }
 
     /// Check a stored cell name as [`Self::for_cell_name`] does, for a leaf
@@ -401,7 +401,7 @@ mod tests {
             let name = CellNameRef::raw(name);
             assert_eq!(
                 IndexTerm::check_cell_name(name),
-                IndexTerm::for_cell_name(name, value.as_view()).map(drop),
+                IndexTerm::from_cell_name(name, value.as_view()).map(drop),
                 "{name:?}"
             );
         }

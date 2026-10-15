@@ -377,7 +377,8 @@ mod tests {
         let filter = i32s(Bound::Unbounded, Bound::Included(i32::MAX));
         let matches = evaluate(&source, &filter).expect("filter evaluates");
         assert_eq!(matches.treemap().iter().collect::<Vec<_>>(), [1, 2, 3]);
-        let term = |n| IndexTerm::for_value("n", CellValue::from_i32(n).as_view()).expect("term");
+        let term =
+            |n| IndexTerm::from_str_name("n", CellValue::from_i32(n).as_view()).expect("term");
         assert_eq!(*source.reads.borrow(), [term(i32::MIN), term(-1), term(1)]);
     }
 

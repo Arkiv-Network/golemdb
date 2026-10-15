@@ -56,7 +56,7 @@ impl TermRange {
         };
         let name = name_str(name)?;
         let run = IndexTerm::prefix(name, ty)?;
-        let term = |value| IndexTerm::for_value(name, value).map(IndexTerm::into_bytes);
+        let term = |value| IndexTerm::from_str_name(name, value).map(IndexTerm::into_bytes);
         let lower = match lower {
             Bound::Included(value) => Bound::Included(term(value)?),
             Bound::Excluded(value) => Bound::Excluded(term(value)?),
@@ -144,7 +144,7 @@ mod tests {
     }
 
     fn term(name: &str, value: &CellValue) -> IndexTerm {
-        IndexTerm::for_value(name, value.as_view()).expect("valid term")
+        IndexTerm::from_str_name(name, value.as_view()).expect("valid term")
     }
 
     /// The terms of `all`, in key order, that fall within `range`.
