@@ -435,8 +435,9 @@ the future behavior, including pruning and rewind of key bindings.
 All four iterations are implemented: typed cells, the facade contract and builders,
 atomic opening/genesis, and a cloneable `Database` with shared branch state.
 Queries support `Eq`, `In` and `Range` filters with full or projected records, and `count`.
-Sort, limit and offset return `ApiError::NotImplemented`, and a branch target
-returns `ApiError::InvalidQuery`. Query budgets are accepted but not enforced. Cost
+Queries read committed state only: `None` reads the head, and an explicit commit
+other than the head returns `ApiError::CommitUnavailable`. Sort, limit and offset
+return `ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost
 receipts, generated keys, OCC, and transport serialization are deferred.
 
 The [consumer test](src/tests/consumer.rs) demonstrates a single facade mock and

@@ -104,11 +104,11 @@ impl Api for Database {
     fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()> {
         self.inner.delete(branch, operation)
     }
-    fn query(&self, target: ReadTarget, operation: QueryOp) -> Result<QueryPage> {
-        self.inner.query(target, operation)
+    fn query(&self, commit: Option<CommitId>, operation: QueryOp) -> Result<QueryPage> {
+        self.inner.query(commit, operation)
     }
-    fn count(&self, target: ReadTarget, operation: CountOp) -> Result<u64> {
-        self.inner.count(target, operation)
+    fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Result<u64> {
+        self.inner.count(commit, operation)
     }
     fn head(&self) -> Result<CommitId> {
         self.inner.head()
@@ -207,11 +207,11 @@ impl<S: Store, H: HashProvider> Api for Inner<S, H> {
             .delete(branch, operation.record_key())
             .map_err(Into::into)
     }
-    fn query(&self, target: ReadTarget, operation: QueryOp) -> Result<QueryPage> {
-        self.queries.query(target, operation).map_err(Into::into)
+    fn query(&self, commit: Option<CommitId>, operation: QueryOp) -> Result<QueryPage> {
+        self.queries.query(commit, operation).map_err(Into::into)
     }
-    fn count(&self, target: ReadTarget, operation: CountOp) -> Result<u64> {
-        self.queries.count(target, operation).map_err(Into::into)
+    fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Result<u64> {
+        self.queries.count(commit, operation).map_err(Into::into)
     }
     fn head(&self) -> Result<CommitId> {
         self.branches.head().map_err(Into::into)

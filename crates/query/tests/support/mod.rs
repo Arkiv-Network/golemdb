@@ -6,7 +6,7 @@
 
 use golemdb_api::{
     Api, ApiError, CellLimits, CountOp, Database, Filter, Genesis, HashAlgorithm, QueryOp,
-    ReadTarget, RecordKey, RecordOp, op,
+    RecordKey, RecordOp, op,
 };
 use std::{cmp::Ordering, ops::Bound};
 
@@ -43,14 +43,12 @@ impl TestDb {
 
     /// Keys of the records matching `filter` at the head, in query order.
     pub fn keys(&self, filter: Filter) -> Result<Vec<RecordKey>, ApiError> {
-        let page = self
-            .db
-            .query(ReadTarget::Head, QueryOp::from_filter(filter))?;
+        let page = self.db.query(None, QueryOp::from_filter(filter))?;
         Ok(page.records.into_iter().map(|record| record.key).collect())
     }
 
     pub fn count(&self, filter: Filter) -> Result<u64, ApiError> {
-        self.db.count(ReadTarget::Head, CountOp::filter(filter))
+        self.db.count(None, CountOp::filter(filter))
     }
 }
 
