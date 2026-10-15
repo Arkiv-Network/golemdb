@@ -14,7 +14,7 @@
 //! private seam, so it is unit-tested with a fake.
 //!
 //! Callers reach queries through `golemdb_api::Database`, which builds its
-//! [`Queries`] over the branch manager it writes through:
+//! [`Queries`] over the store its branch manager writes through:
 //!
 //! ```
 //! use golemdb_api::{

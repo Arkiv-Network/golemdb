@@ -38,8 +38,10 @@ impl Database {
     }
 
     /// Initialize or validate a caller-supplied store. Separate calls create
-    /// separate branch registries, even over shared storage.
-    pub fn from_store<S: Store + Send + Sync + 'static>(
+    /// separate branch registries, even over shared storage. The engine keeps
+    /// clones of `store`, so its clones must share state, as the clones of
+    /// `MemoryStore` and `MdbxStore` do.
+    pub fn from_store<S: Store + Clone + Send + Sync + 'static>(
         store: S,
         config: &OpenConfig,
     ) -> OpenResult<Self> {
@@ -73,7 +75,7 @@ impl Database {
         &self.info
     }
 
-    pub(crate) fn from_opened<S: Store + Send + Sync + 'static>(
+    pub(crate) fn from_opened<S: Store + Clone + Send + Sync + 'static>(
         opened: OpenedStore<S>,
     ) -> OpenResult<Self> {
         let genesis = *opened.genesis();
@@ -167,19 +169,20 @@ impl Api for Database {
     }
 }
 
-/// All layers reference the same branch registry. Business rules, locking, and
-/// transaction boundaries remain in record, query and branch, not in this adapter.
+/// All layers share one store, through clones of its handle, and record and
+/// branch one branch registry. Business rules, locking, and transaction
+/// boundaries remain in record, query and branch, not in this adapter.
 struct Inner<S, H> {
     branches: Branches<S, H>,
     records: Records<S, H>,
     queries: Queries<S, H>,
 }
 
-impl<S: Store, H: HashProvider> Inner<S, H> {
+impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
     fn new(store: S, hasher: H) -> OpenResult<Self> {
-        let branches = Branches::new(store, hasher)?;
+        let branches = Branches::new(store.clone(), hasher.clone())?;
         let records = Records::new(branches.clone());
-        let queries = Queries::new(branches.clone());
+        let queries = Queries::new(store, hasher);
         Ok(Self {
             branches,
             records,

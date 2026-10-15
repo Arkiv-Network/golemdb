@@ -29,6 +29,8 @@ enum Fault {
     Read,
 }
 
+/// Clones share the wrapped store and the switches.
+#[derive(Clone)]
 struct Controlled<S> {
     inner: S,
     fault: Fault,

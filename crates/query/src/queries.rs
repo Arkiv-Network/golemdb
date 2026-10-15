@@ -9,7 +9,7 @@
 //!    requested commit other than the head fails here, after admission. All
 //!    reads then use this snapshot.
 
-use golemdb_branch::{Branches, CommitId};
+use golemdb_branch::CommitId;
 use golemdb_cells::CellReader;
 use golemdb_index::{Bitmap, Index};
 use golemdb_merkle::HashProvider;
@@ -21,23 +21,18 @@ use crate::{
     posting_source::IndexSource,
 };
 
-/// Query facade over the committed state behind a branch manager. Clones
-/// share it. Pending branch work is never visible to a query.
+/// Query facade over the committed state of a store. Pending branch work is
+/// never visible to a query. To see what a branch manager commits, pass a
+/// clone of the store handle it writes, sharing its state, and its hasher.
+#[derive(Clone)]
 pub struct Queries<S, H> {
-    branches: Branches<S, H>,
-}
-
-impl<S, H> Clone for Queries<S, H> {
-    fn clone(&self) -> Self {
-        Self {
-            branches: self.branches.clone(),
-        }
-    }
+    store: S,
+    hasher: H,
 }
 
 impl<S: Store, H: HashProvider> Queries<S, H> {
-    pub fn new(branches: Branches<S, H>) -> Self {
-        Self { branches }
+    pub fn new(store: S, hasher: H) -> Self {
+        Self { store, hasher }
     }
 
     /// The records matching `op`'s filter at `commit` (`None` for the head),
@@ -111,8 +106,8 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
         filter: &Filter,
     ) -> Result<Evaluation<S::Read<'_>>> {
         let plan = Plan::try_from(filter)?;
-        let (snapshot, head) = committed_snapshot(self.branches.store(), commit)?;
-        let index = Index::new(self.branches.hasher());
+        let (snapshot, head) = committed_snapshot(&self.store, commit)?;
+        let index = Index::new(&self.hasher);
         let matches = match_set(&IndexSource::new(&index, &snapshot), plan)?;
         Ok(Evaluation {
             snapshot,
