@@ -47,10 +47,18 @@ pub(crate) fn record_id(key: RecordKey, binding_value: Option<CellValue>) -> Res
 
 pub(crate) fn check_identity(key: RecordKey, value: Option<CellValue>) -> Result<()> {
     let identity = value.ok_or(RecordError::CorruptState("bound record has no #key"))?;
-    if identity.is_indexable() || identity.as_bytes32() != Some(key.0) {
+    if identity_key(&identity) != Some(key) {
         return Err(RecordError::CorruptState("binding and #key disagree"));
     }
     Ok(())
+}
+
+/// The key a record's `#key` cell holds; `None` unless it is a `bytes32` field.
+pub(crate) fn identity_key(identity: &CellValue) -> Option<RecordKey> {
+    identity
+        .as_bytes32()
+        .filter(|_| !identity.is_indexable())
+        .map(RecordKey)
 }
 
 pub(crate) fn limits<R: ReadTransaction>(cell_reader: &CellRead<'_, R>) -> Result<CellLimits> {

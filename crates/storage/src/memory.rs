@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    Database, Entry, ReadCursor, ReadTransaction, Result, StorageError, Table, WriteTransaction,
+    Entry, ReadCursor, ReadTransaction, Result, StorageError, Store, Table, WriteTransaction,
 };
 
 type Rows = BTreeMap<Vec<u8>, Vec<u8>>;
@@ -16,14 +16,14 @@ struct Inner {
     writer: Mutex<()>,
 }
 
-/// Cloning the database shares its state. Write transactions copy the state;
+/// Cloning the store shares its state. Write transactions copy the state;
 /// read transactions cheaply retain its previous committed snapshot.
 #[derive(Clone)]
-pub struct MemoryDatabase {
+pub struct MemoryStore {
     inner: Arc<Inner>,
 }
 
-impl MemoryDatabase {
+impl MemoryStore {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -34,7 +34,7 @@ impl MemoryDatabase {
     }
 }
 
-impl Default for MemoryDatabase {
+impl Default for MemoryStore {
     fn default() -> Self {
         Self::new()
     }
@@ -50,7 +50,7 @@ pub struct MemoryWriteTransaction<'db> {
     _writer: MutexGuard<'db, ()>,
 }
 
-impl Database for MemoryDatabase {
+impl Store for MemoryStore {
     type Read<'db> = MemoryReadTransaction;
     type Write<'db> = MemoryWriteTransaction<'db>;
 
@@ -115,6 +115,10 @@ impl ReadTransaction for MemoryWriteTransaction<'_> {
 }
 
 impl WriteTransaction for MemoryWriteTransaction<'_> {
+    fn is_empty(&self) -> Result<bool> {
+        Ok(self.state.is_empty())
+    }
+
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()> {
         table.validate()?;
         self.state
@@ -230,7 +234,7 @@ mod tests {
 
     #[test]
     fn only_successful_writes_create_tables_and_creation_is_transactional() {
-        let db = MemoryDatabase::new();
+        let db = MemoryStore::new();
         let table = Table("created-on-write");
         let read = db.begin_read().unwrap();
         assert_eq!(read.get(table, b"k").unwrap(), None);

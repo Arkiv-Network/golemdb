@@ -4,7 +4,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use golemdb_merkle::{
     Blake3Hasher, BranchNodeCompact, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie,
 };
-use golemdb_storage::{Database, MemoryDatabase, Table, WriteTransaction};
+use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction};
 
 const HASH: Keccak256Hasher = Keccak256Hasher;
 const BENCH_LEAF_DOMAIN: u8 = 0x04;
@@ -88,7 +88,7 @@ fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashP
     let mut group = c.benchmark_group(format!("merkle/trie/{algorithm}/path_bytes={N}"));
     for count in [64, 1024] {
         for clustered in [false, true] {
-            let db = MemoryDatabase::new();
+            let db = MemoryStore::new();
             let trie = Trie::<_, N>::new(TABLE, BENCH_BRANCH_DOMAIN, hasher);
             let mut tx = db.begin_write().unwrap();
             let mut root = RootRef::Empty;

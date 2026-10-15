@@ -36,7 +36,9 @@ pub(crate) fn compute(
     let retention = read_retention(origin)?;
     let commit_id = head
         .commit_id
+        .get()
         .checked_add(1)
+        .map(crate::CommitId::new)
         .ok_or(BranchError::CommitNumberExhausted)?;
     let cells = Cells::new(hasher);
     let index = Index::new(hasher);
@@ -45,7 +47,7 @@ pub(crate) fn compute(
     let index_root = index.reopen(origin, head.index_root)?;
     let roots_key = CellKey::new(
         system::ROOTS.id,
-        CellNameRef::raw(&head.commit_id.to_be_bytes()),
+        CellNameRef::raw(&head.commit_id.get().to_be_bytes()),
     );
     if origin.get(tables::CELL, &roots_key.encode())?.is_some() {
         return Err(BranchError::RootsCellExists);

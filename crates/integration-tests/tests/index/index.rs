@@ -6,18 +6,33 @@ use std::{
     ops::Bound,
 };
 
-use golemdb_cells::CellType;
+use golemdb_cells::{CellNameRef, CellType, CellValue};
 use golemdb_index::{
-    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, tables,
+    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, TermRange,
+    tables,
 };
 use golemdb_merkle::{Hash, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
-use golemdb_storage::{Database, MemoryDatabase, ReadTransaction, WriteTransaction, scan_prefix};
+use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
 
 const HASH: Keccak256Hasher = Keccak256Hasher;
 fn term(value: u8) -> IndexTerm {
     IndexTerm::new("tag", CellType::Str, &[b'a' + value]).unwrap()
 }
+
+/// The `str` terms of `tag` between the values of [`term`] `lower` and
+/// `upper`, `None` when the bounds admit none.
+fn tag_range(lower: Bound<u8>, upper: Bound<u8>) -> Option<TermRange> {
+    let value = |n: u8| CellValue::from_str(&char::from(b'a' + n).to_string());
+    let (lower, upper) = (lower.map(value), upper.map(value));
+    TermRange::between(
+        CellNameRef::raw(b"tag"),
+        lower.as_ref().map(CellValue::as_view),
+        upper.as_ref().map(CellValue::as_view),
+    )
+    .unwrap()
+}
+
 fn add(t: &IndexTerm, id: u64) -> PostingChange {
     PostingChange::Add {
         term: t.clone(),
@@ -49,7 +64,7 @@ fn assert_state(
     expected: &BTreeMap<IndexTerm, BTreeSet<u64>>,
 ) {
     let index = Index::new(&HASH);
-    let rebuilt_db = MemoryDatabase::new();
+    let rebuilt_db = MemoryStore::new();
     let mut rebuilt_tx = rebuilt_db.begin_write().unwrap();
     let mut rebuilt_root = RootRef::Empty;
     for (term, ids) in expected {
@@ -316,7 +331,10 @@ fn typed_range_and_prefix_scans() {
         )
         .unwrap();
     let found = index
-        .terms(&tx, Bound::Included(term(1)), Bound::Excluded(term(4)))
+        .terms(
+            &tx,
+            tag_range(Bound::Included(1), Bound::Excluded(4)).unwrap(),
+        )
         .unwrap()
         .collect::<golemdb_index::Result<Vec<_>>>()
         .unwrap();
@@ -336,16 +354,81 @@ fn typed_range_and_prefix_scans() {
             .0,
         term(2)
     );
-    assert!(
-        index
-            .terms(&tx, Bound::Included(term(3)), Bound::Included(term(0)))
-            .is_err()
-    );
+    assert_eq!(tag_range(Bound::Included(3), Bound::Included(0)), None);
     tx.put(tables::INDEX, term(0).as_bytes(), &[0; 31]).unwrap();
     let mut scan = index.terms_with_prefix(&tx, vec![]).unwrap();
     assert!(scan.next().unwrap().is_err());
     assert!(scan.next().is_none());
     assert!(scan.next().is_none());
+}
+
+#[test]
+fn run_scans_stay_in_their_run_and_load_each_bitmap() {
+    let (_dir, db) = fixture::db();
+    let index = Index::new(&HASH);
+    let at =
+        |name: &str, value: CellValue| IndexTerm::from_str_name(name, value.as_view()).unwrap();
+    let run = [0, 5, u32::MAX].map(|n| at("a", CellValue::from_u32(n)));
+    let neighbours = [
+        at("a", CellValue::from_u64(1)),
+        at("a", CellValue::from_str("")),
+        at("ab", CellValue::from_u32(1)),
+        at("b", CellValue::from_u32(1)),
+    ];
+    let mut tx = db.begin_write().unwrap();
+    let changes = run
+        .iter()
+        .chain(&neighbours)
+        .enumerate()
+        .flat_map(|(n, t)| {
+            let n = n as u64;
+            [add(t, n), add(t, n + (1 << 40))]
+        });
+    index.apply(&mut tx, RootRef::Empty, changes).unwrap();
+    let u32_range = |lower: Bound<u32>, upper: Bound<u32>| {
+        let (lower, upper) = (
+            lower.map(CellValue::from_u32),
+            upper.map(CellValue::from_u32),
+        );
+        TermRange::between(
+            CellNameRef::raw(b"a"),
+            lower.as_ref().map(CellValue::as_view),
+            upper.as_ref().map(CellValue::as_view),
+        )
+        .unwrap()
+    };
+    let u32_run = |lower: Bound<u32>, upper: Bound<u32>| {
+        let range = u32_range(lower, upper).unwrap();
+        index
+            .terms(&tx, range)
+            .unwrap()
+            .map(|entry| {
+                let (term, root) = entry.unwrap();
+                let bitmap = index.bitmap_at(&tx, root).unwrap();
+                let expected = index.bitmap(&tx, &term).unwrap().unwrap();
+                assert_eq!(bitmap.treemap(), expected.treemap());
+                term
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(u32_run(Bound::Unbounded, Bound::Included(u32::MAX)), run);
+    assert_eq!(u32_run(Bound::Included(0), Bound::Unbounded), run);
+    assert_eq!(
+        u32_run(Bound::Excluded(0), Bound::Included(u32::MAX)),
+        run[1..]
+    );
+    // Bounds that admit no value make no range, so no scan.
+    for (lower, upper) in [
+        (Bound::Included(5), Bound::Excluded(5)),
+        (Bound::Excluded(5), Bound::Included(5)),
+        (Bound::Excluded(5), Bound::Excluded(5)),
+        (Bound::Included(6), Bound::Included(5)),
+    ] {
+        assert_eq!(u32_range(lower, upper), None, "{lower:?}..{upper:?}");
+    }
+    // Excluded neighbours with no value between are still a key range: the
+    // scan finds no term in it.
+    assert!(u32_run(Bound::Excluded(5), Bound::Excluded(6)).is_empty());
 }
 
 #[test]

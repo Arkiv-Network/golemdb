@@ -4,7 +4,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use golemdb_cells::CellType;
 use golemdb_index::{BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange};
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher, RootRef};
-use golemdb_storage::{Database, MemoryDatabase, WriteTransaction};
+use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 
 fn codecs(c: &mut Criterion) {
     let mut group = c.benchmark_group("index/container");
@@ -79,7 +79,7 @@ fn add(t: u8, hi: u64, lo: u16) -> PostingChange {
 }
 
 fn seed(
-    db: &impl Database,
+    db: &impl Store,
     chunks: u64,
     hasher: &impl HashProvider,
 ) -> RootRef<INDEX_TRIE_PATH_BYTES> {
@@ -146,7 +146,7 @@ fn workloads(chunks: u64) -> Vec<(&'static str, Vec<PostingChange>)> {
 fn backend(
     c: &mut Criterion,
     name: &str,
-    db: &impl Database,
+    db: &impl Store,
     chunks: u64,
     algorithm: &str,
     hasher: &impl HashProvider,
@@ -210,7 +210,7 @@ fn durable_commit(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider
             b.iter_batched_ref(
                 || {
                     let dir = tempfile::tempdir().unwrap();
-                    let db = golemdb_storage_mdbx::MdbxDatabase::open(dir.path()).unwrap();
+                    let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
                     let root = seed(&db, 8, hasher);
                     (db, dir, root, vec![add(0, 0, 128)])
                 },
@@ -230,17 +230,10 @@ fn durable_commit(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider
 
 fn algorithm(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider) {
     for chunks in [64, 256] {
-        backend(
-            c,
-            "memory",
-            &MemoryDatabase::new(),
-            chunks,
-            algorithm,
-            hasher,
-        );
+        backend(c, "memory", &MemoryStore::new(), chunks, algorithm, hasher);
         {
             let dir = tempfile::tempdir().unwrap();
-            let db = golemdb_storage_mdbx::MdbxDatabase::open(dir.path()).unwrap();
+            let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
             backend(c, "mdbx", &db, chunks, algorithm, hasher);
         }
     }

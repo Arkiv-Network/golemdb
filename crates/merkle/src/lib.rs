@@ -13,22 +13,22 @@
 //!
 //! ```
 //! use golemdb_merkle::{Keccak256Hasher, HashProvider, LeafRef, RootRef, Trie};
-//! use golemdb_storage::{Database, MemoryDatabase, Table, WriteTransaction};
+//! use golemdb_storage::{Store, MemoryStore, Table, WriteTransaction};
 //!
 //! const EXAMPLE_LEAF_DOMAIN: u8 = 0x04;
 //! const EXAMPLE_BRANCH_DOMAIN: u8 = 0x05;
 //!
-//! let db = MemoryDatabase::new();
+//! let store = MemoryStore::new();
 //! let hash = Keccak256Hasher;
 //! let trie = Trie::<_, 6>::new(Table("ExampleBranches"), EXAMPLE_BRANCH_DOMAIN, &hash);
-//! let mut tx = db.begin_write()?;
+//! let mut tx = store.begin_write()?;
 //! let mut root = RootRef::Empty;
 //! for path in [[0; 6], [1; 6]] {
 //!     let leaf = LeafRef { path, hash: hash.hash_parts(&[&[EXAMPLE_LEAF_DOMAIN], &path, b"payload"]) };
 //!     root = trie.insert(&mut tx, root, leaf)?;
 //! }
 //! tx.commit()?;
-//! let read = db.begin_read()?;
+//! let read = store.begin_read()?;
 //! assert_eq!(trie.walk(&read, root).collect::<golemdb_merkle::Result<Vec<_>>>()?.len(), 2);
 //! assert!(trie.get(&read, root, &[1; 6])?.is_some());
 //! # Ok::<(), golemdb_merkle::MerkleError>(())

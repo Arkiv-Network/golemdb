@@ -7,9 +7,7 @@ use golemdb_cells::{
 };
 use golemdb_index::{Index, IndexTerm};
 use golemdb_merkle::{Blake3Hasher, Hash, HashProvider, Keccak256Hasher};
-use golemdb_storage::{
-    Database, MemoryDatabase, ReadTransaction, Table, WriteTransaction, scan_prefix,
-};
+use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -35,7 +33,7 @@ fn head(tx: &mut impl WriteTransaction, id: u64, state: Hash, index: Hash) {
     .unwrap();
 }
 pub(super) fn seed(
-    db: &(impl Database + Clone),
+    db: &(impl Store + Clone),
     hash: &(impl HashProvider + Clone),
     id: u64,
     rows: &[(CellKey, CellValue)],
@@ -62,7 +60,7 @@ pub(super) fn seed(
     tx.commit().unwrap();
 }
 
-fn snapshot(db: &impl Database) -> Vec<Vec<golemdb_storage::Entry>> {
+fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
     let tx = db.begin_read().unwrap();
     ENGINE
         .iter()
@@ -76,12 +74,12 @@ fn snapshot(db: &impl Database) -> Vec<Vec<golemdb_storage::Entry>> {
 }
 // Seal must never acquire a backend writer, even temporarily.
 #[derive(Clone)]
-struct ReadOnly<D> {
-    inner: D,
+struct ReadOnly<S> {
+    inner: S,
     allow_writes: Arc<AtomicBool>,
 }
-impl<D> ReadOnly<D> {
-    fn new(inner: D) -> Self {
+impl<S> ReadOnly<S> {
+    fn new(inner: S) -> Self {
         Self {
             inner,
             allow_writes: Arc::new(AtomicBool::new(false)),
@@ -91,13 +89,13 @@ impl<D> ReadOnly<D> {
         self.allow_writes.store(true, Ordering::Relaxed);
     }
 }
-impl<D: Database> Database for ReadOnly<D> {
+impl<S: Store> Store for ReadOnly<S> {
     type Read<'a>
-        = D::Read<'a>
+        = S::Read<'a>
     where
         Self: 'a;
     type Write<'a>
-        = D::Write<'a>
+        = S::Write<'a>
     where
         Self: 'a;
     fn begin_read(&self) -> golemdb_storage::Result<Self::Read<'_>> {
@@ -112,7 +110,7 @@ impl<D: Database> Database for ReadOnly<D> {
     }
 }
 
-fn compare_with_rebuild(db: impl Database + Clone + 'static, hash: impl HashProvider + Copy) {
+fn compare_with_rebuild(db: impl Store + Clone + 'static, hash: impl HashProvider + Copy) {
     let initial = vec![
         (key(64, b"name"), value("old", true)),
         (key(65, b"name"), value("old", true)),
@@ -150,19 +148,32 @@ fn compare_with_rebuild(db: impl Database + Clone + 'static, hash: impl HashProv
     let version = branches.branch_info(branch).unwrap().version;
     let sealed = branches.seal(branch).unwrap();
     assert_eq!(snapshot(&db), before);
-    assert_eq!(branches.head().unwrap(), 7);
-    assert_eq!(sealed.commit_id, 8);
+    assert_eq!(branches.head().unwrap(), golemdb_branch::CommitId::new(7));
+    assert_eq!(sealed.commit_id, golemdb_branch::CommitId::new(8));
     assert!(branches.branch_info(branch).unwrap().sealed);
     assert_eq!(branches.branch_info(branch).unwrap().version, version);
     assert!(Arc::ptr_eq(&sealed, &branches.seal(branch).unwrap()));
     assert_eq!(sealed.cells.changed_cells.len(), 6); // Five actual user changes + #roots.
     assert_eq!(sealed.index.changed_terms.len(), 4);
-    assert!(matches!(
-        branches.read(branch, |_| -> Result<(), ()> {
-            panic!("sealed read admitted")
-        }),
-        Err(OperationError::Branch(BranchError::Sealed))
-    ));
+    branches
+        .read(branch, |cell_reader| {
+            assert_eq!(
+                cell_reader.get(&key(64, b"name"))?,
+                Some(value("new", true))
+            );
+            assert!(cell_reader.get(&key(69, b"remove"))?.is_none());
+            assert!(
+                cell_reader
+                    .get(&key(golemdb_cells::system::ROOTS.id, &7u64.to_be_bytes()))?
+                    .is_none()
+            );
+            let rows = cell_reader
+                .scan_prefix(&64u64.to_be_bytes())?
+                .collect::<Result<Vec<_>, _>>()?;
+            assert_eq!(rows.len(), 1);
+            Ok::<_, BranchError>(())
+        })
+        .unwrap();
     assert!(matches!(
         branches.write(branch, |_| -> Result<(), ()> {
             panic!("sealed write admitted")
@@ -190,7 +201,7 @@ fn compare_with_rebuild(db: impl Database + Clone + 'static, hash: impl HashProv
             }
         }
     }
-    let expected = MemoryDatabase::new();
+    let expected = MemoryStore::new();
     // Exercise discard while the origin is still head, then publish the result
     // through the public API instead of accessing private buffered rows.
     let discarded = branches.begin().unwrap();
@@ -210,8 +221,8 @@ fn compare_with_rebuild(db: impl Database + Clone + 'static, hash: impl HashProv
 }
 
 fn verify_rebuild(
-    db: &impl Database,
-    expected: &MemoryDatabase,
+    db: &impl Store,
+    expected: &MemoryStore,
     sealed: &SealedCommit,
     rows: BTreeMap<CellKey, CellValue>,
     hash: &(impl HashProvider + Clone),
@@ -257,19 +268,19 @@ fn verify_rebuild(
 
 #[test]
 fn memory_seal_matches_full_rebuild_without_storage_writes() {
-    compare_with_rebuild(MemoryDatabase::new(), Keccak256Hasher);
+    compare_with_rebuild(MemoryStore::new(), Keccak256Hasher);
 }
 
 #[test]
 fn mdbx_seal_matches_full_rebuild_without_storage_writes() {
     let dir = tempfile::tempdir().unwrap();
-    let db = golemdb_storage_mdbx::MdbxDatabase::open(dir.path()).unwrap();
+    let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
     compare_with_rebuild(db, Keccak256Hasher);
 }
 
 #[test]
 fn empty_seal_adds_only_lag_one_roots_and_supports_blake3() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let hash = Blake3Hasher;
     seed(&db, &hash, 0, &[]);
     let before = snapshot(&db);
@@ -277,7 +288,7 @@ fn empty_seal_adds_only_lag_one_roots_and_supports_blake3() {
     let branches = Branches::new(database.clone(), hash).unwrap();
     let branch = branches.begin().unwrap();
     let sealed = branches.seal(branch).unwrap();
-    assert_eq!(sealed.commit_id, 1);
+    assert_eq!(sealed.commit_id, golemdb_branch::CommitId::new(1));
     assert_eq!(sealed.index_root, hash.hash(&[]));
     assert!(sealed.index.changed_terms.is_empty());
     assert_eq!(sealed.cells.changed_cells.len(), 1);
@@ -302,7 +313,7 @@ fn empty_seal_adds_only_lag_one_roots_and_supports_blake3() {
 
 #[derive(Clone)]
 struct FaultReads {
-    db: MemoryDatabase,
+    db: MemoryStore,
     fail: Arc<AtomicBool>,
 }
 struct FaultSnapshot<R> {
@@ -326,9 +337,9 @@ impl<R: golemdb_storage::ReadTransaction> golemdb_storage::ReadTransaction for F
         self.origin.cursor(table, key)
     }
 }
-impl Database for FaultReads {
-    type Read<'a> = FaultSnapshot<<MemoryDatabase as Database>::Read<'a>>;
-    type Write<'a> = <MemoryDatabase as Database>::Write<'a>;
+impl Store for FaultReads {
+    type Read<'a> = FaultSnapshot<<MemoryStore as Store>::Read<'a>>;
+    type Write<'a> = <MemoryStore as Store>::Write<'a>;
     fn begin_read(&self) -> golemdb_storage::Result<Self::Read<'_>> {
         Ok(FaultSnapshot {
             origin: self.db.begin_read()?,
@@ -341,7 +352,7 @@ impl Database for FaultReads {
 }
 #[test]
 fn index_failure_after_cell_apply_discards_buffer_and_allows_retry() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     seed(
         &db,
         &Keccak256Hasher,
@@ -378,5 +389,5 @@ fn index_failure_after_cell_apply_discards_buffer_and_allows_retry() {
 
 #[test]
 fn blake3_seal_matches_full_rebuild() {
-    compare_with_rebuild(MemoryDatabase::new(), Blake3Hasher);
+    compare_with_rebuild(MemoryStore::new(), Blake3Hasher);
 }

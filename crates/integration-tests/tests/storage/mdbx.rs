@@ -1,5 +1,5 @@
 use golemdb_storage::*;
-use golemdb_storage_mdbx::{MdbxDatabase, MdbxOptions};
+use golemdb_storage_mdbx::{MdbxOptions, MdbxStore};
 use proptest::prelude::*;
 use std::{
     collections::BTreeMap,
@@ -11,7 +11,7 @@ const B: Table = Table("B");
 #[test]
 fn crud() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let mut tx = db.begin_write().unwrap();
     assert_eq!(tx.get(A, b"a").unwrap(), None);
     tx.insert(A, b"a", b"one").unwrap();
@@ -36,7 +36,7 @@ fn crud() {
 #[test]
 fn snapshots_and_abort() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let old = db.begin_read().unwrap();
     let mut tx = db.begin_write().unwrap();
     tx.put(A, b"a", b"1").unwrap();
@@ -71,7 +71,7 @@ fn snapshots_and_abort() {
 #[test]
 fn cursor() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let keys = [
         vec![],
         vec![0],
@@ -145,7 +145,7 @@ fn cursor() {
 #[test]
 fn read_cursors_survive_writes_and_commit() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let mut tx = db.begin_write().unwrap();
     tx.put(A, b"a", b"old-a").unwrap();
     tx.put(A, b"b", b"old-b").unwrap();
@@ -202,7 +202,7 @@ fn inside(key: &[u8], lower: &Bound<Vec<u8>>, upper: &Bound<Vec<u8>>) -> bool {
 #[test]
 fn ranges() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let keys = [
         vec![],
         vec![0],
@@ -266,7 +266,7 @@ fn ranges() {
 #[test]
 fn errors() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     // Invalid names are errors even for reads of a never-created table.
     for table in [Table(""), Table("a\0b")] {
         let read = db.begin_read().unwrap();
@@ -298,7 +298,7 @@ fn errors() {
 #[test]
 fn implicit_tables() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let old = db.begin_read().unwrap();
     assert_eq!(old.get(A, b"key").unwrap(), None);
     assert!(
@@ -357,7 +357,7 @@ fn implicit_tables() {
 #[test]
 fn writers_serialize_and_see_latest_commit() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let mut first = db.begin_write().unwrap();
     first.put(A, b"x", b"first").unwrap();
     let (starting, started) = std::sync::mpsc::channel();
@@ -388,7 +388,7 @@ fn writers_serialize_and_see_latest_commit() {
 #[test]
 fn readers_on_other_threads_continue_during_write_and_commit() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let mut seed = db.begin_write().unwrap();
     seed.put(A, b"a", b"old-a").unwrap();
     seed.put(A, b"b", b"old-b").unwrap();
@@ -431,7 +431,7 @@ proptest! {
         batches in prop::collection::vec((prop::collection::vec((any::<u8>(), any::<u8>(), any::<bool>()), 0..30), any::<bool>()), 0..20)
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let db = MdbxDatabase::open(dir.path()).unwrap();
+        let db = MdbxStore::open(dir.path()).unwrap();
         let mut committed = BTreeMap::new();
         for (edits, commit) in batches {
             let old = db.begin_read().unwrap();
@@ -476,7 +476,7 @@ proptest! {
 #[test]
 fn persistent_tables_and_native_limits() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let mut tx = db.begin_write().unwrap();
     let max_key = vec![1; db.max_key_size()];
     assert!(db.max_value_size() >= 65536);
@@ -505,7 +505,7 @@ fn persistent_tables_and_native_limits() {
     ));
     tx.abort();
     drop(db);
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let tx = db.begin_read().unwrap();
     assert_eq!(tx.get(A, b"").unwrap(), Some(b"empty key".to_vec()));
     assert_eq!(tx.get(B, b"b").unwrap(), Some(vec![7; 65536]));
@@ -514,7 +514,7 @@ fn persistent_tables_and_native_limits() {
 #[test]
 fn table_capacity_error_is_not_absence_and_can_be_raised_on_reopen() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open_with_options(
+    let db = MdbxStore::open_with_options(
         dir.path(),
         MdbxOptions {
             max_tables: 1,
@@ -532,7 +532,7 @@ fn table_capacity_error_is_not_absence_and_can_be_raised_on_reopen() {
     ));
     tx.abort();
     drop(db);
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let mut tx = db.begin_write().unwrap();
     tx.put(B, b"b", b"2").unwrap();
     tx.commit().unwrap();
@@ -545,7 +545,7 @@ fn table_capacity_error_is_not_absence_and_can_be_raised_on_reopen() {
 #[test]
 fn map_full_aborts_all_pending_rows() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open_with_options(
+    let db = MdbxStore::open_with_options(
         dir.path(),
         MdbxOptions {
             max_map_size: 1024 * 1024,
@@ -558,7 +558,7 @@ fn map_full_aborts_all_pending_rows() {
     tx.put(A, b"a", b"before failure").unwrap();
     assert!(matches!(
         tx.put(A, b"huge", &vec![0; 2 * 1024 * 1024]),
-        Err(StorageError::Backend(_))
+        Err(StorageError::Full)
     ));
     tx.abort();
     assert!(db.begin_read().unwrap().get(A, b"a").unwrap().is_none());

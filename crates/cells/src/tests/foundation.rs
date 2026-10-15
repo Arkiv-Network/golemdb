@@ -5,9 +5,9 @@ use crate::*;
 #[test]
 fn cell_batch_keeps_last_operation_and_reports_changes_in_key_order() {
     use golemdb_merkle::{Keccak256Hasher, RootRef};
-    use golemdb_storage::{Database, MemoryDatabase};
+    use golemdb_storage::{MemoryStore, Store};
 
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let cells = Cells::new(&Keccak256Hasher);
     let mut tx = db.begin_write().unwrap();
     let key = |id| CellKey::new(id, CellNameRef::raw(b"value"));
@@ -63,7 +63,7 @@ fn cell_batch_keeps_last_operation_and_reports_changes_in_key_order() {
     ] {
         assert_eq!(cells.get(&tx, &key(id)).unwrap(), expected);
     }
-    let fresh_db = MemoryDatabase::new();
+    let fresh_db = MemoryStore::new();
     let mut fresh_tx = fresh_db.begin_write().unwrap();
     let fresh = cells
         .apply(&mut fresh_tx, RootRef::Empty, [put(1, 0), put(2, 0)])

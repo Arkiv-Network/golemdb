@@ -1,6 +1,6 @@
 use golemdb_cells::CellChange;
 use golemdb_merkle::{HashProvider, RootRef};
-use golemdb_storage::{Database, ReadCursor, WriteTransaction};
+use golemdb_storage::{ReadCursor, Store, WriteTransaction};
 
 use crate::{
     BranchError, Result,
@@ -41,7 +41,7 @@ pub fn create_genesis_in(
     )?;
     write_format(&mut buffer, gc::RETENTION)?;
     let head = Head {
-        commit_id: 0,
+        commit_id: crate::CommitId::GENESIS,
         state_root: cells.root.hash(hasher),
         index_root: index.root.hash(hasher),
     };
@@ -53,7 +53,7 @@ pub fn create_genesis_in(
 
 /// [`create_genesis_in`] in its own committed writer.
 pub(crate) fn create(
-    database: &impl Database,
+    database: &impl Store,
     hasher: &impl HashProvider,
     cells: impl IntoIterator<Item = CellChange>,
 ) -> Result<()> {

@@ -1,0 +1,111 @@
+name: Portability
+
+# Checks that every platform computes the same roots and key limits,
+# and can reopen and extend databases written on the other platforms.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer run on the same branch cancels the one in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Runs the `create` or `extend` test, which needs absolute paths.
+  PORTABILITY: cargo test -p golemdb-integration-tests --test portability -- --ignored --exact
+
+jobs:
+  create:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p golemdb-integration-tests --test portability --no-run
+      - name: OS page size
+        run: getconf PAGESIZE
+      - name: Create databases
+        run: |
+          mkdir reports
+          report="reports/create-on-${{ matrix.os }}.txt"
+          PORTABILITY_DIR="$PWD/db" PORTABILITY_REPORT="$PWD/$report" $PORTABILITY create
+          cat "$report"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: db-${{ matrix.os }}
+          path: db/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report-create-${{ matrix.os }}
+          path: reports/
+
+  extend:
+    needs: create
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p golemdb-integration-tests --test portability --no-run
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: db-*
+          path: dbs
+      # Reopen and extend the databases from every platform, including this one.
+      - name: Extend databases
+        run: |
+          mkdir reports
+          for db in dbs/db-*; do
+            report="reports/extend-${db#dbs/db-}-on-${{ matrix.os }}.txt"
+            PORTABILITY_DIR="$PWD/$db" PORTABILITY_REPORT="$PWD/$report" $PORTABILITY extend
+            echo "== $report" && cat "$report"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: report-extend-${{ matrix.os }}
+          path: reports/
+
+  compare:
+    needs: extend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: report-*
+          path: reports
+          merge-multiple: true
+      # Every create report must match, and so must every extend report. Each
+      # reopened database must show the head its creator left.
+      - name: Compare reports
+        run: |
+          status=0
+          compare() {
+            reference=$1
+            shift
+            for report in "$@"; do
+              diff -u "$reference" "$report" || status=1
+            done
+          }
+          compare reports/create-on-*.txt
+          compare reports/extend-*.txt
+          for report in reports/*.txt; do
+            grep ' head ' "$report" > "${report%.txt}.head"
+          done
+          compare reports/*.head
+          exit $status

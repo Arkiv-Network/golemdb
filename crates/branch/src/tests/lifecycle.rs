@@ -11,9 +11,7 @@ use std::{
 use crate::{BranchError, BranchId, BranchInfo, Branches, OperationError, tables::SUPERBLOCK};
 use golemdb_cells::{CellKey, CellNameRef, CellValue, tables};
 use golemdb_merkle::{HashProvider, Keccak256Hasher};
-use golemdb_storage::{
-    Database, MemoryDatabase, ReadTransaction, StorageError, Table, WriteTransaction,
-};
+use golemdb_storage::{MemoryStore, ReadTransaction, StorageError, Store, Table, WriteTransaction};
 
 fn key() -> CellKey {
     CellKey::new(64, CellNameRef::raw(b"name"))
@@ -25,7 +23,7 @@ fn value(text: &str) -> CellValue {
 
 // Simulate external publication independently of the branch reader under test.
 // Placeholder roots suffice here: these tests do not seal or commit.
-fn publish(db: &impl Database, commit: u64, text: &str) {
+fn publish(db: &impl Store, commit: u64, text: &str) {
     let mut row = commit.to_be_bytes().to_vec();
     row.extend_from_slice(&[0x11; 32]);
     row.extend_from_slice(&[0x22; 32]);
@@ -37,14 +35,11 @@ fn publish(db: &impl Database, commit: u64, text: &str) {
     tx.commit().unwrap();
 }
 
-fn get<D: Database>(
-    branches: &Branches<D, impl HashProvider>,
-    handle: BranchId,
-) -> Option<CellValue> {
+fn get<S: Store>(branches: &Branches<S, impl HashProvider>, handle: BranchId) -> Option<CellValue> {
     branches.read(handle, |cells| cells.get(&key())).unwrap()
 }
 
-fn put<D: Database>(branches: &Branches<D, impl HashProvider>, handle: BranchId, text: &str) {
+fn put<S: Store>(branches: &Branches<S, impl HashProvider>, handle: BranchId, text: &str) {
     branches
         .write(handle, |cells| {
             cells.put(key(), value(text));
@@ -53,7 +48,7 @@ fn put<D: Database>(branches: &Branches<D, impl HashProvider>, handle: BranchId,
         .unwrap();
 }
 
-fn assert_invalid<D: Database>(branches: &Branches<D, impl HashProvider>, handle: BranchId) {
+fn assert_invalid<S: Store>(branches: &Branches<S, impl HashProvider>, handle: BranchId) {
     assert!(matches!(
         branches.branch_info(handle),
         Err(BranchError::HandleInvalid)
@@ -87,12 +82,12 @@ fn assert_invalid<D: Database>(branches: &Branches<D, impl HashProvider>, handle
 
 #[test]
 fn branch_info_counts_retained_undo_entries_instead_of_callbacks_or_net_changes() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     publish(&db, 9, "origin");
     let branches = Branches::new(db, Keccak256Hasher).unwrap();
     let id = branches.begin().unwrap();
     let info = BranchInfo {
-        commit_id: 9,
+        commit_id: crate::CommitId::new(9),
         branch_id: id,
         version: 0,
         sealed: false,
@@ -146,7 +141,7 @@ fn branch_info_counts_retained_undo_entries_instead_of_callbacks_or_net_changes(
 
 #[test]
 fn each_operation_independently_detects_a_stale_head() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     publish(&db, 0, "origin");
     let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
     let handles: Vec<_> = (0..6).map(|_| branches.begin().unwrap()).collect();
@@ -185,7 +180,7 @@ fn each_operation_independently_detects_a_stale_head() {
 
 #[test]
 fn missing_and_malformed_heads_are_errors_not_genesis() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     assert!(matches!(
         Branches::new(db.clone(), Keccak256Hasher),
         Err(BranchError::MissingHead)
@@ -205,20 +200,20 @@ fn missing_and_malformed_heads_are_errors_not_genesis() {
     for number in [0, 0x0102_0304_0506_0708, u64::MAX] {
         publish(&db, number, "origin");
         let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
-        assert_eq!(branches.head().unwrap(), number);
+        assert_eq!(branches.head().unwrap(), crate::CommitId::new(number));
         assert_eq!(
             branches
                 .branch_info(branches.begin().unwrap())
                 .unwrap()
                 .commit_id,
-            number
+            crate::CommitId::new(number)
         );
     }
 }
 
 #[test]
 fn every_existing_handle_operation_rejects_bad_head_before_callback_or_mutation() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     publish(&db, 0, "origin");
     let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
     let b = branches.begin().unwrap();
@@ -267,7 +262,7 @@ fn every_existing_handle_operation_rejects_bad_head_before_callback_or_mutation(
 
 #[test]
 fn handles_are_unique_across_managers_and_clones_share_ownership() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     publish(&db, 0, "origin");
     let first = Branches::new(db.clone(), Keccak256Hasher).unwrap();
     let second = Branches::new(db.clone(), Keccak256Hasher).unwrap();
@@ -276,7 +271,7 @@ fn handles_are_unique_across_managers_and_clones_share_ownership() {
     assert_ne!(a, b);
     assert_invalid(&second, a);
     assert_invalid(&first, b);
-    assert_invalid(&first, u64::MAX);
+    assert_invalid(&first, crate::BranchId::new(u64::MAX));
     put(&first.clone(), a, "shared");
     assert_eq!(get(&first, a), Some(value("shared")));
     drop(first);
@@ -289,7 +284,7 @@ fn handles_are_unique_across_managers_and_clones_share_ownership() {
 
 #[test]
 fn callback_failures_and_panics_preserve_state_and_leave_manager_usable() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     publish(&db, 0, "origin");
     let branches = Branches::new(db, Keccak256Hasher).unwrap();
     let b = branches.begin().unwrap();
@@ -325,7 +320,7 @@ fn callback_failures_and_panics_preserve_state_and_leave_manager_usable() {
 
 #[test]
 fn head_check_and_cell_reads_use_one_snapshot_even_when_head_moves_mid_call() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     publish(&db, 12, "old");
     let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
     let b = branches.begin().unwrap();
@@ -357,7 +352,7 @@ fn head_check_and_cell_reads_use_one_snapshot_even_when_head_moves_mid_call() {
 
 #[test]
 fn independent_branches_do_not_wait_for_another_branch_callback() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     publish(&db, 0, "origin");
     let branches = Branches::new(db, Keccak256Hasher).unwrap();
     let a = branches.begin().unwrap();
@@ -387,7 +382,7 @@ fn independent_branches_do_not_wait_for_another_branch_callback() {
 
 #[test]
 fn concurrent_operations_on_one_branch_are_atomic_and_do_not_lose_updates() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     publish(&db, 0, "origin");
     let branches = Branches::new(db, Keccak256Hasher).unwrap();
     let b = branches.begin().unwrap();
@@ -425,19 +420,19 @@ fn concurrent_operations_on_one_branch_are_atomic_and_do_not_lose_updates() {
 
 #[derive(Clone)]
 struct FaultDatabase {
-    inner: MemoryDatabase,
+    inner: MemoryStore,
     fail_open: Arc<AtomicBool>,
     fail_head: Arc<AtomicBool>,
 }
 
 struct FaultRead {
-    inner: <MemoryDatabase as Database>::Read<'static>,
+    inner: <MemoryStore as Store>::Read<'static>,
     fail_head: Arc<AtomicBool>,
 }
 
-impl Database for FaultDatabase {
+impl Store for FaultDatabase {
     type Read<'a> = FaultRead;
-    type Write<'a> = <MemoryDatabase as Database>::Write<'a>;
+    type Write<'a> = <MemoryStore as Store>::Write<'a>;
     fn begin_read(&self) -> golemdb_storage::Result<Self::Read<'_>> {
         if self.fail_open.load(Ordering::Relaxed) {
             return Err(StorageError::Poisoned("injected open failure"));
@@ -453,7 +448,7 @@ impl Database for FaultDatabase {
 }
 
 impl ReadTransaction for FaultRead {
-    type Cursor<'a> = <<MemoryDatabase as Database>::Read<'static> as ReadTransaction>::Cursor<'a>;
+    type Cursor<'a> = <<MemoryStore as Store>::Read<'static> as ReadTransaction>::Cursor<'a>;
     fn get(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Option<Vec<u8>>> {
         if table == SUPERBLOCK && self.fail_head.load(Ordering::Relaxed) {
             return Err(StorageError::Poisoned("injected head read failure"));
@@ -468,7 +463,7 @@ impl ReadTransaction for FaultRead {
 #[test]
 fn storage_admission_failures_preserve_branch_and_do_not_run_callbacks() {
     let db = FaultDatabase {
-        inner: MemoryDatabase::new(),
+        inner: MemoryStore::new(),
         fail_open: Arc::new(AtomicBool::new(false)),
         fail_head: Arc::new(AtomicBool::new(false)),
     };
@@ -510,7 +505,7 @@ fn storage_admission_failures_preserve_branch_and_do_not_run_callbacks() {
 fn prefix_scans_match_encoded_keys_through_both_public_views() {
     use std::collections::BTreeMap;
 
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     publish(&db, 0, "original");
     let cell = |id, name: &[u8]| CellKey::new(id, CellNameRef::raw(name));
     let mut expected = BTreeMap::from([(key(), value("original"))]);

@@ -5,10 +5,92 @@ use golemdb_cells::{
     system,
 };
 use golemdb_merkle::Keccak256Hasher;
-use golemdb_storage::{Database, MemoryDatabase};
+use golemdb_storage::{MemoryStore, Store};
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
 const OTHER: RecordKey = RecordKey([0x43; 32]);
+
+// Publish after acquiring a snapshot to deterministically exercise a concurrent
+// head change during get, without timing-dependent thread scheduling.
+struct AdvancingReadDb {
+    db: MemoryStore,
+    after_snapshot: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl Store for AdvancingReadDb {
+    type Read<'db> = <MemoryStore as Store>::Read<'db>;
+    type Write<'db> = <MemoryStore as Store>::Write<'db>;
+
+    fn begin_read(&self) -> golemdb_storage::Result<Self::Read<'_>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let snapshot = self.db.begin_read()?;
+        let hook = self.after_snapshot.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        Ok(snapshot)
+    }
+
+    fn begin_write(&self) -> golemdb_storage::Result<Self::Write<'_>> {
+        self.db.begin_write()
+    }
+}
+
+#[test]
+fn head_selection_and_record_read_share_one_snapshot() {
+    use std::sync::atomic::Ordering;
+
+    let (db, branches, records) = setup();
+    let first = branches.begin().unwrap();
+    records.create(first, KEY, values("before")).unwrap();
+    branches.commit(first).unwrap();
+    let next = branches.begin().unwrap();
+    records
+        .patch(
+            next,
+            KEY,
+            [(name(b"name"), CellPatch::Set(text("after", true)))].into(),
+        )
+        .unwrap();
+    let reader_branches = Branches::new(
+        AdvancingReadDb {
+            db,
+            after_snapshot: std::sync::Mutex::new(None),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        },
+        Keccak256Hasher,
+    )
+    .unwrap();
+    let reader = Records::new(reader_branches.clone());
+    let writer = branches.clone();
+    *reader_branches.store().after_snapshot.lock().unwrap() = Some(Box::new(move || {
+        writer.commit(next).unwrap();
+    }));
+    reader_branches.store().reads.store(0, Ordering::SeqCst);
+    let snapshot = reader.get(ReadTarget::Head, KEY, None).unwrap();
+    assert_eq!(snapshot.cells[b"name".as_slice()].as_str(), Some("before"));
+    assert_eq!(reader_branches.store().reads.load(Ordering::SeqCst), 1);
+    assert_eq!(branches.head().unwrap(), golemdb_branch::CommitId::new(2));
+    let latest = reader.get(ReadTarget::Head, KEY, None).unwrap();
+    assert_eq!(latest.cells[b"name".as_slice()].as_str(), Some("after"));
+    assert!(matches!(
+        reader.get(ReadTarget::Commit(golemdb_branch::CommitId::new(1)), KEY, None),
+        Err(RecordError::CommitUnavailable {
+            requested, head
+        }) if requested.get() == 1 && head.get() == 2
+    ));
+    assert_eq!(
+        reader
+            .get(
+                ReadTarget::Commit(golemdb_branch::CommitId::new(2)),
+                KEY,
+                None
+            )
+            .unwrap(),
+        latest
+    );
+}
 
 fn name(bytes: &[u8]) -> CellName {
     CellNameRef::raw(bytes).into()
@@ -33,7 +115,7 @@ fn binding(key: RecordKey) -> CellKey {
 
 // Explicit initialized state, as supplied by the future connection/genesis layer.
 // Build the real cell trie so seal/commit exercise production root updates.
-fn initialize<D: Database>(db: D) -> Branches<D, Keccak256Hasher> {
+fn initialize<D: Store>(db: D) -> Branches<D, Keccak256Hasher> {
     let mut changes = Vec::new();
     let mut put = |id, name: CellNameRef<'_>, value| {
         changes.push(CellChange::Put {
@@ -69,18 +151,18 @@ fn initialize<D: Database>(db: D) -> Branches<D, Keccak256Hasher> {
 }
 
 fn setup() -> (
-    MemoryDatabase,
-    Branches<MemoryDatabase, Keccak256Hasher>,
-    Records<MemoryDatabase, Keccak256Hasher>,
+    MemoryStore,
+    Branches<MemoryStore, Keccak256Hasher>,
+    Records<MemoryStore, Keccak256Hasher>,
 ) {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let branches = initialize(db.clone());
     let records = Records::new(branches.clone());
     (db, branches, records)
 }
-fn snapshot<D: Database>(
-    branches: &Branches<D, Keccak256Hasher>,
-    b: u64,
+fn snapshot<S: Store>(
+    branches: &Branches<S, Keccak256Hasher>,
+    b: golemdb_branch::BranchId,
 ) -> Vec<(CellKey, CellValue)> {
     branches
         .read(b, |cell_reader| {
@@ -90,7 +172,10 @@ fn snapshot<D: Database>(
         })
         .unwrap()
 }
-fn allocated<D: Database>(branches: &Branches<D, Keccak256Hasher>, b: u64) -> u64 {
+fn allocated<S: Store>(
+    branches: &Branches<S, Keccak256Hasher>,
+    b: golemdb_branch::BranchId,
+) -> u64 {
     branches
         .read(b, |cell_reader| {
             cell_reader.get(&CellKey::new(system::ALLOC.id, reserved::NEXT_RECORD_ID))
@@ -100,7 +185,11 @@ fn allocated<D: Database>(branches: &Branches<D, Keccak256Hasher>, b: u64) -> u6
         .as_u64()
         .unwrap()
 }
-fn id<D: Database>(branches: &Branches<D, Keccak256Hasher>, b: u64, key: RecordKey) -> u64 {
+fn id<S: Store>(
+    branches: &Branches<S, Keccak256Hasher>,
+    b: golemdb_branch::BranchId,
+    key: RecordKey,
+) -> u64 {
     branches
         .read(b, |cell_reader| cell_reader.get(&binding(key)))
         .unwrap()
@@ -120,7 +209,10 @@ fn work_in_progress_is_isolated_and_projection_preserves_identity() {
     assert_eq!(full.cells.len(), 2);
     assert_eq!(full.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
     assert!(!full.cells[b"#key".as_slice()].is_indexable());
-    for target in [ReadTarget::Branch(b), ReadTarget::Commit(0)] {
+    for target in [
+        ReadTarget::Branch(b),
+        ReadTarget::Commit(golemdb_branch::CommitId::new(0)),
+    ] {
         assert!(matches!(
             records.get(target, KEY, None),
             Err(RecordError::NotFound)
@@ -185,7 +277,7 @@ fn reserved_records_are_readable_but_only_exact_keys_are_protected() {
     let projection = [name(&system::ALLOC.key)];
     let bindings = records
         .get(
-            ReadTarget::Commit(0),
+            ReadTarget::Commit(golemdb_branch::CommitId::new(0)),
             RecordKey(system::RECORD_KEYS.key),
             Some(&projection),
         )
@@ -211,10 +303,6 @@ fn invalid_operations_leave_cells_allocator_and_version_unchanged() {
     assert!(matches!(
         records.create(b, KEY, values("duplicate")),
         Err(RecordError::AlreadyExists)
-    ));
-    assert!(matches!(
-        records.create(b, OTHER, Default::default()),
-        Err(RecordError::InvalidArgument(_))
     ));
     for invalid in [
         b"#key".as_slice(),
@@ -247,10 +335,6 @@ fn invalid_operations_leave_cells_allocator_and_version_unchanged() {
         ));
     }
     assert!(matches!(
-        records.patch(b, KEY, [(name(b"name"), CellPatch::Remove)].into()),
-        Err(RecordError::InvalidArgument(_))
-    ));
-    assert!(matches!(
         records.patch(b, OTHER, Default::default()),
         Err(RecordError::NotFound)
     ));
@@ -263,7 +347,7 @@ fn invalid_operations_leave_cells_allocator_and_version_unchanged() {
 }
 
 #[test]
-fn patches_check_final_shape_and_no_ops_add_no_journal_entries() {
+fn patches_update_cells_and_no_ops_add_no_journal_entries() {
     let (_, branches, records) = setup();
     let b = branches.begin().unwrap();
     records.create(b, KEY, values("Alice")).unwrap();
@@ -439,7 +523,10 @@ fn committed_cell_reader_keeps_one_snapshot_when_head_advances() {
         )
         .unwrap();
     let tx = db.begin_read().unwrap();
-    assert_eq!(golemdb_branch::read_head(&tx).unwrap(), 1);
+    assert_eq!(
+        golemdb_branch::read_head(&tx).unwrap(),
+        golemdb_branch::CommitId::new(1)
+    );
     let cell_reader = golemdb_cells::CellReader::new(&tx);
     branches.commit(b).unwrap();
     assert_eq!(
@@ -454,7 +541,14 @@ fn committed_cell_reader_keeps_one_snapshot_when_head_advances() {
     assert_eq!(stored.len(), 2);
     assert_eq!(stored[1].1, text("before", true));
     assert_eq!(
-        records.get(ReadTarget::Commit(2), KEY, None).unwrap().cells[b"name".as_slice()],
+        records
+            .get(
+                ReadTarget::Commit(golemdb_branch::CommitId::new(2)),
+                KEY,
+                None
+            )
+            .unwrap()
+            .cells[b"name".as_slice()],
         text("after", true)
     );
 }
@@ -484,4 +578,73 @@ fn committed_record_reads_reject_missing_or_unsupported_format() {
             ))
         ));
     }
+}
+
+#[test]
+fn committed_reads_by_id_match_get_and_check_the_commit() {
+    let (db, branches, records) = setup();
+    let b = branches.begin().unwrap();
+    records.create(b, KEY, values("Alice")).unwrap();
+    let head = branches.commit(b).unwrap();
+
+    let (tx, at) = crate::committed_snapshot(&db, None).unwrap();
+    assert_eq!(at, head);
+    let cell_reader = golemdb_cells::CellReader::new(&tx);
+    let only_name = [name(b"name")];
+    for projection in [None, Some(&only_name[..]), Some(&[][..])] {
+        assert_eq!(
+            crate::read_committed_by_id(&cell_reader, 64, projection).unwrap(),
+            records.get(ReadTarget::Head, KEY, projection).unwrap()
+        );
+    }
+
+    assert_eq!(crate::committed_snapshot(&db, Some(head)).unwrap().1, head);
+    let older = golemdb_branch::CommitId::new(head.get() - 1);
+    assert!(matches!(
+        crate::committed_snapshot(&db, Some(older)),
+        Err(RecordError::CommitUnavailable { requested, head: got })
+            if requested == older && got == head
+    ));
+}
+
+/// Callers pass IDs they know are live, so a record without a valid `#key`
+/// is corrupt state, never an absent record.
+#[test]
+fn committed_reads_by_id_reject_a_missing_or_invalid_key_cell() {
+    let key_cell = CellKey::new(64, reserved::KEY);
+    for bad in [
+        None,
+        Some(text("not a key", false)),
+        Some(field(CellType::FixedBytes(Width::W16), &[0x42; 16])),
+    ] {
+        let (db, branches, records) = setup();
+        let b = branches.begin().unwrap();
+        records.create(b, KEY, values("Alice")).unwrap();
+        branches
+            .write(b, |cell_writer| {
+                match bad.clone() {
+                    Some(value) => cell_writer.put(key_cell.clone(), value),
+                    None => cell_writer.delete(key_cell.clone()),
+                }
+                Ok::<_, RecordError>(())
+            })
+            .unwrap();
+        branches.commit(b).unwrap();
+
+        let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
+        let cell_reader = golemdb_cells::CellReader::new(&tx);
+        assert!(
+            matches!(
+                crate::read_committed_by_id(&cell_reader, 64, None),
+                Err(RecordError::CorruptState(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    let (db, _, _) = setup();
+    let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
+    assert!(matches!(
+        crate::read_committed_by_id(&golemdb_cells::CellReader::new(&tx), 64, None),
+        Err(RecordError::CorruptState("record has no #key"))
+    ));
 }

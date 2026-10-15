@@ -41,6 +41,31 @@
 //! ([`Width::decimal_scale`]): `dec32` 4, `dec64` 6, `dec128` 18, `dec256` 18.
 //! `dec256` is fixed by Arkiv (wei); the others await sign-off.
 //!
+//! # Typed construction
+//!
+//! [`CellValue::from_i32`] and the other `from_<type>` constructors accept natural
+//! typed values and handle canonical encoding. They create fields by default;
+//! [`CellValue::with_kind`] enables indexing when the type supports it. No caller
+//! bit transformations or indexing flags are needed. Float constructors reject
+//! NaN and normalize negative zero; encoded-byte parsing remains strict.
+//!
+//! ```
+//! use golemdb_cells::{CellKind, CellValue};
+//! let price = CellValue::from_i32(50).with_kind(CellKind::Attribute)?;
+//! let description = CellValue::from_str("A product");
+//! assert_eq!(price.as_i32(), Some(50));
+//! assert_eq!(price.encoded_bytes(), &[0x90, 0x80, 0, 0, 0x32]);
+//! assert_eq!(description.kind(), CellKind::Field);
+//! # Ok::<(), golemdb_cells::CellValueParseError>(())
+//! ```
+//!
+//! Decimals accept unscaled integers (`from_dec32_unscaled(123_450)` represents
+//! 12.3450 at scale 4). The 256-bit constructors use natural big-endian arrays,
+//! signed values in two's complement. Dates use days and timestamps microseconds
+//! since the Unix epoch. Deployment limits are still checked at record admission.
+//! The former two-argument `from_u64`/`from_bytes32` constructors now take only
+//! the value; use `with_kind(CellKind::Attribute)` to request an attribute.
+//!
 //! # Addressing and ownership
 //!
 //! [`CellName`] is the within-record name (including raw reserved-record keys).
@@ -75,18 +100,18 @@
 //! ```
 //! use golemdb_cells::{CellChange, CellKey, CellNameRef, CellValue, Cells};
 //! use golemdb_merkle::{Keccak256Hasher, RootRef};
-//! use golemdb_storage::{Database, MemoryDatabase, WriteTransaction};
+//! use golemdb_storage::{Store, MemoryStore, WriteTransaction};
 //!
-//! let db = MemoryDatabase::new();
+//! let store = MemoryStore::new();
 //! let hasher = Keccak256Hasher;
 //! let cells = Cells::new(&hasher);
 //! let key = CellKey::new(42, CellNameRef::parse_user(b"status", 64)?);
-//! let mut tx = db.begin_write()?;
+//! let mut tx = store.begin_write()?;
 //! let update = cells.apply(&mut tx, RootRef::Empty, [CellChange::Put {
 //!     key: key.clone(), value: CellValue::parse(b"\x02ready".to_vec())?,
 //! }])?;
 //! tx.commit()?;
-//! let read = db.begin_read()?;
+//! let read = store.begin_read()?;
 //! assert_eq!(cells.get(&read, &key)?.unwrap().as_str(), Some("ready"));
 //! assert_eq!(cells.reopen(&read, update.root.hash(&hasher))?, update.root);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -118,7 +143,7 @@ pub use error::{CellError, CellValueParseError, Result};
 pub use key::{CellKey, CellKeyError};
 pub use name::{CellName, CellNameError, CellNameRef, reserved};
 pub use order::{decode_float, encode_float, flip_sign};
-pub use types::{CellType, FloatWidth, Width};
+pub use types::{CellKind, CellType, FloatWidth, Width};
 pub use value::{CellValue, CellValueRef};
 
 /// Cell trie paths are full hash digests of the encoded cell key.

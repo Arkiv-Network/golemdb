@@ -1,7 +1,7 @@
 use golemdb_branch::{BranchError, BranchId, Branches, OperationError, tables::SUPERBLOCK};
 use golemdb_cells::{CellKey, CellNameRef, CellValue, tables};
 use golemdb_merkle::{HashProvider, Keccak256Hasher};
-use golemdb_storage::{Database, MemoryDatabase, ReadTransaction, WriteTransaction};
+use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction};
 
 fn key() -> CellKey {
     CellKey::new(64, CellNameRef::raw(b"name"))
@@ -13,7 +13,7 @@ fn value(text: &str) -> CellValue {
 
 // Simulate external publication independently of the branch reader under test.
 // Placeholder roots suffice here: these tests do not seal or commit.
-fn publish(db: &impl Database, commit: u64, text: &str) {
+fn publish(db: &impl Store, commit: u64, text: &str) {
     let mut row = commit.to_be_bytes().to_vec();
     row.extend_from_slice(&[0x11; 32]);
     row.extend_from_slice(&[0x22; 32]);
@@ -27,14 +27,11 @@ fn publish(db: &impl Database, commit: u64, text: &str) {
     tx.commit().unwrap();
 }
 
-fn get<D: Database>(
-    branches: &Branches<D, impl HashProvider>,
-    handle: BranchId,
-) -> Option<CellValue> {
+fn get<S: Store>(branches: &Branches<S, impl HashProvider>, handle: BranchId) -> Option<CellValue> {
     branches.read(handle, |cells| cells.get(&key())).unwrap()
 }
 
-fn put<D: Database>(branches: &Branches<D, impl HashProvider>, handle: BranchId, text: &str) {
+fn put<S: Store>(branches: &Branches<S, impl HashProvider>, handle: BranchId, text: &str) {
     branches
         .write(handle, |cells| {
             cells.put(key(), value(text));
@@ -43,7 +40,7 @@ fn put<D: Database>(branches: &Branches<D, impl HashProvider>, handle: BranchId,
         .unwrap();
 }
 
-fn assert_invalid<D: Database>(branches: &Branches<D, impl HashProvider>, handle: BranchId) {
+fn assert_invalid<S: Store>(branches: &Branches<S, impl HashProvider>, handle: BranchId) {
     assert!(matches!(
         branches.branch_info(handle),
         Err(BranchError::HandleInvalid)
@@ -75,15 +72,21 @@ fn assert_invalid<D: Database>(branches: &Branches<D, impl HashProvider>, handle
     ));
 }
 
-fn lifecycle(db: impl Database + Clone) {
+fn lifecycle(db: impl Store + Clone) {
     // 1. Two branches start independently over the same published head.
     publish(&db, 7, "origin");
     let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
-    assert_eq!(branches.head().unwrap(), 7);
+    assert_eq!(branches.head().unwrap(), golemdb_branch::CommitId::new(7));
     let edited = branches.begin().unwrap();
     let sibling = branches.begin().unwrap();
-    assert_eq!(branches.branch_info(edited).unwrap().commit_id, 7);
-    assert_eq!(branches.branch_info(sibling).unwrap().commit_id, 7);
+    assert_eq!(
+        branches.branch_info(edited).unwrap().commit_id,
+        golemdb_branch::CommitId::new(7)
+    );
+    assert_eq!(
+        branches.branch_info(sibling).unwrap().commit_id,
+        golemdb_branch::CommitId::new(7)
+    );
     assert!(sibling > edited);
 
     // 2. Writes and checkpoints in one branch are invisible to its sibling.
@@ -134,13 +137,16 @@ fn lifecycle(db: impl Database + Clone) {
     // 7. External publication invalidates old branches, even for overlay hits.
     put(&branches, sibling, "must not escape");
     publish(&db, 8, "new head");
-    assert_eq!(branches.head().unwrap(), 8);
+    assert_eq!(branches.head().unwrap(), golemdb_branch::CommitId::new(8));
     assert_invalid(&branches, sibling);
     assert_invalid(&branches, replacement);
 
     // 8. A new branch sees the new head; lifecycle calls have not altered its roots.
     let fresh = branches.begin().unwrap();
-    assert_eq!(branches.branch_info(fresh).unwrap().commit_id, 8);
+    assert_eq!(
+        branches.branch_info(fresh).unwrap().commit_id,
+        golemdb_branch::CommitId::new(8)
+    );
     assert_eq!(get(&branches, fresh), Some(value("new head")));
     let head = db
         .begin_read()
@@ -155,11 +161,11 @@ fn lifecycle(db: impl Database + Clone) {
 
 #[test]
 fn memory_lifecycle() {
-    lifecycle(MemoryDatabase::new());
+    lifecycle(MemoryStore::new());
 }
 
 #[test]
 fn mdbx_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
-    lifecycle(golemdb_storage_mdbx::MdbxDatabase::open(dir.path()).unwrap());
+    lifecycle(golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap());
 }

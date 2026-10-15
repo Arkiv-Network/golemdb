@@ -16,13 +16,28 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
       # Picks up the `channel` pinned in rust-toolchain.toml.
       - run: rustup show
+
+      - name: Install Just command runner
+        uses: extractions/setup-just@v3
+
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo build --workspace --all-targets --all-features
-      # Discover unit and integration tests together. A member with no local
-      # tests (such as the MDBX adapter) does not create an empty per-crate run.
-      - run: cargo nextest run --workspace --all-features
-      - run: cargo test --workspace --all-features --doc
+  
+      - name: check rust code style
+        run: |
+          just check_code
+
+      - name: build
+        run: |
+          just build
+
+      - name: test doc
+        run: |
+          just test_doc
+
+      - name: test
+        run: |
+          just nextest
 
   bench-build:
     runs-on: ubuntu-latest
@@ -31,4 +46,10 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --workspace --all-features --no-run
+
+      - name: Install Just command runner
+        uses: extractions/setup-just@v3
+
+      - name: build bench
+        run: |
+          just build_bench

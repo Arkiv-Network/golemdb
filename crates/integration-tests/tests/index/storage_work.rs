@@ -6,7 +6,7 @@ use golemdb_cells::CellType;
 use golemdb_index::{Index, IndexError, IndexTerm, PostingChange, tables};
 use golemdb_merkle::{Keccak256Hasher, RootRef};
 use golemdb_storage::{
-    Database, ReadTransaction, Result, StorageError, Table, WriteTransaction, scan_prefix,
+    ReadTransaction, Result, StorageError, Store, Table, WriteTransaction, scan_prefix,
 };
 
 const HASH: Keccak256Hasher = Keccak256Hasher;

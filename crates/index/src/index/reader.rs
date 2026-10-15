@@ -1,10 +1,12 @@
-use std::{iter::FusedIterator, ops::Bound};
+use std::iter::FusedIterator;
 
 use golemdb_merkle::{Hash, HashProvider, RootRef};
 use golemdb_storage::{ReadCursor, ReadTransaction, Scan, scan, scan_prefix};
 
 use super::Index;
-use crate::{Bitmap, INDEX_TRIE_PATH_BYTES, IndexTerm, Result, index_trie::decode_root, tables};
+use crate::{
+    Bitmap, INDEX_TRIE_PATH_BYTES, IndexTerm, Result, TermRange, index_trie::decode_root, tables,
+};
 
 impl<H: HashProvider> Index<'_, H> {
     /// Reconstruct current root metadata. Singleton recovery uses the flat table
@@ -20,25 +22,27 @@ impl<H: HashProvider> Index<'_, H> {
     /// Materialize a term's postings; absent terms return None, never an empty bitmap.
     pub fn bitmap(&self, tx: &impl ReadTransaction, term: &IndexTerm) -> Result<Option<Bitmap>> {
         self.bitmap_root(tx, term)?
-            .map(|hash| self.bitmaps.bitmap(tx, hash))
+            .map(|hash| self.bitmap_at(tx, hash))
             .transpose()
     }
 
-    /// Ordered flat-table scan. Constrain bounds to one name/type when evaluating
-    /// a typed predicate. This returns roots without materializing their bitmaps.
+    /// Materialize the postings under a bitmap root, as a [`TermScan`]
+    /// yields it, without looking its term up again.
+    pub fn bitmap_at(&self, tx: &impl ReadTransaction, root: Hash) -> Result<Bitmap> {
+        self.bitmaps.bitmap(tx, root)
+    }
+
+    /// Ordered scan of one name/type run, between the range's bounds.
+    /// This returns roots without materializing their bitmaps:
+    /// see [`Self::bitmap_at`].
     pub fn terms<'a, T: ReadTransaction>(
         &'a self,
         tx: &'a T,
-        lower: Bound<IndexTerm>,
-        upper: Bound<IndexTerm>,
+        range: TermRange,
     ) -> Result<TermScan<'a, T::Cursor<'a>, H>> {
+        let (lower, upper) = range.into_bounds();
         Ok(TermScan {
-            scan: scan(
-                tx,
-                tables::INDEX,
-                lower.map(IndexTerm::into_bytes),
-                upper.map(IndexTerm::into_bytes),
-            )?,
+            scan: scan(tx, tables::INDEX, lower, upper)?,
             hasher: self.hasher,
             done: false,
         })

@@ -13,19 +13,19 @@
 //! use golemdb_cells::CellType;
 //! use golemdb_index::{Index, IndexTerm, PostingChange};
 //! use golemdb_merkle::{Keccak256Hasher, RootRef};
-//! use golemdb_storage::{Database, MemoryDatabase, WriteTransaction};
+//! use golemdb_storage::{Store, MemoryStore, WriteTransaction};
 //!
-//! let db = MemoryDatabase::new();
+//! let store = MemoryStore::new();
 //! let hasher = Keccak256Hasher;
 //! let index = Index::new(&hasher);
 //! let term = IndexTerm::new("color", CellType::Str, b"blue")?;
-//! let mut tx = db.begin_write()?;
+//! let mut tx = store.begin_write()?;
 //! let update = index.apply(&mut tx, RootRef::Empty, [
 //!     PostingChange::Add { term: term.clone(), record_id: 42 },
 //! ])?;
 //! // The engine can write its head and history in this same transaction.
 //! tx.commit()?;
-//! let read = db.begin_read()?;
+//! let read = store.begin_read()?;
 //! assert!(index.bitmap(&read, &term)?.unwrap().treemap().contains(42));
 //! assert_eq!(index.reopen(&read, update.root.hash(&hasher))?, update.root);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -54,12 +54,14 @@ mod index_trie;
 pub mod path;
 pub mod tables;
 mod term;
+mod term_range;
 
 pub use bitmap::Bitmap;
 pub use container::BitmapContainer;
 pub use error::{BitmapError, IndexError, Result};
 pub use index::{Index, IndexUpdate, PostingChange, TermRootChange, TermScan};
 pub use term::{IndexTerm, TermError};
+pub use term_range::{RangeError, TermRange};
 
 /// IndexTrie routes by a complete term digest (32 bytes).
 /// This is a byte width, not the compressed trie's depth.

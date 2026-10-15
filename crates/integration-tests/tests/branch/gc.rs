@@ -9,10 +9,8 @@ use golemdb_cells::{
 };
 use golemdb_index::{Index, IndexTerm, tables as index};
 use golemdb_merkle::{BranchNodeCompact, Hash, Keccak256Hasher, RootRef};
-use golemdb_storage::{
-    Database, MemoryDatabase, ReadTransaction, Table, WriteTransaction, scan_prefix,
-};
-use golemdb_storage_mdbx::MdbxDatabase;
+use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
+use golemdb_storage_mdbx::MdbxStore;
 use proptest::prelude::*;
 
 const HASH: Keccak256Hasher = Keccak256Hasher;
@@ -112,14 +110,14 @@ fn assert_exact_graph(tx: &impl ReadTransaction, sealed: &SealedCommit) {
     assert_eq!(rows(tx, REFS), expected);
 }
 
-fn verify_rebuild(db: &impl Database, sealed: &SealedCommit) {
+fn verify_rebuild(db: &impl Store, sealed: &SealedCommit) {
     let tx = db.begin_read().unwrap();
     let values = rows(&tx, cells::CELL)
         .into_iter()
         .map(|(k, v)| (CellKey::decode(&k).unwrap(), CellValue::parse(v).unwrap()))
         .collect::<Vec<_>>();
-    let expected = MemoryDatabase::new();
-    super::seal::seed(&expected, &HASH, sealed.commit_id, &values);
+    let expected = MemoryStore::new();
+    super::seal::seed(&expected, &HASH, sealed.commit_id.get(), &values);
     let reference = expected.begin_read().unwrap();
     assert_eq!(
         tx.get(SUPERBLOCK, b"head").unwrap(),
@@ -140,7 +138,7 @@ fn verify_rebuild(db: &impl Database, sealed: &SealedCommit) {
 }
 
 fn shared(
-    branches: &Branches<MdbxDatabase, Keccak256Hasher>,
+    branches: &Branches<MdbxStore, Keccak256Hasher>,
     text: &str,
 ) -> std::sync::Arc<SealedCommit> {
     let branch = branches.begin().unwrap();
@@ -156,7 +154,7 @@ fn shared(
         .unwrap();
     let sealed = branches.seal(branch).unwrap();
     branches.commit(branch).unwrap();
-    verify_rebuild(branches.database(), &sealed);
+    verify_rebuild(branches.store(), &sealed);
     sealed
 }
 
@@ -164,7 +162,7 @@ fn shared(
 fn mdbx_readers_keep_old_graph_and_counts_survive_reopen() {
     let dir = tempfile::tempdir().unwrap();
     {
-        let db = MdbxDatabase::open(dir.path()).unwrap();
+        let db = MdbxStore::open(dir.path()).unwrap();
         let initial = [64, 65536, 131072]
             .into_iter()
             .flat_map(|id| {
@@ -219,7 +217,7 @@ fn mdbx_readers_keep_old_graph_and_counts_survive_reopen() {
         assert_eq!(TABLES.map(|t| rows(&snapshot, t)), old_rows);
         assert_exact_graph(&latest, &second);
     }
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let branches = Branches::new(db.clone(), HASH).unwrap();
     shared(&branches, "after-restart");
     let branch = branches.begin().unwrap();
@@ -250,7 +248,7 @@ fn mdbx_readers_keep_old_graph_and_counts_survive_reopen() {
 #[test]
 fn mdbx_rejects_legacy_without_reclaiming_any_rows_and_retries_failed_creation() {
     let dir = tempfile::tempdir().unwrap();
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let mut tx = db.begin_write().unwrap();
     let empty = golemdb_merkle::HashProvider::hash(&HASH, &[]);
     tx.put(
@@ -276,7 +274,7 @@ fn mdbx_rejects_legacy_without_reclaiming_any_rows_and_retries_failed_creation()
         assert_eq!(rows(&old, table), rows(&latest, table));
     }
     let fresh_dir = tempfile::tempdir().unwrap();
-    let fresh = MdbxDatabase::open(fresh_dir.path()).unwrap();
+    let fresh = MdbxStore::open(fresh_dir.path()).unwrap();
     let bad = golemdb_cells::CellChange::Put {
         key: key(64, b"\xff"),
         value: value("invalid-attribute", true),
@@ -293,7 +291,7 @@ fn mdbx_rejects_legacy_without_reclaiming_any_rows_and_retries_failed_creation()
 
 // A host commits genesis with its own rows; it adds Superblock identifiers
 // after the engine's, since genesis requires empty engine tables.
-fn host_genesis(db: impl Database + Clone) {
+fn host_genesis(db: impl Store + Clone) {
     const HOST: Table = Table("Host");
     let snapshot = || {
         let tx = db.begin_read().unwrap();
@@ -341,7 +339,10 @@ fn host_genesis(db: impl Database + Clone) {
         })
         .unwrap();
     let sealed = branches.seal(branch).unwrap();
-    assert_eq!(branches.commit(branch).unwrap(), 1);
+    assert_eq!(
+        branches.commit(branch).unwrap(),
+        golemdb_branch::CommitId::new(1)
+    );
     verify_rebuild(&db, &sealed);
     let tx = db.begin_read().unwrap();
     assert_eq!(tx.get(HOST, b"after").unwrap(), Some(b"genesis".to_vec()));
@@ -349,13 +350,13 @@ fn host_genesis(db: impl Database + Clone) {
 
 #[test]
 fn memory_host_genesis_is_atomic_with_host_rows() {
-    host_genesis(MemoryDatabase::new());
+    host_genesis(MemoryStore::new());
 }
 
 #[test]
 fn mdbx_host_genesis_is_atomic_with_host_rows() {
     let dir = tempfile::tempdir().unwrap();
-    host_genesis(MdbxDatabase::open(dir.path()).unwrap());
+    host_genesis(MdbxStore::open(dir.path()).unwrap());
 }
 
 proptest! {
@@ -365,7 +366,7 @@ proptest! {
         batches in prop::collection::vec(prop::collection::vec(
             (0u8..12, any::<bool>(), 0u8..5, 0u8..4), 0..8), 1..25)
     ) {
-        let db = MemoryDatabase::new();
+        let db = MemoryStore::new();
         super::seal::seed(&db, &HASH, 0, &[]);
         let branches = Branches::new(db.clone(), HASH).unwrap();
         for batch in batches {

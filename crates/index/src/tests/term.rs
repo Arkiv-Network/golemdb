@@ -3,7 +3,7 @@ use golemdb_cells::{
     CellType as T, CellValueRef, FloatWidth as F, Width as W, encode_float, flip_sign,
 };
 use golemdb_merkle::{Hash, HashProvider, Keccak256Hasher};
-use golemdb_storage::{Database, MemoryDatabase, Table, WriteTransaction, scan, scan_prefix};
+use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction, scan, scan_prefix};
 use proptest::prelude::*;
 use std::{cell::RefCell, ops::Bound::Included};
 
@@ -286,7 +286,7 @@ fn leaf_preimages_belong_to_index_and_use_the_supplied_provider() {
 
 #[test]
 fn ordered_terms_drive_storage_range_and_prefix_scans() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let table = Table("Index");
     let mut tx = db.begin_write().unwrap();
     for value in [-10i32, 0, 5, 20] {

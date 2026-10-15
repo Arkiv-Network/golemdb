@@ -6,9 +6,7 @@ use crate::{
     CellValueChange, CellValueParseError, CellValueRef, Cells, tables,
 };
 use golemdb_merkle::{HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
-use golemdb_storage::{
-    Database, MemoryDatabase, ReadTransaction, Table, WriteTransaction, scan_prefix,
-};
+use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
 
 const HASH: Keccak256Hasher = Keccak256Hasher;
@@ -54,7 +52,7 @@ fn leaf(key: &CellKey, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
     }
 }
 
-fn transitions_and_tagged_commitments(db: &impl Database) {
+fn transitions_and_tagged_commitments(db: &impl Store) {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     assert_eq!(cells.get(&tx, &key(42, b"status")).unwrap(), None);
@@ -134,7 +132,7 @@ fn transitions_and_tagged_commitments(db: &impl Database) {
     tx.commit().unwrap();
 }
 
-fn record_scans_preserve_raw_names_and_own_results(db: &impl Database) {
+fn record_scans_preserve_raw_names_and_own_results(db: &impl Store) {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     let names = [
@@ -178,7 +176,7 @@ fn record_scans_preserve_raw_names_and_own_results(db: &impl Database) {
     assert_eq!(result.as_str(), Some("data"));
 }
 
-fn batches_report_original_and_final_values_and_skip_noops(db: &impl Database) {
+fn batches_report_original_and_final_values_and_skip_noops(db: &impl Store) {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     let first = cells
@@ -249,7 +247,7 @@ fn batches_report_original_and_final_values_and_skip_noops(db: &impl Database) {
     assert!(empty_batch.changed_cells.is_empty());
 }
 
-fn snapshots_abort_and_old_branches(db: &impl Database) {
+fn snapshots_abort_and_old_branches(db: &impl Store) {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     let root = cells
@@ -330,7 +328,7 @@ fn snapshots_abort_and_old_branches(db: &impl Database) {
     );
 }
 
-fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Database) {
+fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     assert!(matches!(
@@ -405,15 +403,15 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Database) {
     tx.abort();
 }
 
-fn malformed_singleton_key_is_rejected(db: &impl Database) {
+fn malformed_singleton_key_is_rejected(db: &impl Store) {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     tx.put(tables::CELL, b"short", b"\x02value").unwrap();
     assert!(matches!(cells.reopen(&tx, [7; 32]), Err(CellError::Key(_))));
 }
 
-fn memory_db() -> ((), MemoryDatabase) {
-    ((), MemoryDatabase::new())
+fn memory_db() -> ((), MemoryStore) {
+    ((), MemoryStore::new())
 }
 
 macro_rules! suite {
@@ -443,7 +441,7 @@ proptest! {
     fn batches_match_a_flat_model_and_a_fresh_commitment(
         operations in prop::collection::vec((0u8..12, any::<u8>(), any::<bool>()), 0..80)
     ) {
-        let db = MemoryDatabase::new();
+        let db = MemoryStore::new();
         let cells = Cells::new(&HASH);
         let mut tx = db.begin_write().unwrap();
         let mut root = RootRef::Empty;
@@ -475,7 +473,7 @@ proptest! {
             prop_assert_eq!(cells.reopen(&tx, root.hash(&HASH)).unwrap(), root);
             // Rebuild in the opposite order in a separate store. Same final
             // state must have the same root despite different write history.
-            let fresh = MemoryDatabase::new();
+            let fresh = MemoryStore::new();
             let mut fresh_tx = fresh.begin_write().unwrap();
             let mut fresh_root = RootRef::Empty;
             for (key, value) in model.iter().rev() {

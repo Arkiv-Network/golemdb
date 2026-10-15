@@ -1,6 +1,6 @@
 //! Cell/index materialization shared by genesis creation and branch sealing.
 use golemdb_cells::{CellChange, CellKey, CellValue, Cells, CellsUpdate};
-use golemdb_index::{Index, IndexTerm, IndexUpdate, PostingChange, TermError};
+use golemdb_index::{Index, IndexTerm, IndexUpdate, PostingChange};
 use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::WriteTransaction;
 
@@ -40,7 +40,8 @@ fn term(key: &CellKey, value: Option<&CellValue>) -> Result<Option<IndexTerm>> {
         return Ok(None);
     };
     // Binary reserved field names never reach UTF-8/name validation.
-    let name = key.name();
-    let name = std::str::from_utf8(name.as_bytes()).map_err(|_| TermError::InvalidName)?;
-    Ok(IndexTerm::from_cell(name, value.as_view())?)
+    Ok(Some(IndexTerm::from_cell_name(
+        key.name(),
+        value.as_view(),
+    )?))
 }

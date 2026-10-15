@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::{BranchError, overlay::CellOverlay};
 use golemdb_cells::{CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, tables};
-use golemdb_storage::{Database, MemoryDatabase, WriteTransaction};
+use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 use proptest::prelude::*;
 
 fn key(slot: u8) -> CellKey {
@@ -25,7 +25,7 @@ proptest! {
     fn operations_and_frames_match_full_snapshot_model(
         actions in prop::collection::vec((0u8..8, 0u8..8, 0u8..20), 0..180)
     ) {
-        let db = MemoryDatabase::new();
+        let db = MemoryStore::new();
         let base = BTreeMap::from([(key(0), value(0)), (key(5), value(1))]);
         let mut tx = db.begin_write().unwrap();
         for (key, value) in &base {

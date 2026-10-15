@@ -4,26 +4,39 @@ use std::{path::Path, sync::Arc};
 use libmdbx::{NoWriteMap, RO, RW, TableFlags, TransactionKind, WriteFlags};
 
 use golemdb_storage::{
-    Database, Entry, ReadCursor, ReadTransaction, Result, StorageError, Table, WriteTransaction,
+    Entry, ReadCursor, ReadTransaction, Result, StorageError, Store, Table, WriteTransaction,
 };
+
+#[cfg(test)]
+mod tests;
 
 /// Backend capacity settings, not table declarations or logical storage quotas.
 #[derive(Clone, Copy, Debug)]
 pub struct MdbxOptions {
     pub max_tables: u64,
+    /// Maximum database size in bytes. Reserves address space, not disk.
     pub max_map_size: usize,
     pub growth_step: usize,
+    /// Page size in bytes, used only when creating a database. Sets the maximum key size.
+    pub page_size: usize,
 }
 
 impl Default for MdbxOptions {
     fn default() -> Self {
         Self {
             max_tables: 128,
-            max_map_size: 1024 * 1024 * 1024,
+            max_map_size: DEFAULT_MAX_MAP_SIZE,
             growth_step: 16 * 1024 * 1024,
+            page_size: DEFAULT_PAGE_SIZE,
         }
     }
 }
+
+/// 1 TiB: a generous ceiling, since it only reserves address space.
+const DEFAULT_MAX_MAP_SIZE: usize = 1024 * 1024 * 1024 * 1024;
+
+/// Fixed so the maximum key size doesn't depend on the OS page size.
+const DEFAULT_PAGE_SIZE: usize = 4096;
 
 /// Clone to share one environment. Do not independently open the same directory
 /// twice within a process; close all handles before reopening it.
@@ -31,18 +44,18 @@ impl Default for MdbxOptions {
 /// byte ordering and unique keys (no external integer/reverse/DUPSORT tables).
 ///
 /// ```
-/// use golemdb_storage::{Database, ReadTransaction, Table, WriteTransaction};
-/// use golemdb_storage_mdbx::MdbxDatabase;
+/// use golemdb_storage::{Store, ReadTransaction, Table, WriteTransaction};
+/// use golemdb_storage_mdbx::MdbxStore;
 /// let dir = tempfile::tempdir()?;
-/// let db = MdbxDatabase::open(dir.path())?;
-/// let mut tx = db.begin_write()?;
+/// let store = MdbxStore::open(dir.path())?;
+/// let mut tx = store.begin_write()?;
 /// tx.put(Table("Example"), b"key", b"value")?;
 /// tx.commit()?;
-/// assert_eq!(db.begin_read()?.get(Table("Example"), b"key")?, Some(b"value".to_vec()));
+/// assert_eq!(store.begin_read()?.get(Table("Example"), b"key")?, Some(b"value".to_vec()));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Clone)]
-pub struct MdbxDatabase {
+pub struct MdbxStore {
     inner: Arc<libmdbx::Database<NoWriteMap>>,
     limits: Limits,
 }
@@ -65,7 +78,7 @@ impl Limits {
     }
 }
 
-impl MdbxDatabase {
+impl MdbxStore {
     /// Create the directory if needed and open a durable read/write environment.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::open_with_options(path, MdbxOptions::default())
@@ -81,7 +94,11 @@ impl MdbxDatabase {
                 .into(),
             )
         };
-        if options.max_tables == 0 || options.max_map_size == 0 || options.growth_step == 0 {
+        if options.max_tables == 0
+            || options.max_map_size == 0
+            || options.growth_step == 0
+            || options.page_size == 0
+        {
             return Err(invalid());
         }
         let max_size = isize::try_from(options.max_map_size).map_err(|_| invalid())?;
@@ -91,6 +108,7 @@ impl MdbxDatabase {
             path,
             libmdbx::DatabaseOptions {
                 max_tables: Some(options.max_tables),
+                page_size: Some(libmdbx::PageSize::Set(options.page_size)),
                 mode: libmdbx::Mode::ReadWrite(libmdbx::ReadWriteOptions {
                     sync_mode: libmdbx::SyncMode::Durable,
                     max_size: Some(max_size),
@@ -133,6 +151,7 @@ impl MdbxDatabase {
 
 fn backend(error: libmdbx::Error) -> StorageError {
     match error {
+        libmdbx::Error::MapFull => StorageError::Full,
         libmdbx::Error::KeyExist => StorageError::AlreadyExists,
         error => StorageError::Backend(Box::new(error)),
     }
@@ -145,7 +164,14 @@ pub struct MdbxTransaction<'db, K: TransactionKind> {
 pub type MdbxReadTransaction<'db> = MdbxTransaction<'db, RO>;
 pub type MdbxWriteTransaction<'db> = MdbxTransaction<'db, RW>;
 
-impl Database for MdbxDatabase {
+impl Store for MdbxStore {
+    fn max_key_size(&self) -> usize {
+        self.limits.key
+    }
+    fn max_value_size(&self) -> usize {
+        self.limits.value
+    }
+
     type Read<'db> = MdbxReadTransaction<'db>;
     type Write<'db> = MdbxWriteTransaction<'db>;
     fn begin_read(&self) -> Result<Self::Read<'_>> {
@@ -237,6 +263,11 @@ impl MdbxWriteTransaction<'_> {
 }
 
 impl WriteTransaction for MdbxWriteTransaction<'_> {
+    fn is_empty(&self) -> Result<bool> {
+        let catalog = self.inner.open_table(None).map_err(backend)?;
+        Ok(self.inner.table_stat(&catalog).map_err(backend)?.entries() == 0)
+    }
+
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()> {
         self.write(table, key, value, WriteFlags::UPSERT)
     }

@@ -6,9 +6,7 @@ use std::{
 use crate::{
     BranchNodeCompact, Hash, HashProvider, Keccak256Hasher, LeafRef, MerkleError, RootRef, Trie,
 };
-use golemdb_storage::{
-    Database, MemoryDatabase, ReadTransaction, Table, WriteTransaction, scan_prefix,
-};
+use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
 
 const TABLE: Table = Table("TestBranches");
@@ -86,7 +84,7 @@ fn key<const N: usize>(id: u8) -> [u8; N] {
 }
 
 fn exercise<const N: usize>(ops: &[(u8, u32, u8)]) {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let trie = Trie::<_, N>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     let mut tx = db.begin_write().unwrap();
     let mut expected = BTreeMap::new();
@@ -173,7 +171,7 @@ fn batch_ids<const N: usize>(base: &[(u8, u32)], edits: &[(u8, u32, bool)]) {
 /// must match the oracle and the same edits made one at a time, keep the old
 /// root readable, and write only branches the new root reaches.
 fn batch<const N: usize>(base: &[([u8; N], u32)], edits: &[([u8; N], u32, bool)]) {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let trie = Trie::<_, N>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     let mut tx = db.begin_write().unwrap();
     let mut expected = BTreeMap::new();
@@ -340,7 +338,7 @@ fn empty_singleton_branch_and_replacement() {
 }
 
 fn deepest<const N: usize>() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let trie = Trie::<_, N>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     let mut tx = db.begin_write().unwrap();
     let mut root = RootRef::Empty;
@@ -377,7 +375,7 @@ fn every_depth_splits_and_collapses() {
 
 #[test]
 fn insertion_order_does_not_change_root() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     let leaves = [1, 2, 8, 32].map(|id| leaf(key(id), id as u32));
     let mut sorted = leaves.to_vec();
@@ -410,7 +408,7 @@ fn insertion_order_does_not_change_root() {
 
 #[test]
 fn snapshots_commit_abort_and_missing_branches() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     let old_read = db.begin_read().unwrap();
     let a = leaf(key(1), 1);
@@ -493,7 +491,7 @@ impl<T: WriteTransaction> WriteTransaction for Counted<T> {
 
 #[test]
 fn updates_touch_only_affected_branches_and_walk_is_lazy() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     let mut tx = Counted {
         tx: db.begin_write().unwrap(),
@@ -533,7 +531,7 @@ const PREFIXED_LEAVES: u16 = 1024;
 
 #[test]
 fn edits_off_a_prefix_cost_the_same_at_any_subtrie_size() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let trie = Trie::<_, 32>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     // The leaves differ only in their last two bytes, so the root branch's
     // prefix covers everything before them.
@@ -573,7 +571,7 @@ fn injected_error() -> golemdb_storage::StorageError {
 
 #[test]
 fn storage_errors_propagate_and_abort_discards_partial_branches() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     let mut tx = db.begin_write().unwrap();
     let a = leaf([0; 6], 1);

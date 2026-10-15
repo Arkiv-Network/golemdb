@@ -1,6 +1,6 @@
 use crate::buffer::Buffered;
 use golemdb_storage::{
-    Database, MemoryDatabase, ReadCursor, ReadTransaction, StorageError, Table, WriteTransaction,
+    MemoryStore, ReadCursor, ReadTransaction, StorageError, Store, Table, WriteTransaction,
 };
 use proptest::prelude::*;
 
@@ -15,7 +15,7 @@ proptest! {
         directions in prop::collection::vec(any::<bool>(), 0..60),
     ) {
         let table = Table("test");
-        let db = MemoryDatabase::new();
+        let db = MemoryStore::new();
         let mut seed = db.begin_write().unwrap();
         for (key, value) in initial { seed.put(table, &[key], &[value]).unwrap(); }
         seed.commit().unwrap();
@@ -57,7 +57,7 @@ proptest! {
 
 #[test]
 fn buffer_rejects_invalid_tables_and_cannot_publish() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let origin = db.begin_read().unwrap();
     let mut tx = Buffered::new(&origin);
     assert!(matches!(

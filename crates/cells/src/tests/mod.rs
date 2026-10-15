@@ -1,6 +1,7 @@
 //! Unit tests: [`vectors`] holds the accept/reject tables, [`properties`] the
 //! generated-input checks, [`order`] stored-form ordering, [`keys`] cell names.
 
+mod constructors;
 mod foundation;
 mod keys;
 mod order;
@@ -9,31 +10,6 @@ mod vectors;
 
 use crate::*;
 use vectors::*;
-
-#[test]
-fn typed_constructors_preserve_canonical_encoding_and_kind() {
-    for indexable in [false, true] {
-        for value in [0, 1, 0x0102030405060708, u64::MAX] {
-            let typed = CellValue::from_u64(value, indexable);
-            let encoded =
-                CellValueRef::new(CellType::Uint(Width::W8), &value.to_be_bytes(), indexable)
-                    .unwrap()
-                    .encode();
-            assert_eq!(typed.encoded_bytes(), encoded);
-            assert_eq!(CellValue::parse(encoded).unwrap(), typed);
-            assert_eq!(typed.as_u64(), Some(value));
-        }
-        for value in [[0; 32], [255; 32], core::array::from_fn(|i| i as u8)] {
-            let typed = CellValue::from_bytes32(value, indexable);
-            let encoded = CellValueRef::new(CellType::FixedBytes(Width::W32), &value, indexable)
-                .unwrap()
-                .encode();
-            assert_eq!(typed.encoded_bytes(), encoded);
-            assert_eq!(CellValue::parse(encoded).unwrap(), typed);
-            assert_eq!(typed.as_bytes32(), Some(value));
-        }
-    }
-}
 
 #[test]
 fn vectors_decode_and_re_encode() {

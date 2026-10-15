@@ -1,9 +1,7 @@
 use golemdb_cells::{CellKey, CellNameRef, CellType, CellValue, CellValueRef, tables as cells};
 use golemdb_index::tables as index;
 use golemdb_merkle::Keccak256Hasher;
-use golemdb_storage::{
-    Database, MemoryDatabase, ReadTransaction, Table, WriteTransaction, scan_prefix,
-};
+use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 
 use crate::{BranchError, Branches, head::read_head_state, tables::NODE_REFS as REFS};
 
@@ -19,8 +17,8 @@ fn value(text: &str) -> CellValue {
         .into()
 }
 
-fn database() -> MemoryDatabase {
-    let db = MemoryDatabase::new();
+fn database() -> MemoryStore {
+    let db = MemoryStore::new();
     crate::genesis::create(&db, &HASH, []).unwrap();
     db
 }
@@ -32,7 +30,7 @@ fn rows(tx: &impl ReadTransaction, table: Table) -> Vec<golemdb_storage::Entry> 
         .unwrap()
 }
 
-fn mutate(branches: &Branches<MemoryDatabase, Keccak256Hasher>, values: &[(u64, &str, &str)]) {
+fn mutate(branches: &Branches<MemoryStore, Keccak256Hasher>, values: &[(u64, &str, &str)]) {
     let branch = branches.begin().unwrap();
     branches
         .write(branch, |cells| {
@@ -45,7 +43,7 @@ fn mutate(branches: &Branches<MemoryDatabase, Keccak256Hasher>, values: &[(u64, 
     branches.commit(branch).unwrap();
 }
 
-fn assert_bounded(db: &MemoryDatabase) {
+fn assert_bounded(db: &MemoryStore) {
     let tx = db.begin_read().unwrap();
     let cell_rows = rows(&tx, cells::CELL);
     let terms = rows(&tx, index::INDEX);
@@ -79,7 +77,10 @@ fn commits_collect_by_default_and_remain_bounded_under_churn() {
         );
         assert_bounded(&db);
     }
-    assert_eq!(crate::read_head(&db.begin_read().unwrap()).unwrap(), 80);
+    assert_eq!(
+        crate::read_head(&db.begin_read().unwrap()).unwrap(),
+        crate::CommitId::new(80)
+    );
     let reopened = Branches::new(db.clone(), HASH).unwrap();
     mutate(&reopened, &[(64, "a", "final")]);
     assert_bounded(&db);
@@ -163,7 +164,10 @@ fn corrupt_reference_count_aborts_seal_and_keeps_the_branch_open_for_retry() {
         tx.delete(REFS, &ref_key).unwrap();
         tx.commit().unwrap();
     }
-    assert_eq!(branches.commit(branch).unwrap(), head.commit_id + 1);
+    assert_eq!(
+        branches.commit(branch).unwrap(),
+        crate::CommitId::new(head.commit_id.get() + 1)
+    );
     assert_bounded(&db);
 }
 

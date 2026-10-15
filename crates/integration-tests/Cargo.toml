@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dev-dependencies]
+golemdb-api.workspace = true
 golemdb-branch.workspace = true
 golemdb-cells.workspace = true
 golemdb-index.workspace = true

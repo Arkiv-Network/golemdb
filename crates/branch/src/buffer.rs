@@ -1,4 +1,4 @@
-//! Storage writes staged over a committed read snapshot, never a database writer.
+//! Storage writes staged over a committed read snapshot, never a store writer.
 use golemdb_storage::{
     Entry, ReadCursor, ReadTransaction, Result, StorageError, Table, WriteTransaction,
 };

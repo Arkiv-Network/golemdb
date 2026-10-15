@@ -3,6 +3,14 @@
 use crate::error::CellValueParseError;
 use crate::order::decode_float;
 
+/// Whether a cell participates in the index. Type and kind are independent,
+/// except that variable-length bytes can only be a field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellKind {
+    Field,
+    Attribute,
+}
+
 /// The `w` of a `4 · 2^w`-byte family: 4, 8, 16 or 32 bytes. A family's four
 /// members sit at consecutive type ids `base + w`, e.g. `u32..u256` at 12–15.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

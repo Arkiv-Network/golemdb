@@ -3,7 +3,7 @@ use std::cell::Cell;
 use crate::{CellChange, CellError, CellKey, CellNameRef, CellValue, Cells, tables};
 use golemdb_merkle::{Keccak256Hasher, RootRef};
 use golemdb_storage::{
-    Database, MemoryDatabase, ReadCursor, ReadTransaction, StorageError, Table, WriteTransaction,
+    MemoryStore, ReadCursor, ReadTransaction, StorageError, Store, Table, WriteTransaction,
 };
 
 const HASH: Keccak256Hasher = Keccak256Hasher;
@@ -74,7 +74,7 @@ impl<T: WriteTransaction> WriteTransaction for Observed<T> {
 
 #[test]
 fn coalescing_reads_once_per_key_and_noops_do_not_write() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let cells = Cells::new(&HASH);
     let mut tx = Observed::new(db.begin_write().unwrap());
     let first = cells
@@ -110,7 +110,7 @@ fn coalescing_reads_once_per_key_and_noops_do_not_write() {
 
 #[test]
 fn abort_after_a_flat_write_failure_discards_intermediate_trie_nodes() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     let root = cells

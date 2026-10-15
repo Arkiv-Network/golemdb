@@ -6,7 +6,7 @@ use crate::{
 };
 use golemdb_cells::{CellKey, CellNameRef, CellValue};
 use golemdb_merkle::{HashProvider, Keccak256Hasher};
-use golemdb_storage::{Database, MemoryDatabase, WriteTransaction};
+use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 
 fn key(name: &[u8]) -> CellKey {
     CellKey::new(64, CellNameRef::raw(name))
@@ -16,7 +16,7 @@ fn value(text: &str) -> CellValue {
     CellValue::parse([b"\x02".as_slice(), text.as_bytes()].concat()).unwrap()
 }
 
-fn publish_empty_head(db: &MemoryDatabase, commit: u64) {
+fn publish_empty_head(db: &MemoryStore, commit: u64) {
     let root = Keccak256Hasher.hash(&[]);
     let mut tx = db.begin_write().unwrap();
     tx.put(
@@ -28,8 +28,8 @@ fn publish_empty_head(db: &MemoryDatabase, commit: u64) {
     tx.commit().unwrap();
 }
 
-fn database() -> MemoryDatabase {
-    let db = MemoryDatabase::new();
+fn database() -> MemoryStore {
+    let db = MemoryStore::new();
     crate::genesis::create(&db, &Keccak256Hasher, []).unwrap();
     db
 }
@@ -164,7 +164,7 @@ fn queued_access_is_rejected(consume: Consume) {
             assert_eq!(
                 committed,
                 match consume {
-                    Consume::Commit => Some(1),
+                    Consume::Commit => Some(crate::CommitId::new(1)),
                     Consume::Discard => None,
                 }
             );
@@ -212,11 +212,11 @@ fn concurrent_commits_of_one_branch_publish_only_once() {
             scope.spawn(move || signal_contention(contended_tx, || branches.commit(branch)));
         contended_rx.recv_timeout(TIMEOUT).unwrap();
         release_tx.send(()).unwrap();
-        assert_eq!(first.join().unwrap().unwrap(), 1);
+        assert_eq!(first.join().unwrap().unwrap(), crate::CommitId::new(1));
         assert!(matches!(
             second.join().unwrap(),
             Err(BranchError::HandleInvalid)
         ));
     });
-    assert_eq!(branches.head().unwrap(), 1);
+    assert_eq!(branches.head().unwrap(), crate::CommitId::new(1));
 }

@@ -4,6 +4,8 @@ use std::{error::Error, fmt};
 #[derive(Debug)]
 pub enum StorageError {
     AlreadyExists,
+    /// The store has reached its configured capacity.
+    Full,
     InvalidTableName(Table),
     InvalidRange,
     /// Backend physical limit, not a required constructor configuration.
@@ -23,6 +25,7 @@ pub enum StorageError {
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Full => f.write_str("storage capacity exhausted"),
             Self::AlreadyExists => f.write_str("key already exists"),
             Self::InvalidTableName(t) => write!(f, "invalid table name: {:?}", t.0),
             Self::InvalidRange => f.write_str("lower bound exceeds upper bound"),

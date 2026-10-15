@@ -3,8 +3,7 @@ use std::{cell::Cell, collections::BTreeMap, panic::AssertUnwindSafe};
 use crate::{BranchError, overlay::CellOverlay};
 use golemdb_cells::{CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, tables};
 use golemdb_storage::{
-    Database, Entry, MemoryDatabase, ReadCursor, ReadTransaction, StorageError, Table,
-    WriteTransaction,
+    Entry, MemoryStore, ReadCursor, ReadTransaction, StorageError, Store, Table, WriteTransaction,
 };
 
 fn key(record: u64, name: &[u8]) -> CellKey {
@@ -17,8 +16,8 @@ fn value(bytes: &[u8]) -> CellValue {
         .into()
 }
 
-fn seed(rows: &[(CellKey, CellValue)]) -> MemoryDatabase {
-    let db = MemoryDatabase::new();
+fn seed(rows: &[(CellKey, CellValue)]) -> MemoryStore {
+    let db = MemoryStore::new();
     let mut tx = db.begin_write().unwrap();
     for (key, value) in rows {
         tx.put(tables::CELL, &key.encode(), value.encoded_bytes())
@@ -131,7 +130,7 @@ fn scans_merge_in_order_hide_tombstones_and_stay_within_record() {
 
 #[test]
 fn repeated_rollback_steps_back_and_new_writes_reuse_the_current_frame() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let origin = db.begin_read().unwrap();
     let mut overlay = CellOverlay::new();
     put(&mut overlay, &origin, b"x", b"one");
@@ -168,7 +167,7 @@ fn repeated_rollback_steps_back_and_new_writes_reuse_the_current_frame() {
 
 #[test]
 fn empty_frames_are_distinct_and_checkpoint_after_rollback_opens_one() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let origin = db.begin_read().unwrap();
     let mut overlay = CellOverlay::new();
     put(&mut overlay, &origin, b"x", b"one");
@@ -237,7 +236,7 @@ fn failed_groups_restore_values_tombstones_and_fallthrough_without_consuming_fra
 
 #[test]
 fn failed_and_readonly_groups_leave_rollback_status_but_noop_writes_reactivate_frame() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let origin = db.begin_read().unwrap();
     let mut overlay = CellOverlay::new();
     put(&mut overlay, &origin, b"x", b"one");
@@ -270,7 +269,7 @@ fn failed_and_readonly_groups_leave_rollback_status_but_noop_writes_reactivate_f
 
 #[test]
 fn failure_in_a_fresh_empty_frame_does_not_roll_back_the_previous_frame() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let origin = db.begin_read().unwrap();
     let mut overlay = CellOverlay::new();
     put(&mut overlay, &origin, b"x", b"previous frame");
@@ -290,7 +289,7 @@ fn failure_in_a_fresh_empty_frame_does_not_roll_back_the_previous_frame() {
 
 #[test]
 fn failed_reactivation_restores_rollback_status_including_noops_and_panics() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let origin = db.begin_read().unwrap();
     for noop in [false, true] {
         for panic in [false, true] {
@@ -337,7 +336,7 @@ fn failed_reactivation_restores_rollback_status_including_noops_and_panics() {
 
 #[test]
 fn unwinding_a_group_restores_the_overlay() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let origin = db.begin_read().unwrap();
     let mut overlay = CellOverlay::new();
     put(&mut overlay, &origin, b"x", b"keep");
@@ -407,7 +406,7 @@ fn changes_are_final_ordered_values_and_preserve_tag_and_reserved_cells() {
 
 #[test]
 fn scans_report_bad_visible_values_once_but_skip_shadowed_values() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let mut tx = db.begin_write().unwrap();
     tx.put(tables::CELL, &key(64, b"a").encode(), &[0]).unwrap();
     tx.put(
@@ -500,7 +499,7 @@ impl<C: ReadCursor> ReadCursor for FaultCursor<'_, C> {
 
 #[test]
 fn read_failure_aborts_only_its_group_and_rollback_never_reads_storage() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let origin = FaultRead {
         origin: db.begin_read().unwrap(),
         fail: Cell::new(false),

@@ -2,7 +2,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use golemdb_cells::{CellChange, CellKey, CellNameRef, CellType, CellValueRef};
 use golemdb_merkle::{Hash, HashProvider, Keccak256Hasher};
-use golemdb_storage::{Database, MemoryDatabase, ReadTransaction, WriteTransaction, scan_prefix};
+use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
 
 use crate::{
     BranchError, Branches, OperationError, genesis,
@@ -14,7 +14,7 @@ use crate::{
 
 const HASH: Keccak256Hasher = Keccak256Hasher;
 
-fn snapshot(db: &impl Database) -> Vec<Vec<golemdb_storage::Entry>> {
+fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
     let tx = db.begin_read().unwrap();
     tables::ENGINE
         .into_iter()
@@ -36,18 +36,21 @@ impl HashProvider for PanicHash {
 
 #[test]
 fn opening_fresh_format_does_not_write_or_hash() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     genesis::create(&db, &HASH, []).unwrap();
     let before = snapshot(&db);
     let branches = Branches::new(ReadOnly::new(db.clone()), PanicHash).unwrap();
-    assert_eq!(branches.head().unwrap(), 0);
-    assert_eq!(read_head(&db.begin_read().unwrap()).unwrap(), 0);
+    assert_eq!(branches.head().unwrap(), crate::CommitId::new(0));
+    assert_eq!(
+        read_head(&db.begin_read().unwrap()).unwrap(),
+        crate::CommitId::new(0)
+    );
     assert_eq!(snapshot(&db), before);
 }
 
 #[test]
 fn head_reads_validate_format_in_their_own_snapshot() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let branches = Branches::create(db.clone(), HASH, []).unwrap();
     let snapshot = db.begin_read().unwrap();
     assert_eq!(
@@ -55,7 +58,7 @@ fn head_reads_validate_format_in_their_own_snapshot() {
         Some(1u32.to_be_bytes().to_vec())
     );
     assert_eq!(snapshot.get(SUPERBLOCK, b"format-version").unwrap(), None);
-    assert_eq!(branches.head().unwrap(), 0);
+    assert_eq!(branches.head().unwrap(), crate::CommitId::new(0));
     for bytes in [
         vec![1],
         vec![],
@@ -65,7 +68,7 @@ fn head_reads_validate_format_in_their_own_snapshot() {
         let mut tx = db.begin_write().unwrap();
         tx.put(SUPERBLOCK, b"format", &bytes).unwrap();
         tx.commit().unwrap();
-        assert_eq!(read_head(&snapshot).unwrap(), 0);
+        assert_eq!(read_head(&snapshot).unwrap(), crate::CommitId::new(0));
         assert!(matches!(
             read_head(&db.begin_read().unwrap()),
             Err(BranchError::UnsupportedDatabaseFormat)
@@ -88,13 +91,13 @@ fn head_reads_validate_format_in_their_own_snapshot() {
 #[test]
 fn legacy_head_including_commit_zero_is_rejected_without_touching_history() {
     for commit_id in [0, 50] {
-        let db = MemoryDatabase::new();
+        let db = MemoryStore::new();
         let mut tx = db.begin_write().unwrap();
         let empty = HASH.hash(&[]);
         write_head(
             &mut tx,
             &Head {
-                commit_id,
+                commit_id: crate::CommitId::new(commit_id),
                 state_root: empty,
                 index_root: empty,
             },
@@ -120,7 +123,7 @@ fn legacy_head_including_commit_zero_is_rejected_without_touching_history() {
 #[test]
 fn creation_rejects_every_nonempty_engine_table_and_unknown_format() {
     for table in tables::ENGINE {
-        let db = MemoryDatabase::new();
+        let db = MemoryStore::new();
         let mut tx = db.begin_write().unwrap();
         tx.put(table, b"orphan", b"existing-data").unwrap();
         tx.commit().unwrap();
@@ -129,7 +132,7 @@ fn creation_rejects_every_nonempty_engine_table_and_unknown_format() {
             Err(BranchError::DatabaseNotEmpty(found)) if found == table));
         assert_eq!(snapshot(&db), before);
     }
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     genesis::create(&db, &HASH, []).unwrap();
     let mut tx = db.begin_write().unwrap();
     tx.put(SUPERBLOCK, b"format", &2u32.to_be_bytes()).unwrap();
@@ -144,7 +147,7 @@ fn creation_rejects_every_nonempty_engine_table_and_unknown_format() {
 
 #[test]
 fn invalid_genesis_aborts_cell_writes_and_all_metadata_then_allows_retry() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let change = CellChange::Put {
         key: CellKey::new(64, CellNameRef::raw(b"\xff")),
         value: CellValueRef::new(CellType::Str, b"x", true).unwrap().into(),
@@ -160,7 +163,7 @@ fn invalid_genesis_aborts_cell_writes_and_all_metadata_then_allows_retry() {
 
 #[test]
 fn panicking_genesis_does_not_publish_or_poison_the_writer() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     assert!(catch_unwind(AssertUnwindSafe(|| genesis::create(&db, &PanicHash, []))).is_err());
     assert!(snapshot(&db).iter().all(Vec::is_empty));
     db.begin_write().unwrap();
@@ -171,7 +174,7 @@ fn panicking_genesis_does_not_publish_or_poison_the_writer() {
 #[test]
 fn missing_format_after_open_aborts_implicit_and_explicit_publication() {
     for explicit in [false, true] {
-        let db = MemoryDatabase::new();
+        let db = MemoryStore::new();
         genesis::create(&db, &HASH, []).unwrap();
         let branches = Branches::new(db.clone(), HASH).unwrap();
         let branch = branches.begin().unwrap();
@@ -222,15 +225,15 @@ fn missing_format_after_open_aborts_implicit_and_explicit_publication() {
         let mut tx = db.begin_write().unwrap();
         write_format(&mut tx, 0).unwrap();
         tx.commit().unwrap();
-        assert_eq!(branches.head().unwrap(), 0);
+        assert_eq!(branches.head().unwrap(), crate::CommitId::new(0));
         assert_eq!(branches.branch_info(branch).unwrap().sealed, explicit);
-        assert_eq!(branches.commit(branch).unwrap(), 1);
+        assert_eq!(branches.commit(branch).unwrap(), crate::CommitId::new(1));
     }
 }
 
 #[test]
 fn unimplemented_retention_is_rejected_on_open_and_seal() {
-    let db = MemoryDatabase::new();
+    let db = MemoryStore::new();
     let branches = Branches::create(db.clone(), HASH, []).unwrap();
     assert_eq!(
         db.begin_read()

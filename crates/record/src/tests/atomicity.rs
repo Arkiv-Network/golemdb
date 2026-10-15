@@ -9,21 +9,19 @@ use golemdb_cells::{
     CellKey, CellNameRef, CellType, CellValue, CellValueRef, Width, reserved, system, tables,
 };
 use golemdb_merkle::Keccak256Hasher;
-use golemdb_storage::{
-    Database, MemoryDatabase, ReadTransaction, StorageError, Table, WriteTransaction,
-};
+use golemdb_storage::{MemoryStore, ReadTransaction, StorageError, Store, Table, WriteTransaction};
 
 struct FaultDatabase {
-    inner: MemoryDatabase,
+    inner: MemoryStore,
     fail: Arc<AtomicBool>,
 }
 struct FaultRead<R> {
     inner: R,
     fail: Arc<AtomicBool>,
 }
-impl Database for FaultDatabase {
-    type Read<'a> = FaultRead<<MemoryDatabase as Database>::Read<'a>>;
-    type Write<'a> = <MemoryDatabase as Database>::Write<'a>;
+impl Store for FaultDatabase {
+    type Read<'a> = FaultRead<<MemoryStore as Store>::Read<'a>>;
+    type Write<'a> = <MemoryStore as Store>::Write<'a>;
     fn begin_read(&self) -> golemdb_storage::Result<Self::Read<'_>> {
         Ok(FaultRead {
             inner: self.inner.begin_read()?,
@@ -61,7 +59,12 @@ fn value(ty: CellType, bytes: &[u8]) -> CellValue {
 
 #[test]
 fn late_storage_failure_restores_earlier_patch_writes_and_checkpoint_state() {
-    let db = MemoryDatabase::new();
+    late_patch_failure(false);
+    late_patch_failure(true);
+}
+
+fn late_patch_failure(remove: bool) {
+    let db = MemoryStore::new();
     // Minimal read-only origin fixture; this test never seals or commits it.
     let mut tx = db.begin_write().unwrap();
     tx.put(SUPERBLOCK, b"head", &[0; 72]).unwrap();
@@ -120,7 +123,11 @@ fn late_storage_failure_restores_earlier_patch_writes_and_checkpoint_state() {
         .map(|(name, bytes)| {
             (
                 CellNameRef::raw(name).into(),
-                CellPatch::Set(value(CellType::Str, bytes)),
+                if remove {
+                    CellPatch::Remove
+                } else {
+                    CellPatch::Set(value(CellType::Str, bytes))
+                },
             )
         })
         .collect();

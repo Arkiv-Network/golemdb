@@ -2,8 +2,8 @@ use crate::support::mdbx as fixture;
 use golemdb_cells::CellType;
 use golemdb_index::{Index, IndexTerm, PostingChange};
 use golemdb_merkle::{Blake3Hasher, Hash, HashProvider, Keccak256Hasher, RootRef};
-use golemdb_storage::{Database, WriteTransaction};
-use golemdb_storage_mdbx::MdbxDatabase;
+use golemdb_storage::{Store, WriteTransaction};
+use golemdb_storage_mdbx::MdbxStore;
 
 // Both statically dispatched providers must propagate through term routing,
 // container leaves, both branch domains and reopening from persisted bytes.
@@ -42,7 +42,7 @@ fn round_trip(hasher: impl HashProvider) -> Hash {
     let hash = root.hash(&hasher);
     drop(db);
 
-    let db = MdbxDatabase::open(dir.path()).unwrap();
+    let db = MdbxStore::open(dir.path()).unwrap();
     let read = db.begin_read().unwrap();
     let reopened = index.reopen(&read, hash).unwrap();
     assert_eq!(reopened, root);

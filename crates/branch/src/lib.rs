@@ -27,11 +27,11 @@
 //! ```
 //! use golemdb_branch::{Branches, BranchError};
 //! use golemdb_cells::{CellKey, CellNameRef, CellValue};
-//! use golemdb_storage::Database;
+//! use golemdb_storage::Store;
 //! use golemdb_merkle::Keccak256Hasher;
 //!
-//! fn edit<D: Database>(database: D) -> Result<(), Box<dyn std::error::Error>> {
-//!     let branches = Branches::new(database, Keccak256Hasher)?;
+//! fn edit<S: Store>(store: S) -> Result<(), Box<dyn std::error::Error>> {
+//!     let branches = Branches::new(store, Keccak256Hasher)?;
 //!     let branch = branches.begin()?;
 //!     let key = CellKey::new(64, CellNameRef::parse_user(b"status", 64)?);
 //!     branches.write(branch, |cell_writer| {
@@ -52,8 +52,8 @@
 //!     branches.discard(branch)?;
 //!     Ok(())
 //! }
-//! # use golemdb_storage::MemoryDatabase;
-//! # let db = MemoryDatabase::new();
+//! # use golemdb_storage::MemoryStore;
+//! # let db = MemoryStore::new();
 //! # Branches::create(db.clone(), Keccak256Hasher, [])?;
 //! # edit(db)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -71,23 +71,24 @@
 //! ```
 //! use golemdb_branch::Branches;
 //! use golemdb_merkle::Keccak256Hasher;
-//! use golemdb_storage::MemoryDatabase;
+//! use golemdb_storage::MemoryStore;
 //!
-//! let db = MemoryDatabase::new();
+//! let db = MemoryStore::new();
 //! let branches = Branches::create(db, Keccak256Hasher, [])?; // Supply deployment cells here.
 //! let branch = branches.begin()?;
 //! let sealed = branches.seal(branch)?;
-//! assert_eq!(sealed.commit_id, 1);
+//! assert_eq!(sealed.commit_id.get(), 1);
 //! assert_eq!(sealed.cells.changed_cells.len(), 1); // The lag-one #roots cell.
 //! assert!(sealed.index.changed_terms.is_empty());
 //! assert!(branches.branch_info(branch)?.sealed);
-//! assert_eq!(branches.head()?, 0); // Seal does not publish.
-//! assert_eq!(branches.commit(branch)?, 1);
-//! assert_eq!(branches.head()?, 1);
+//! assert_eq!(branches.head()?.get(), 0); // Seal does not publish.
+//! assert_eq!(branches.commit(branch)?.get(), 1);
+//! assert_eq!(branches.head()?.get(), 1);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //! Repeated seal calls return the cached result after another head check.
-//! Sealed branches reject cell reads/writes, checkpoints, and rollback; metadata,
+//! Sealed branches allow cell reads but reject writes, checkpoints, and rollback.
+//! The `#roots` cell added by seal becomes visible only after commit. Metadata,
 //! commit, and discard remain available. An error or unwinding panic during
 //! computation leaves the branch open with its overlay, version, and frames unchanged.
 

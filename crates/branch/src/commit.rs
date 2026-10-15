@@ -9,7 +9,7 @@ use crate::{BranchError, CommitId, Result, SealedCommit, buffer::Writes, head::r
 pub(crate) fn persist(tx: impl WriteTransaction, sealed: &SealedCommit) -> Result<CommitId> {
     write_atomically(tx, |tx| {
         if read_head_state(tx)? != sealed.origin {
-            return Err(BranchError::HandleInvalid);
+            return Err(BranchError::Conflict);
         }
         // Cells, indexes, GC counts/deletions and head were staged by seal.
         // History and change-set tables remain deferred.

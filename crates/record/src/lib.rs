@@ -1,5 +1,8 @@
 //! Record CRUD over guarded branch cell views.
 //!
+//! Records may have zero user cells; their `#key` and binding preserve identity
+//! until explicit deletion.
+//!
 //! Caller-assigned keys only. Each mutation is one atomic branch operation,
 //! including allocator and binding changes. Checkpoints, rollback and commit
 //! remain on the shared [`Branches`](golemdb_branch::Branches) manager supplied to [`Records::new`].
@@ -17,6 +20,7 @@
 //! cache lives here.
 //!
 //! This iteration is unmetered: no budgets, receipts, debug options, or OCC.
+//! [`ReadTarget::Head`] selects and reads the current head in one snapshot.
 //! Commit-targeted reads support the head only and explicitly reject other
 //! commits until history is available. Deletes enumerate and tombstone every
 //! live cell; sealing derives index changes from the resulting cell diff.
@@ -26,10 +30,10 @@
 //! use golemdb_cells::{CellNameRef, CellType, CellValueRef};
 //! use golemdb_merkle::HashProvider;
 //! use golemdb_record::{ReadTarget, RecordKey, Records};
-//! use golemdb_storage::Database;
+//! use golemdb_storage::Store;
 //!
-//! // The connection layer has already initialized the database and parameters.
-//! fn example<D: Database, H: HashProvider>(branches: Branches<D, H>)
+//! // The connection layer has already initialized the store and parameters.
+//! fn example<S: Store, H: HashProvider>(branches: Branches<S, H>)
 //!     -> Result<(), Box<dyn std::error::Error>>
 //! {
 //!     let records = Records::new(branches.clone());
@@ -46,11 +50,13 @@
 //! }
 //! ```
 
+mod committed;
 mod crud;
 mod error;
 mod state;
 mod types;
 
+pub use committed::{committed_snapshot, read_committed_by_id};
 pub use crud::Records;
 pub use error::{RecordError, Result};
 pub use types::{CellPatch, ReadTarget, Record, RecordCells, RecordKey, RecordPatch};

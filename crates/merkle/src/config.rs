@@ -2,12 +2,13 @@ use crate::HashAlgorithm;
 use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, path::Path};
 
-/// Initial startup configuration. Later the engine will obtain the selected
-/// algorithm from genesis/persisted protocol metadata instead of this file.
+/// Standalone hash configuration for low-level runners. The public API's
+/// Genesis also includes cell limits and persists the selected algorithm
+/// in protocol metadata when opening a database.
 /// Match the identifier once before entering the processing loop; each runner
 /// instantiation uses a compile-time-known provider. The configuration is not a
 /// runtime-switching provider. Changing algorithms requires a fresh/rebuilt
-/// database; persisting and checking the identifier belongs to the future engine.
+/// database; the API opening layer persists and checks the identifier.
 ///
 /// ```
 /// use golemdb_merkle::{Blake3Hasher, Hash, HashAlgorithm, HashConfig, HashProvider, Keccak256Hasher};

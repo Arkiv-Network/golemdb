@@ -1,0 +1,19 @@
+[package]
+name = "golemdb-query"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+golemdb-branch.workspace = true
+golemdb-cells.workspace = true
+golemdb-index.workspace = true
+golemdb-merkle.workspace = true
+golemdb-record.workspace = true
+golemdb-storage.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+golemdb-api.workspace = true
+proptest.workspace = true

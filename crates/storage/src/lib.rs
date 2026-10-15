@@ -4,22 +4,22 @@
 //! a writer sees its own changes and publishes them atomically on commit. Drop
 //! aborts an uncommitted writer.
 //!
-//! [`MemoryDatabase`] is the initial backend. The traits intentionally expose
+//! [`MemoryStore`] is the initial backend. The traits intentionally expose
 //! owned bytes and no backend-specific handles or threading requirements.
 //! The separate `golemdb-storage-mdbx` crate implements these traits for MDBX.
 //!
 //! ```
-//! use golemdb_storage::{Database, MemoryDatabase, ReadCursor, ReadTransaction,
+//! use golemdb_storage::{Store, MemoryStore, ReadCursor, ReadTransaction,
 //!     Table, WriteTransaction, scan_prefix};
 //!
 //! let terms = Table("Index");
-//! let db = MemoryDatabase::new();
-//! let snapshot = db.begin_read()?;
-//! let mut tx = db.begin_write()?;
+//! let store = MemoryStore::new();
+//! let snapshot = store.begin_read()?;
+//! let mut tx = store.begin_write()?;
 //! tx.put(terms, b"name\0Alice", b"root")?;
 //! tx.commit()?;
 //! assert_eq!(snapshot.get(terms, b"name\0Alice")?, None);
-//! let latest = db.begin_read()?;
+//! let latest = store.begin_read()?;
 //! let mut cursor = latest.cursor(terms, b"name\0Alice")?;
 //! assert_eq!(cursor.next()?.unwrap().1, b"root");
 //! let mut reverse = latest.cursor(terms, b"name\0Alice")?;
@@ -36,18 +36,27 @@ mod scan;
 mod table;
 
 pub use error::StorageError;
-pub use memory::{MemoryCursor, MemoryDatabase, MemoryReadTransaction, MemoryWriteTransaction};
+pub use memory::{MemoryCursor, MemoryReadTransaction, MemoryStore, MemoryWriteTransaction};
 pub use scan::{Scan, scan, scan_prefix};
 pub use table::Table;
 
 pub type Entry = (Vec<u8>, Vec<u8>);
 pub type Result<T> = std::result::Result<T, StorageError>;
 
-/// A database with concurrent snapshot readers and one active writer at a time.
+/// A store with concurrent snapshot readers and one active writer at a time.
 ///
 /// Readers and their cursors remain usable while a writer is active or commits.
 /// Only writers serialize with other writers. Every backend must support this.
-pub trait Database {
+pub trait Store {
+    /// Physical ceilings, independent of deployment admission policy.
+    /// Unbounded backends may keep these defaults; bounded adapters must override.
+    fn max_key_size(&self) -> usize {
+        usize::MAX
+    }
+    fn max_value_size(&self) -> usize {
+        usize::MAX
+    }
+
     type Read<'db>: ReadTransaction
     where
         Self: 'db;
@@ -56,7 +65,7 @@ pub trait Database {
         Self: 'db;
 
     fn begin_read(&self) -> Result<Self::Read<'_>>;
-    /// Serializes with other writers. Do not nest writes on the same database.
+    /// Serializes with other writers. Do not nest writes on the same store.
     fn begin_write(&self) -> Result<Self::Write<'_>>;
 }
 
@@ -87,7 +96,7 @@ pub trait ReadCursor {
     fn prev(&mut self) -> Result<Option<Entry>>;
 }
 
-/// Mutations borrow this write transaction exclusively, not the database.
+/// Mutations borrow this write transaction exclusively, not the store.
 ///
 /// Independent read transactions and their cursors may remain active throughout
 /// writes and commit. Only a cursor borrowed from *this same write transaction*
@@ -98,6 +107,15 @@ pub trait ReadCursor {
 /// Implementations must discard pending changes and release the transaction
 /// when dropped without committing.
 pub trait WriteTransaction: ReadTransaction {
+    /// True only when no tables or rows exist in this writer's snapshot.
+    /// Initialization must make this check under the same writer as its writes.
+    /// Adapters that cannot inspect the catalogue must fail, never assume empty.
+    fn is_empty(&self) -> Result<bool> {
+        Err(StorageError::Backend(
+            "backend cannot inspect its table catalogue".into(),
+        ))
+    }
+
     /// Insert or replace a row, creating the table transactionally if needed.
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()>;
     /// Insert only, creating the table transactionally if needed.

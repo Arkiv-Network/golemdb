@@ -3,6 +3,8 @@
 pub enum BranchError {
     #[error("branch ID is unknown, discarded, or no longer over the head")]
     HandleInvalid,
+    #[error("branch origin is no longer the head; commit lost the publication race")]
+    Conflict,
     #[error("branch is sealed")]
     Sealed,
     #[error("commit number space exhausted")]

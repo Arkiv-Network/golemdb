@@ -15,6 +15,8 @@ impl From<[u8; 32]> for RecordKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadTarget {
+    /// Resolve the current head and read its cells from one committed snapshot.
+    Head,
     /// Current work in progress, including all successful uncommitted mutations.
     Branch(BranchId),
     /// An explicit committed snapshot. Only the head of the acquired storage
