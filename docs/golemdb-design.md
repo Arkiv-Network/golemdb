@@ -935,7 +935,7 @@ The `head` row is the entry point for everything: current roots for proofs and r
 current `commitNr` that keys the history tables, and crash recovery on restart.
 
 The metering model is deliberately _not_ a superblock row: its versioning is committed state
-(`@meteringModel` below), and a node that finds an activated model version its code does not
+(`@meteringModel` below), and a node that finds an activated model version whose metering code it does not
 implement halts — the same "upgrade required" behaviour as a fork activation.
 
 ### Record Classes and the Reserved Catalogue
@@ -966,7 +966,7 @@ stored cells also changes commitment paths. Raw binary keys inside reserved reco
 | 4        | system | `#rootIndex`     | `GlobalRoot → commitNr` reverse index ([§11](#what-this-assumes-of-the-schema)) |
 | 5        | system | `#logDigests` — _open_ | per-commit digest of each segment's appended rows, lag-one (`CHANGES.md` D19) |
 | 6–31     | system | _reserved_       |                                                          |
-| 32       | admin  | `@meteringModel` | model activation index: modelVersion → activation commit |
+| 32       | admin  | `@meteringModel` | model activation index: modelVersion → activation commit, code versions |
 | 33       | admin  | `@modelWeight`   | individual weights, per model                            |
 | 34–63    | admin  | _reserved_       |                                                          |
 
@@ -1115,19 +1115,20 @@ properties such a table could not offer:
 
 #### `@meteringModel` (recordID 32)
 
-| Cell key (u64 BE) | Value                          | Semantics                            |
-| ----------------- | ------------------------------ | ------------------------------------ |
-| `modelVersion`    | `activationCommitNr: u64` (BE) | when this model version takes effect |
+| Cell key (u64 BE) | Value | Semantics |
+| --- | --- | --- |
+| `modelVersion` | `A: u64` ‖ `G: u64` ‖ `H: u64` (BE, 24 bytes) | activation commit, GolemDB code version, host code version (`0` = none); see [metering D9](golemdb-metering.md#d9-cost-schedules) |
 
 The activation index — tiny and append-only. The active model at commit `c` is the greatest version
 with `activation ≤ c`; at most one **pending** model (activation > head) may exist. Nothing executes
 at the activation commit: the flip is a pure boundary event, a consequence of commit numbering.
 
-**A model version is a code version.** Everything structural about a metering model — the op-class
-taxonomy, the counting rules, the byte-term definition, the set of weight names it expects — is code,
-identified by `modelVersion`; there is no data representation of it. The only _data_ in the model
-layer is the weights below, and any tunable constant (a modeled depth, a calibration factor) is
-expressed as a named weight, which is what keeps the split clean.
+**A model version names its code.** A metering model is code plus weights. `G` and `H`
+identify the code: op classes, counting rules, byte terms, expected weight names, with no data
+representation. Several model versions can share the same code versions and differ only in
+weights. The only _data_ is the weights below, and any tunable constant is a named weight.
+Models, code versions and host weights are specified in
+[metering D9](golemdb-metering.md#d9-cost-schedules).
 
 #### `@modelWeight` (recordID 33)
 
@@ -1147,7 +1148,7 @@ trailing name):
   the engine's own history mechanism versions the weights and no explicit weight-version scheme is
   needed. The flip side, accepted deliberately: deep pricing audit is a _historical_ read, and past
   the retention window it becomes an archival-node service.
-- **Weight names are a fixed list coded with each model version.** A patch of the active model
+- **Weight names are a fixed list coded with each code version (`G`, `H`).** A patch of the active model
   that names a weight its code does not declare, or removes one, is reverted with
   `InvalidArgument`. At a new model's activation, a declared weight without a value is
   **unpriced** — any call needing it fails with `OutOfBudget` — and undeclared names are ignored,
@@ -1156,14 +1157,14 @@ trailing name):
 **Lifecycle rules, spanning the two records:**
 
 1. **Install, then validate at activation.** Creating model `v+1` writes, in one admin commit, its
-   `@meteringModel` activation `A ≥ head + 1 + #minActivationDelay` and its `@modelWeight` set. At
+   `@meteringModel` entry with activation `A ≥ head + 1 + #minActivationDelay` and its `@modelWeight` set. At
    install, only what _any_ node can check is checked — `v+1` > current, `A` within that bound,
    cells parseable — because a node not yet
-   running `v+1` code cannot know the expected weight names. The admin tool, which runs `v+1`
+   running `v+1`'s code cannot know the expected weight names. The admin tool, which runs `v+1`'s
    code, rejects unknown or missing names before sending the install. At `A`, a missing weight
    is unpriced rather than failing the activation, so nothing halts or splits and the admin
-   repairs it with a patch; nodes not running `v+1` code halt at `A` regardless ("upgrade
-   required").
+   repairs it with a patch; nodes not running code for its `G` and `H` halt at `A` ("upgrade
+   required"); a model on the active `(G, H)` changes weights only and halts no node.
 2. **Current model → immediate only.** Weight patches on the active model take effect at the next
    commit; there is no future scheduling for the current model, so no queue of pending tweaks can
    race or contradict. Future work is staged only under the pending model's prefix.
@@ -1260,8 +1261,8 @@ Ergonomics that make the invariants easy to honour — not security boundaries:
 record created with its `#key` cell; `#params` written from the genesis file, including
 `#keyMode` and, in the generated mode, `#keySeed`, and validated against the physical ceilings; `#alloc` initialized (`#nextRecordID = 64`, `#liveCells` and `#indexTerms` set to the genesis
 state's leaf counts); `#roots` and
-`#recordKeys` empty; model version 1 installed complete (`@meteringModel` activation 0, full
-`@modelWeight` set); `head = (0, SR_0, IR_0)`.
+`#recordKeys` empty; model version 1 installed complete (`@meteringModel` `(A: 0, G: 1, H: 1)`, or `H: 0` for a
+host without weights; full `@modelWeight` set); `head = (0, SR_0, IR_0)`.
 
 **Worked example — root history as cells.** State of the world just after commit **100** is sealed:
 

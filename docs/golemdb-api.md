@@ -79,7 +79,7 @@ see it, reserved names, internal rows, trusted code, and MDBX itself; each now h
 | `Inner` (private) | the shared state behind a `Database`'s clones | The idiomatic Rust name for state behind a cheap-to-clone handle (`std::thread::Thread`, `Arc`'s `ArcInner`), already used by `Branches` and `MemoryStore`. Was `Engine`, which overstated a thin forwarding adapter. |
 | `Genesis` | the deployment's settings: hash, cell limits, key mode | Follows Ethereum clients' type for the parsed genesis file (`alloy_genesis::Genesis`). Was `GenesisConfig`. |
 | `Genesis::DEV` | the development preset | A named preset, as reth names `MAINNET` and `DEV`. Deliberately no `Default`: genesis is consensus-relevant, and a default that changed between releases would split nodes silently. |
-| `Config` | what opening needs on any store: `genesis` and `mode` | The crate path gives the context (`golemdb_api::Config`, like `sled::Config`). Was `OpenConfig`. |
+| `Config` | what opening needs on any store: `genesis`, `mode` and the host code versions | The crate path gives the context (`golemdb_api::Config`, like `sled::Config`). Was `OpenConfig`. |
 | `OpenMode` | `CreateIfMissing`, `ExistingOnly`, `CreateNew` | Not just `Mode`: the spec also has a key mode and a paging mode. Non-exhaustive so a read-only mode can be added. |
 | `StoreConfig` | which built-in store to open, with its node-local options | Names its scope: everything about the store, nothing about the deployment. |
 | `Database::open`, `open_memory`, `from_store` | the three constructors | One standard constructor taking anything that converts into a `StoreConfig` (a path means MDBX); `open_memory` takes only a genesis, since a fresh store makes the mode meaningless; `from_store` says that the caller supplies the store. Replaced `open_database`, `open_with_options` and an alias. |
@@ -201,8 +201,13 @@ A failure is `OpenError::InvalidConfig`.
 
 ```rust
 #[non_exhaustive]
-pub struct Config { pub genesis: Genesis, pub mode: OpenMode }
-// Config::new(genesis) sets mode = CreateIfMissing; Config::with_mode(mode) changes it.
+pub struct Config { pub genesis: Genesis, pub mode: OpenMode, pub host_code: Vec<HostCode> }
+// Config::new(genesis) sets mode = CreateIfMissing and no host code;
+// Config::with_mode(mode) and Config::with_host_code(versions) change them.
+
+/// A host code version and the weight names it declares, each starting with `host.`
+/// (metering D9). A binary lists every host code version it supports.
+pub struct HostCode { pub version: u64, pub weight_names: Vec<String> }
 
 #[non_exhaustive]
 pub enum OpenMode { CreateIfMissing /* default */, ExistingOnly, CreateNew }
@@ -1131,17 +1136,19 @@ Unmetered.
 
 ### Administration — the metering API
 
-The **model** is code, identified by a `modelVersion`: the op-class taxonomy, counting rules,
-byte-term definition and expected weight names. It changes with a new release. The **weights**
-are data, one `u64` per named weight per model version, stored in the admin records
-`@meteringModel` and `@modelWeight`, and are what this API writes.
+A **model** is code plus weights, identified by a `modelVersion`. The **code** is the op-class
+taxonomy, counting rules, byte-term definition and expected weight names, identified by a
+GolemDB code version and a host code version (`0` = none); it changes with a new release. The
+**weights** are data, one `u64` per named weight per model version, host weights (`host.*`)
+included, stored in the admin records `@meteringModel` and `@modelWeight`, and are what this
+API writes. Several model versions can share the same code versions and differ only in weights.
 
 | op | signature | meaning |
 | --- | --- | --- |
-| `install_model` | `(version, activation: CommitId, weights: map) → ()` | installs a future model version and its complete weight set, in one admin commit |
+| `install_model` | `(version, activation: CommitId, golemdb_code: u64, host_code: u64, weights: map) → ()` | installs a future model version, its code versions and its complete weight set, in one admin commit |
 | `set_weight` | `(version, name, weight) → ()` | patches one weight |
-| `metering_model` | `(at?: CommitId) → {active_version, pending?}` | the active model and any pending activation |
-| `model_weights` | `(version?) → map<name, u64>` | the weights of a model version; absent = active |
+| `metering_model` | `(at?: CommitId) → {active_version, golemdb_code, host_code, pending?}` | the active model, its code versions and any pending activation |
+| `model_weights` | `(version?) → map<name, u64>` | the weights of a model version, `host.*` included; absent = active |
 
 Lifecycle rules; a violation is `InvalidArgument`:
 
@@ -1150,8 +1157,11 @@ Lifecycle rules; a violation is `InvalidArgument`:
    Weight names cannot be checked by every node at install; the admin tool, running the new
    version's code, rejects unknown or missing names before sending it. At activation, a missing
    weight is **unpriced**: calls needing it fail with `OutOfBudget`, and a warn log names it.
-2. **Weight names are a fixed list coded with each model version.** `set_weight` on the active
-   model with a name its code does not declare is reverted with `InvalidArgument`.
+   Nodes without code for its GolemDB or host code version halt at activation; a model on the
+   active code versions changes weights only and halts no node.
+2. **Weight names are a fixed list coded with each code version.** `set_weight` on the active
+   model with a name its GolemDB or host code version does not declare is reverted with
+   `InvalidArgument`.
 3. **The active model takes immediate patches only.** `set_weight` on it takes effect at the
    next committed head, after the admin commit succeeds, never mid-branch. There is no
    scheduling for the current model; future work is staged under the pending version.

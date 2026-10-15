@@ -34,7 +34,7 @@ Example attacks prevented:
 ## Principle
 
 - **GolemDB** assesses what each call costs in compute and storage, with no notion of time. Like Ethereum's `SSTORE`, storage is a one-off cost. Full nodes keep a fixed history window, so that cost covers the write and its bounded history.
-- **A host** such as Arkiv builds its own pricing on top, for example adding duration to storage.
+- **A host** such as Arkiv builds its own pricing on top, for example adding duration to storage. Its weights may live in GolemDB's cost schedule as host-declared weights (D9): GolemDB stores, validates and activates them with its own, and never prices with them.
 
 ## Scope
 
@@ -51,17 +51,15 @@ do not fully pin bitmap traversal and intersection, materialization, byte counti
 unsuccessful lookups or charge checkpoints. Implementations could disagree on costs and
 abort points even when they return the same successful results.
 
-D6 also promises a budgeted index-ordered bulk-deletion scan that has no API definition.
-The [design rejects index-ordered emission](golemdb-design.md#the-alternative-index-ordered-emission)
-for general query sorting; a specialized purge scan needs a separate contract, not an
-implicit change to `query`.
+A host's expiry purge needs no special scan: Arkiv's purge reads one equality term of its
+expiry attribute in record-ID order and deletes one record at a time under its purge budget
+([tokenomics](arkiv-tokenomics.md#purge-budget)). Read metering must therefore cover equality
+lookups, including lookups of absent terms, and record-ID-ordered reads with a limit.
 
 **Resolution needed:** specify the complete read operation taxonomy and deterministic
 counting order. Define exact integer evaluation of the modeled sort cost, including
 the `N = 0` case, and add conformance examples for successful and budget-aborted reads.
-As part of completing read metering, define the purge scan's signature, ordering,
-snapshot/cursor semantics and charges, or mark it as a proposed extension rather than
-an available operation.
+Arkiv's purge depends on the equality and absent-term charges being pinned first.
 
 ## Goals
 
@@ -95,8 +93,8 @@ Coverage and reporting:
 
 Cost schedules:
 
-- **R11:** a cost schedule is a metering model plus its weights. The model (cost structure (D2) and counting rules) is code identified by a version; weights are committed data, one price per weight name.
-- **R12:** weights are adjustable at runtime through admin writes, without upgrading GolemDB, taking effect only at a committed head boundary. Branch calls use the schedule captured at their base commit; calls without a branch capture the schedule at the current head on admission. This applies to reads of historical data as well as current data. Calls are never re-priced in flight (D9).
+- **R11:** a metering model (cost schedule) is code plus weights. The code (cost structure (D2), counting rules and expected weight names) is identified by a GolemDB code version and, if the host declares weights, a host code version; weights are committed data, one value per weight name: a price, or for host-declared weights also a host limit (D9). Several model versions can share the same code versions and differ only in weights.
+- **R12:** weights are adjustable at runtime through admin writes, without upgrading GolemDB, taking effect only at a committed head boundary. Branch calls use the schedule captured at their base commit; calls without a branch capture the schedule at the current head on admission. This applies to reads of historical data as well as current data. Calls are never re-priced in flight (D9). A weight change can also be scheduled: installed as a new model version on the same code versions, it takes effect at an activation commit at least `#minActivationDelay` ahead (D9).
 
 ## Record Model
 
@@ -326,7 +324,7 @@ Bytes written are made live and charged (D4). Bytes deleted leave live state but
 - Compute and storage are summed, not multiplied: a trie path rewrite costs the same for a 4-byte or a 400-byte value, while writing a value is linear in its length.
 - A batch, such as a host transaction, costs the sum of its record op costs. Reads are metered separately (D6).
 - Repeated touches of the same record or cell are charged per touch. An implementation may merge the work, never the charge.
-- These weights aggregate [architecture §10](golem-db-architecture.md#structural-op-classes)'s finer op classes, which remain the calibration basis (D10).
+- These weights aggregate finer structural op classes, which remain the calibration basis (D10).
 - On request, a receipt includes the per-part counts as a diagnostic ledger. This per-call option must be supported by every implementation (R9).
 
 **Calibration and verification.** Deterministic operation counts alone do not establish
@@ -346,7 +344,7 @@ remain determined by logical counts and the captured schedule.
 
 Meets R3, R4.
 
-Trie work is deferred to commit and runs once over the branch's net changes, so a write's physical trie cost depends on the rest of the batch. Cost therefore counts **one modeled path rewrite per planned cell or index mutation**, including repeated touches of the same leaf, at a modeled depth ([architecture §10](golem-db-architecture.md#deferred-work-and-modeled-paths)). Write cost is computed from the call's arguments and the reads it owes anyway (D2), so a write can be refused before any change is applied.
+Trie work is deferred to commit and runs once over the branch's net changes, so a write's physical trie cost depends on the rest of the batch. Cost therefore counts **one modeled path rewrite per planned cell or index mutation**, including repeated touches of the same leaf, at a modeled depth. Write cost is computed from the call's arguments and the reads it owes anyway (D2), so a write can be refused before any change is applied.
 
 In D2, these modeled path rewrites are the depth terms of every cell and index operation.
 
@@ -368,7 +366,7 @@ The modeled depth is derived from these counters by a pinned table. Tries are 16
 
 Depth is capped at 7. ⌈log₁₆ N⌉ would reach 8 only above 16⁷ (≈268M) leaves in one trie, which the current architecture is very unlikely to reach.
 
-- The cell trie uses the live-cell count; the index trie uses the distinct-term count. The posting-list trie keeps a constant modeled depth, at the low-cardinality envelope of [architecture §10](golem-db-architecture.md#deferred-work-and-modeled-paths).
+- The cell trie uses the live-cell count; the index trie uses the distinct-term count. The posting-list trie keeps a constant modeled depth, at a low-cardinality envelope.
 - Path-rewrite cost = `cell_trie_depth × w_cell_trie_update` or `index_trie_depth × w_index_trie_update`, using the counters at the branch base.
 - The write already knows whether it adds or removes a cell or term, so counters need no extra read (R3).
 - Database growth leaves the weights: they reflect cost per node only.
@@ -386,7 +384,7 @@ every case.
 
 Meets R8, R9.
 
-**Pay once for every byte made live.** Overwritten and deleted values move into history rather than disappearing, so charging a value's bytes once, when written, pre-pays both copying them into history later and their residency there ([architecture §10](golem-db-architecture.md#the-byte-term-pay-once-for-every-byte-made-live)). Each byte is copied at most once, so the pre-payment is exact for bytes that are later overwritten or deleted, and an over-charge for bytes that never are: the safe direction (R4). Shrinking a value still costs the new value's bytes; deleting costs no bytes.
+**Pay once for every byte made live.** Overwritten and deleted values move into history rather than disappearing, so charging a value's bytes once, when written, pre-pays both copying them into history later and their residency there. Each byte is copied at most once, so the pre-payment is exact for bytes that are later overwritten or deleted, and an over-charge for bytes that never are: the safe direction (R4). Shrinking a value still costs the new value's bytes; deleting costs no bytes.
 
 The write byte weights assume that every value is eventually copied into history. The
 copy happens once, whatever the retention window; residency does not. The weights are
@@ -431,7 +429,7 @@ Every leave costs the same, whether or not it empties the term (D2), and deleted
 
 Meets R5, R8.
 
-Reads are counted, not modeled: nothing on the read path is deferred, so cost accumulates as the work happens and the call aborts when it crosses its budget ([architecture §10](golem-db-architecture.md#read-metering)).
+Reads are counted, not modeled: nothing on the read path is deferred, so cost accumulates as the work happens and the call aborts when it crosses its budget.
 
 - Reads follow the D2 order of checks: the handle or snapshot first, free; then admission; then counted state reads.
 - The counted descent is the reference one, whether or not an implementation short-circuits it (D1).
@@ -439,7 +437,7 @@ Reads are counted, not modeled: nothing on the read path is deferred, so cost ac
 - Resolving an item at a past commit is a flat surcharge, independent of how far back.
 - Range scans charge every index term stepped over, so ranges over attributes with many distinct values pay for their width.
 - Reading `#meta` is a `get` of one cell; the full record includes it. The `id_of` and `key_of` accessors, to be specified with the proof API, are fixed-size point reads with a flat charge: `id_of` is one key resolution (`key_resolve`), `key_of` one cell read (`cell_read`).
-- GolemDB provides a budgeted, index-ordered scan for bulk deletion, such as a host's expiry purge ([mapping §6](arkiv-golem-db-mapping.md#purge-before-transactions)).
+- Bulk deletion, such as a host's expiry purge, uses ordinary reads: Arkiv's purge queries one equality term of its expiry attribute in record-ID order and deletes record by record under its own budget ([tokenomics](arkiv-tokenomics.md#purge-budget)). No special scan is provided.
 
 ## D7. Immutable-Log Metering
 
@@ -565,15 +563,15 @@ may fail validation or overflow; it does not guarantee a successful estimate.
 
 Meets R11, R12.
 
-**Head is authoritative.** A **pricing snapshot** is the active metering model version
-together with its complete weight set, as committed at a given head; every call computes
+**Head is authoritative.** A **pricing snapshot** is the active model version
+together with its complete weight set, host weights included, as committed at a given head; every call computes
 its costs from exactly one snapshot, named by `priced_at`. GolemDB always knows its current committed `commitNr` from
 the [Superblock head](golemdb-design.md#the-superblock). It holds the active model and
 its complete weight set in memory as a snapshot associated with that committed state.
 At startup or whenever this snapshot is unavailable, reconstruct it from the committed
 `@meteringModel` and `@modelWeight` records at head: select the greatest model version
 whose activation commit is at or before head, validate its weight set, and load it.
-Unsupported active models or malformed weights must prevent serving priced calls, not
+An active model whose `G` or `H` this node does not run, or malformed weights, must prevent serving priced calls, not
 silently fall back to an older schedule; missing weights are unpriced (below). Cache reconstruction does not change a call's
 logical charge.
 
@@ -585,28 +583,77 @@ active snapshot. After recovery or rewind, rebuild or revalidate the snapshot ag
 the restored committed state; a commit number alone is not sufficient cache identity
 if that number can be reused after a rewind.
 
-- **Model = code.** Cost structure, counting rules, byte definitions and expected weight names, identified by `modelVersion` ([design §4](golemdb-design.md#meteringmodel-recordid-32)). D2's structure, D3's depth table and D4's counting are model changes: a new version.
+- **Model = code + weights.** The code is the cost structure, counting rules, byte definitions and expected weight names, identified by a GolemDB code version `G`. D2's structure, D3's depth table and D4's counting are code changes: a new `G`. A host that declares weights adds a host code version `H`: its own list of weight names. A **model version** names its `(G, H)` and its activation commit `A` ([design §4](golemdb-design.md#meteringmodel-recordid-32)).
 - **Weights = data.** One `u64` per weight name per model version, stored in `@modelWeight` and versioned by GolemDB's own history.
-- **Install, then activate.** A new model version is installed with its weights and an activation commit `A ≥ head + 1 + #minActivationDelay`. At most one model is pending. Nodes not yet running the new version's code cannot know its weight names, so install checks only what every node can: the version is newer, `A` is within bounds, the cells are well-formed. Typos are the admin tool's job: it runs the new code and must reject unknown or missing weight names before it sends the install.
-- **Missing weights are unpriced.** If, at activation, the active model's code expects a weight that has no value, that weight is **unpriced**: any call whose cost needs it fails with `OutOfBudget{spent, required: None}`, also under `Unlimited`, exactly like an arithmetic overflow (D8). This fails safe (R4): the affected operations are unavailable until fixed, never free. Nothing halts and nothing splits, since every node prices from the same committed weights, and the admin repairs it with a weight patch, which is unmetered. Weight names the code does not declare are ignored at activation.
-- **Unknown names are rejected where every node can check.** A weight patch on the **active** model naming a weight its code does not declare is reverted with `InvalidArgument`: every node runs that code, so the verdict is deterministic. Writes to a pending version are checked for form only.
+- **Install, then activate.** A new model version is installed with its `(G, H)`, its complete weight set and `A ≥ head + 1 + #minActivationDelay`. At most one is pending. Nodes not yet running code for its `G` and `H` cannot know its weight names, so install checks only what every node can: the model version is newer, `A` is within bounds, the cells are well-formed. Typos are the admin tool's job: it runs the new code and must reject unknown or missing weight names before it sends the install. Nodes not running code for its `G` and `H` halt at `A` ("upgrade required"). A model version with the active `(G, H)` is **weights-only**: every node already runs its code, so it activates without an upgrade. This is how a weight change is announced ahead of time.
+- **Host-declared weights.** When opening the database, a host passes its host code version `H` and that model's weight names. Host weight names start with the fixed prefix `host.`, such as `host.storage_price`; a host may add its own text after it, such as `host.arkiv.storage_price`. GolemDB's own names never start with `host.`, so the two cannot collide. A host weight may be a price or a host limit: Arkiv, for example, keeps protocol limits such as its maximum entity lifetime there, to reuse the same validation, scheduling and activation. GolemDB treats host weights like its own: it validates them, stores them in `@modelWeight`, activates them and exposes them in the pricing snapshot. GolemDB never uses them in its own pricing, nor enforces host limits. The host reads them from the snapshot its calls are priced with, so GolemDB and host weights always come from the same `priced_at`.
+- **Missing weights are unpriced.** If, at activation, the active model's code expects a weight that has no value, that weight is **unpriced**: any call whose cost needs it fails with `OutOfBudget{spent, required: None}`, also under `Unlimited`, exactly like an arithmetic overflow (D8). This fails safe (R4): the affected operations are unavailable until fixed, never free. Nothing halts and nothing splits, since every node prices from the same committed weights, and the admin repairs it with a weight patch, which is unmetered. Weight names the code does not declare are ignored at activation. A missing host weight is reported as absent in the snapshot; the host must treat operations that need it as unavailable, never as free.
+- **Unknown names are rejected where every node can check.** A weight patch on the **active** model naming a weight its GolemDB or host code version does not declare is reverted with `InvalidArgument`: every node runs that code, so the verdict is deterministic. Writes to a pending version are checked for form only.
 - **Warn logs.** GolemDB writes a warn-level log entry, for operators' observability, at activation for every missing weight and every ignored name, and on every call that fails because a weight is unpriced, naming the weight. These are node logs, not consensus output.
 - **Minimum activation delay.** `#minActivationDelay` (`u32`, commits) is a genesis parameter in `#params` ([design §4](golemdb-design.md#params-recordid-0)). It guarantees every node operator a window between a model's install and its activation in which to upgrade to code that implements it. Without it, `A > head` would allow installing at head 99 with activation 100, leaving no window. For Arkiv, a value of about a day of blocks.
-- **Patch the active model.** A weight change staged while head is H takes effect only after the commit containing it succeeds and head becomes H+1. It cannot change pricing mid-branch or before persistence; a failed or discarded change has no effect.
+- **Patch the active model.** A weight change staged while head is H takes effect only after the commit containing it succeeds and head becomes H+1. It cannot change pricing mid-branch or before persistence; a failed or discarded change has no effect. An immediate patch remains possible, for example to repair a missing weight. A host that wants a weight to change only with a delay enforces that in its admin authorization: GolemDB does not.
 - **Capture pricing once.** Branch calls retain the pricing snapshot from their base commit; stale branches remain subject to the existing invalidation rules. Calls without a branch capture the current head's snapshot at admission. `priced_at` records that pricing commit, not the data commit being read. A call already in progress keeps its captured snapshot even if head advances.
 - **Historical data does not select historical prices.** A read targeting an old commit uses the same current pricing snapshot as a current-data read admitted at the same head. Each query page is a new call: pinning the data commit does not pin the pricing schedule across pages.
 - **Pre-paid work is not re-priced.** Work paid in advance keeps the schedule of the call that paid it: term removal (`w_idx_term_create`), copying bytes into history (write byte weights) and record-induced deferred commit work. Host-funded block/commit overhead is separate (D8). Re-pricing prepaid work after a weight change is impractical; if weights rise, the later work is underpaid, bounded to one term removal per term and one copy per byte. Accepted. The same holds for a host that collects a record's deletion cost in advance, as Arkiv does for expiry: the D5 bound is computed at the weights and depth current when it is collected.
-- **Authorization is the host's.** GolemDB validates the lifecycle; the host decides who may change weights. A host that changes weights inside its own commits needs branch-scoped admin calls ([mapping §8](arkiv-golem-db-mapping.md#branch-scoped-administration-required-api-extension)).
+- **Authorization is the host's.** GolemDB validates the lifecycle; the host decides who may change weights. A host that changes weights inside its own commits needs branch-scoped admin calls, an API extension not yet specified.
 
-For example, a model with activation commit 100 becomes active when committed head
+For example, a model version with activation commit 100 becomes active when committed head
 reaches 100. Branch work based on head 99 that produces commit 100 still uses the old
 schedule. Calls admitted at head 100, including reads of commit 20, use the new schedule
 and report `priced_at: 100`. This is a GolemDB committed-head boundary, not an implicit
 rule to switch prices before executing a host block numbered 100.
 
+**Example: three weights across three model versions.** A `@meteringModel` value is
+24 bytes, three big-endian `u64`s: activation commit `A`, GolemDB code version `G`, host code version `H`.
+`H = 0` means the host declares no weights. `@modelWeight` holds one `u64` per model
+version and weight name.
+
+| Record | Cell key | Value |
+| --- | --- | --- |
+| `@meteringModel` | model version `V` | `A ‖ G ‖ H` |
+| `@modelWeight` | `V` ‖ weight name | weight |
+
+*Genesis, model 1:* GolemDB code version 1, host code version 1.
+
+```
+@meteringModel  1 → (A: 0, G: 1, H: 1)
+@modelWeight    1 ‖ w_cell_read               → 100
+                1 ‖ w_cell_write_byte         → 2
+                1 ‖ host.storage_price        → 5
+```
+
+*Weights-only, model 2:* at head 400 the admin announces a storage price of 8. The code
+is unchanged, so `G` and `H` are too; the model carries its complete weight set.
+
+```
+@meteringModel  2 → (A: 1000, G: 1, H: 1)      A ≥ 400 + 1 + #minActivationDelay
+@modelWeight    2 ‖ w_cell_read               → 100
+                2 ‖ w_cell_write_byte         → 2
+                2 ‖ host.storage_price        → 8
+```
+
+From head 1000 every call is priced with model 2. No node halts: all run code for `(1, 1)`.
+
+*Code change, model 3:* a GolemDB release adds `w_cell_trie_update`, so it is GolemDB
+code version 2. The host's names are unchanged, so `H` stays 1.
+
+```
+@meteringModel  3 → (A: 5000, G: 2, H: 1)
+@modelWeight    3 ‖ w_cell_read               → 100
+                3 ‖ w_cell_write_byte         → 2
+                3 ‖ w_cell_trie_update        → 100
+                3 ‖ host.storage_price        → 8
+```
+
+At install, every node checks only form: `V` is newer, `A` is in bounds, the cells are
+well-formed. Nodes without GolemDB code version 2 halt at 5000 ("upgrade required");
+the others price with model 3 from there. An immediate patch of the active model,
+such as `2 ‖ host.storage_price → 9`, still takes effect at the next commit; whether
+the host allows it is its admin policy.
+
 ## D10. GolemDB Weights
 
-| Weight | Used for | Calibrated from [architecture §10](golem-db-architecture.md#structural-op-classes) op classes |
+| Weight | Used for | Calibrated from op classes |
 | --- | --- | --- |
 | `w_admission_base`, `w_admission_entry`, `w_admission_byte` | Fixed request validation, entries inspected and bytes validated, including rejected input (D2) | reference admission validation |
 | `w_rec[create]`, `w_rec[patch]`, `w_rec[delete]` | Record base cost excluding admission: binding read, in-memory record ID counter, cap check, cell enumeration (D2) | `key_resolve`, `record_create` (in-memory allocator part) |
@@ -622,6 +669,7 @@ rule to switch prices before executing a host block numbered 100.
 | Read weights (`key_resolve`, `cell_read`, `index_seek`, `index_scan_step`, `sort_compare`, `bytes_read`, …) | Reads, including scans (D6) | read op classes |
 | `w_append_base`, `w_append_byte` | Immutable-log append: fixed staging work, row bytes written and their shard residency (D7) | `immutable_data_append` plus the byte term |
 | `w_imm_read_base` | Immutable-log row read (D7); bytes read use the `bytes_read` read weight (D6) | `immutable_data_read` |
+| `host.*` (host-declared) | The host's own prices and limits; never used by GolemDB (D9) | the host's calibration and capacity planning |
 
 Not weights: the D3 depth table (code, metering model version) and the D5 per-record caps (deployment parameters).
 
