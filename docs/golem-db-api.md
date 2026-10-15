@@ -162,6 +162,12 @@ limiting. → _design [§4](golem-db-design.md#what-the-engine-enforces)_
   the host's job.
 - Every commit's roots stay readable from `#roots`, which is what makes proofs against past commits
   possible ([Proofs](#proofs)).
+- **Retention.** Every node keeps at least the `#minRetention` most recent commits readable (see
+  `params`) and never prunes inside them; an operator may keep more, up to full history, and serves
+  it through this same API. A read at a commit before the node's earliest retained commit raises
+  `Pruned`; `retention()` reports the boundary ([Introspection](#introspection)). Block execution
+  reads only the head, so nodes may differ above the floor without affecting consensus.
+  → _design [§7](golem-db-design.md#retention)_
 
 ### Branches
 
@@ -478,7 +484,11 @@ Chosen when the first page is requested; the cursor carries it through the itera
 
 No page is ever internally wrong under either mechanism — only the sequence can be inconsistent.
 **Sorting on an immutable cell makes live paging anomaly-free.** Pinning adds one read per resolved
-value, roughly doubling a query's read count, and does not grow with age.
+value, roughly doubling a query's read count, and does not grow with age; range and prefix
+predicates at a pinned commit also visit the terms that changed in their range during the retention
+window. **A pinned iteration can be served by any node** while its commit stays within the
+`#minRetention` window; the cursor holds no lease, and once its commit falls before the serving
+node's earliest retained commit the next page raises `Pruned`.
 → _design [§13](golem-db-design.md#pinned-and-live)_
 
 #### The cursor
@@ -604,6 +614,7 @@ party holding nothing but the root. Two caller-relevant properties:
 | -------- | -------------------------------------------- | ------------------------------------------------------------------- |
 | `roots`  | `(at?: CommitId) → {state_root, index_root}` | the committed roots as of a commit; absent = head                   |
 | `params` | `() → map<name, value>`                      | the deployment's chain parameters — equivalently `get` on `#params` |
+| `retention` | `() → {earliest: CommitId, head: CommitId}` | this node's earliest retained commit and its head. `earliest ≤ head − #minRetention` (or 0); above that floor it differs between nodes, and an archival node reports 0. Any read at `at < earliest` raises `Pruned` |
 
 `branch_hash` is a branch operation and lives in [Operations](#operations) with the rest.
 
@@ -624,23 +635,27 @@ one `u64` per named weight per model version — and are what this API writes.
 
 Lifecycle rules — violations ⇒ `InvalidArgument`:
 
-1. **Install, then validate at activation.** `install_model` requires `version` > current,
-   `activation` > head, and parseable cells. **Completeness is checked at the activation commit**, not
-   at install — which is what preserves the upgrade window between the two.
+1. **Install complete, with a minimum window.** `install_model` requires `version` > current,
+   `activation ≥ head + 1 + #minActivationDelay` (a `#params` value from the genesis file), parseable
+   cells, and a **complete** weight set for that version's code. An incomplete set fails the install
+   with `InvalidArgument`, and nothing is committed. `#minActivationDelay` is the upgrade window.
 2. **The active model takes immediate patches only.** `set_weight` on it takes effect at the next
   committed head, after the admin commit succeeds, never before persistence or mid-branch.
   There is no scheduling for the current model. Future work is staged under the pending version.
-3. **Capture pricing once, never re-price in flight.** Branch calls use the schedule captured
-  at branch base. Calls without a branch capture current head's schedule at admission,
-  even when reading historical data. `priced_at` identifies the pricing commit, not the
-  data commit. Each query page captures pricing anew; pinning data does not pin prices.
+3. **Capture pricing once, never re-price in flight.** A branch captures its schedule at `begin`:
+  the model active at the commit the branch produces, with the weights committed at its base. A
+  model activating at commit A therefore prices the branch that produces A, and weight patches apply
+  from the following commit. An invalid or incomplete active model makes `begin` fail. Calls without
+  a branch capture the current head's schedule at admission, even when reading historical data.
+  `priced_at` identifies the pricing commit (for a branch, the commit it produces), not the data
+  commit. Each query page captures pricing anew; pinning data does not pin prices.
 4. **At most one pending model** at a time.
 
 Golem DB keeps the active model and complete weights in memory, reconstructing them from
 committed head and metering records when unavailable. It publishes head and the matching
 pricing snapshot together at commit boundaries; uncommitted changes do not affect prices.
-Activation at commit 100 applies once head reaches 100, not to branch work based on 99
-that produces commit 100. See [metering D8](golem-db-metering.md#d8-cost-schedules).
+Activation at commit 100 applies to the branch based on head 99 that produces commit 100,
+and to calls without a branch admitted at head 100 or later. See [metering D8](golem-db-metering.md#d8-cost-schedules).
 
 **Surface separation.** `open()` returns a **data handle** and an **admin handle**. Admin operations
 take no branch — each forms its own single-purpose commit — which makes commit homogeneity structural.
@@ -658,8 +673,8 @@ call the API.
 ## Common conventions
 
 - **Return shape.** A metered result is a value plus a cost receipt. Errors still report cost spent.
-- **Cost receipt.** `{ cost, priced_at, ledger? }` — the cost charged; the commit whose model and
-  weights priced the call; and, under `debug`, the per-op-class counts. For writes, the ledger
+- **Cost receipt.** `{ cost, priced_at, ledger? }` — the cost charged; the commit that priced the
+  call (for a branch call, the commit the branch produces; otherwise the head at admission); and, under `debug`, the per-op-class counts. For writes, the ledger
   includes the cell/index operation and byte counts specified by
   [metering D4](golem-db-metering.md#d4-storage-and-size-counting), excluding system cells
   from user-cell totals. Every implementation must support these opt-in write details and
@@ -686,7 +701,7 @@ call the API.
 | `InvalidArgument` | malformed input: name grammar, cap, codec, or a metering lifecycle violation                         |
 | `LimitExceeded`   | DNF caps — group count, predicates per group, nesting                                                |
 | `OutOfBudget`     | the next charge or full planned cost cannot fit, or cost arithmetic overflows; carries `spent` and optional write `required`; no partial results |
-| `Pruned`          | an immutable-data ordinal existed but is beyond the retention window                                 |
+| `Pruned`          | the target commit, or the commit of an immutable-data ordinal, is before this node's earliest retained commit (`retention()`); never inside the `#minRetention` window; an archival node never raises it |
 | `HandleInvalid`   | a consumed branch handle, or one whose origin is no longer the head                                  |
 | `Conflict`        | a commit guard failed, or an `expected_version` mismatch                                             |
 | `Internal`        | engine fault                                                                                         |

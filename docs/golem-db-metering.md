@@ -106,7 +106,7 @@ Coverage and reporting:
 Cost schedules:
 
 - **R11:** a cost schedule is a metering model plus its weights. The model (cost structure (D2) and counting rules) is code identified by a version; weights are committed data, one price per weight name.
-- **R12:** weights are adjustable at runtime through admin writes, without upgrading Golem DB, taking effect only at a committed head boundary. Branch calls use the schedule captured at their base commit; calls without a branch capture the schedule at the current head on admission. This applies to reads of historical data as well as current data. Calls are never re-priced in flight (D8).
+- **R12:** weights are adjustable at runtime through admin writes, without upgrading Golem DB, taking effect only at a committed head boundary. Branch calls use the schedule captured when the branch begins: the model active at the commit the branch produces, with the weights committed at its base. Calls without a branch capture the schedule at the current head on admission. This applies to reads of historical data as well as current data. Calls are never re-priced in flight (D8).
 
 ## Record Model
 
@@ -472,7 +472,10 @@ the [Superblock head](golem-db-design.md#the-superblock). It holds the active mo
 its complete weight set in memory as a snapshot associated with that committed state.
 At startup or whenever this snapshot is unavailable, reconstruct it from the committed
 `@meteringModel` and `@modelWeight` records at head: select the greatest model version
-whose activation commit is at or before head, validate its weight set, and load it.
+whose activation commit is at or before head, validate its weight set, and load it. A branch
+beginning at head H is priced by the model active at H+1. That differs from head's model only when a
+model activates at H+1, whose weights were installed at least `#minActivationDelay` commits earlier;
+the branch validates and loads it at `begin`.
 Unsupported active models or invalid weights must prevent serving priced calls, not
 silently fall back to an older schedule. Cache reconstruction does not change a call's
 logical charge.
@@ -487,18 +490,17 @@ if that number can be reused after a rewind.
 
 - **Model = code.** Cost structure, counting rules, byte definitions and expected weight names, identified by `modelVersion` ([design §4](golem-db-design.md#meteringmodel-recordid-32)). D2's structure, D3's depth table and D4's counting are model changes: a new version.
 - **Weights = data.** One `u64` per weight name per model version, stored in `@modelWeight` and versioned by Golem DB's own history.
-- **Install, then activate.** A new model version is installed with its weights and an activation commit ahead of the head; completeness is checked at activation. At most one model is pending.
+- **Install, then activate.** A new model version is installed with its complete weight set and an activation commit `A ≥ head + 1 + #minActivationDelay` (a `#params` value from genesis). Completeness is checked at install, where an incomplete set fails with `InvalidArgument` and nothing is committed, and re-checked when a branch begins under the model, where an invalid model makes `begin` fail. At most one model is pending.
 - **Patch the active model.** A weight change staged while head is H takes effect only after the commit containing it succeeds and head becomes H+1. It cannot change pricing mid-branch or before persistence; a failed or discarded change has no effect.
-- **Capture pricing once.** Branch calls retain the pricing snapshot from their base commit; stale branches remain subject to the existing invalidation rules. Calls without a branch capture the current head's snapshot at admission. `priced_at` records that pricing commit, not the data commit being read. A call already in progress keeps its captured snapshot even if head advances.
+- **Capture pricing once.** Branch calls retain the pricing snapshot captured at `begin` (the model active at the commit the branch produces, the weights committed at its base); stale branches remain subject to the existing invalidation rules. Calls without a branch capture the current head's snapshot at admission. `priced_at` records that pricing commit (for a branch, the commit it produces), not the data commit being read. A call already in progress keeps its captured snapshot even if head advances.
 - **Historical data does not select historical prices.** A read targeting an old commit uses the same current pricing snapshot as a current-data read admitted at the same head. Each query page is a new call: pinning the data commit does not pin the pricing schedule across pages.
 - **Pre-paid work is not re-priced.** Work paid in advance keeps the schedule of the call that paid it: term removal (`w_idx_term_create`), copying bytes into history (write byte weights) and record-induced deferred commit work. Host-funded block/commit overhead is separate (D7). Re-pricing prepaid work after a weight change is impractical; if weights rise, the later work is underpaid, bounded to one term removal per term and one copy per byte. Accepted.
 - **Authorization is the host's.** Golem DB validates the lifecycle; the host decides who may change weights. A host that changes weights inside its own commits needs branch-scoped admin calls ([mapping §8](arkiv-golem-db-mapping.md#branch-scoped-administration-required-api-extension)).
 
-For example, a model with activation commit 100 becomes active when committed head
-reaches 100. Branch work based on head 99 that produces commit 100 still uses the old
-schedule. Calls admitted at head 100, including reads of commit 20, use the new schedule
-and report `priced_at: 100`. This is a Golem DB committed-head boundary, not an implicit
-rule to switch prices before executing a host block numbered 100.
+For example, a model with activation commit 100 prices the branch based on head 99 that
+produces commit 100, whose receipts report `priced_at: 100`. Calls without a branch admitted
+at head 100, including reads of commit 20, also use the new schedule and report
+`priced_at: 100`; those admitted at head 99 still use the old one.
 
 ## D9. Golem DB Weights
 
