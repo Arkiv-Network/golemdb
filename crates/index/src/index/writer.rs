@@ -2,7 +2,7 @@ use golemdb_merkle::{Hash, HashProvider, RootRef};
 use golemdb_storage::WriteTransaction;
 
 use super::Index;
-use crate::{INDEX_TRIE_PATH_BYTES, IndexTerm, Result, path, tables};
+use crate::{INDEX_TRIE_PATH_BYTES, IndexTerm, Result, bitmap_trie::BitmapTrie, path, tables};
 
 /// Adds a record ID to a term's bitmap or removes it from that bitmap.
 /// If a batch changes the same term and record ID more than once, the last change wins.
@@ -34,10 +34,14 @@ impl<H: HashProvider> Index<'_, H> {
     /// Apply postings with last-operation-wins semantics for each (term, ID).
     /// Coalesces containers and updates each affected term leaf once. The caller
     /// must supply the root matching this transaction's flat state; affected
-    /// term commitments are checked, but this is not a whole-index audit.
+    /// term commitments are checked, but this is not a whole-index audit. New
+    /// trie rows and containers are stored under `commit`, the commit this
+    /// batch publishes; a second batch at the same commit replaces rows, so
+    /// only its root stays valid.
     pub fn apply(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         root: RootRef<INDEX_TRIE_PATH_BYTES>,
         changes: impl IntoIterator<Item = PostingChange>,
     ) -> Result<IndexUpdate> {
@@ -64,16 +68,20 @@ impl<H: HashProvider> Index<'_, H> {
                 false
             }
         });
-        let mut changed_terms = Vec::new();
+        let (mut changed_terms, mut bitmaps) = (Vec::new(), Vec::new());
         for group in changes.chunk_by(|a, b| a.0 == b.0) {
             let term = &group[0].0;
-            let before = self.bitmap_root(tx, term)?;
+            let before_root = self.bitmap_root(tx, term)?;
+            let before = before_root.map(|root| root.hash(self.hasher));
             self.trie.check(tx, root, term, before)?;
-            let after = self.bitmaps.apply(
+            let term_path = term.routing_path(self.hasher);
+            let after_root = BitmapTrie::new(self.hasher, &term_path).apply(
                 tx,
-                before,
+                commit,
+                before_root,
                 group.iter().map(|&(_, hi, lo, present)| (hi, lo, present)),
             )?;
+            let after = after_root.map(|root| root.hash(self.hasher));
             if before == after {
                 continue;
             }
@@ -82,19 +90,21 @@ impl<H: HashProvider> Index<'_, H> {
                 before,
                 after,
             });
+            bitmaps.push(after_root);
         }
         // Terms are unique, so each check above saw the original root; one trie
         // update for the whole batch writes each touched branch once.
         let root = self.trie.set(
             tx,
+            commit,
             root,
             changed_terms
                 .iter()
                 .map(|change| (&change.term, change.after)),
         )?;
-        for change in &changed_terms {
-            match change.after {
-                Some(hash) => tx.put(tables::INDEX, change.term.as_bytes(), &hash)?,
+        for (change, bitmap) in changed_terms.iter().zip(bitmaps) {
+            match bitmap {
+                Some(bitmap) => tx.put(tables::INDEX, change.term.as_bytes(), &bitmap.encode())?,
                 None => {
                     tx.delete(tables::INDEX, change.term.as_bytes())?;
                 }

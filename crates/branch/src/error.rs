@@ -22,6 +22,10 @@ pub enum BranchError {
     MissingHead,
     #[error("Superblock/head must be 72 bytes, got {actual}")]
     InvalidHead { actual: usize },
+    #[error("no Roots row for head commit {0}")]
+    MissingRoots(u64),
+    #[error("Roots row for commit {0} is malformed or does not match the head")]
+    InvalidRoots(u64),
     #[error("branch ID space exhausted")]
     BranchNumberExhausted,
     #[error("branch {0} lock poisoned")]

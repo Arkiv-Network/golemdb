@@ -42,8 +42,8 @@ impl<H: HashProvider, T: ReadTransaction> PostingSource for IndexSource<'_, '_, 
         range: TermRange,
     ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
         Ok(self.index.terms(self.tx, range)?.map(|entry| {
-            let (_, root) = entry?;
-            self.index.bitmap_at(self.tx, root)
+            let (term, root) = entry?;
+            self.index.bitmap_at(self.tx, &term, root)
         }))
     }
 }

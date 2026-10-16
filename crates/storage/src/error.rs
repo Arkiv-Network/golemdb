@@ -4,6 +4,8 @@ use std::{error::Error, fmt};
 #[derive(Debug)]
 pub enum StorageError {
     AlreadyExists,
+    /// An appended key does not sort after the table's last key.
+    OutOfOrder,
     /// The store has reached its configured capacity.
     Full,
     InvalidTableName(Table),
@@ -27,6 +29,9 @@ impl fmt::Display for StorageError {
         match self {
             Self::Full => f.write_str("storage capacity exhausted"),
             Self::AlreadyExists => f.write_str("key already exists"),
+            Self::OutOfOrder => {
+                f.write_str("appended key does not sort after the table's last key")
+            }
             Self::InvalidTableName(t) => write!(f, "invalid table name: {:?}", t.0),
             Self::InvalidRange => f.write_str("lower bound exceeds upper bound"),
             Self::KeyTooLarge { actual, max } => write!(f, "key size {actual} exceeds {max}"),

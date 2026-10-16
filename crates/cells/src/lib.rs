@@ -113,13 +113,13 @@
 //! let cells = Cells::new(&hasher);
 //! let key = CellKey::new(42, CellNameRef::parse_user(b"status", 64)?);
 //! let mut tx = store.begin_write()?;
-//! let update = cells.apply(&mut tx, RootRef::Empty, [CellChange::Put {
+//! let update = cells.apply(&mut tx, 1, RootRef::Empty, [CellChange::Put {
 //!     key: key.clone(), value: CellValue::parse(b"\x02ready".to_vec())?,
 //! }])?;
 //! tx.commit()?;
 //! let read = store.begin_read()?;
 //! assert_eq!(cells.get(&read, &key)?.unwrap().as_str(), Some("ready"));
-//! assert_eq!(cells.reopen(&read, update.root.hash(&hasher))?, update.root);
+//! cells.validate_root(&read, update.root)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 

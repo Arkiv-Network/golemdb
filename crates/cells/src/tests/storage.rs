@@ -46,19 +46,16 @@ fn leaf(key: &CellKey, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
     preimage.extend_from_slice(&path);
     preimage.push(value.metadata());
     preimage.extend_from_slice(value.value());
-    LeafRef {
-        path,
-        hash: HASH.hash(&preimage),
-    }
+    LeafRef::new(path, HASH.hash(&preimage))
 }
 
 fn transitions_and_tagged_commitments(db: &impl Store) {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     assert_eq!(cells.get(&tx, &key(42, b"status")).unwrap(), None);
-    assert_eq!(cells.reopen(&tx, HASH.hash(&[])).unwrap(), RootRef::Empty);
+    cells.validate_root(&tx, RootRef::Empty).unwrap();
     let first = cells
-        .apply(&mut tx, RootRef::Empty, [put(42, b"status", b"ready")])
+        .apply(&mut tx, 0, RootRef::Empty, [put(42, b"status", b"ready")])
         .unwrap();
     assert_eq!(
         first.root,
@@ -69,10 +66,7 @@ fn transitions_and_tagged_commitments(db: &impl Store) {
         vec![(key(42, b"status").encode(), b"\x02ready".to_vec())]
     );
     assert!(rows(&tx, tables::CELL_TRIE).is_empty());
-    assert_eq!(
-        cells.reopen(&tx, first.root.hash(&HASH)).unwrap(),
-        first.root
-    );
+    cells.validate_root(&tx, first.root).unwrap();
     // The same payload under a different kind/type has a different commitment.
     let attr: CellValue = CellValueRef::new(CellType::Str, b"ready", true)
         .unwrap()
@@ -80,6 +74,7 @@ fn transitions_and_tagged_commitments(db: &impl Store) {
     let changed = cells
         .apply(
             &mut tx,
+            0,
             first.root,
             [CellChange::Put {
                 key: key(42, b"status"),
@@ -98,6 +93,7 @@ fn transitions_and_tagged_commitments(db: &impl Store) {
     let retyped = cells
         .apply(
             &mut tx,
+            0,
             changed.root,
             [CellChange::Put {
                 key: key(42, b"status"),
@@ -111,24 +107,27 @@ fn transitions_and_tagged_commitments(db: &impl Store) {
         RootRef::Leaf(leaf(&key(42, b"status"), &bytes))
     );
     let branch = cells
-        .apply(&mut tx, retyped.root, [put(43, b"status", b"ready")])
+        .apply(&mut tx, 0, retyped.root, [put(43, b"status", b"ready")])
         .unwrap()
         .root;
     assert!(matches!(branch, RootRef::Branch(_)));
-    assert_eq!(cells.reopen(&tx, branch.hash(&HASH)).unwrap(), branch);
+    cells.validate_root(&tx, branch).unwrap();
     let collapsed = cells
-        .apply(&mut tx, branch, [delete(43, b"status")])
+        .apply(&mut tx, 0, branch, [delete(43, b"status")])
         .unwrap()
         .root;
     assert_eq!(collapsed, retyped.root);
+    // The branch row at the root position stays behind; a singleton must be
+    // recovered from the flat table, never from that row.
+    cells.validate_root(&tx, collapsed).unwrap();
     let empty = cells
-        .apply(&mut tx, collapsed, [delete(42, b"status")])
+        .apply(&mut tx, 0, collapsed, [delete(42, b"status")])
         .unwrap()
         .root;
     assert_eq!(empty, RootRef::Empty);
     assert!(rows(&tx, tables::CELL).is_empty());
     assert!(!rows(&tx, tables::CELL_TRIE).is_empty());
-    assert_eq!(cells.reopen(&tx, empty.hash(&HASH)).unwrap(), empty);
+    cells.validate_root(&tx, empty).unwrap();
     tx.commit().unwrap();
 }
 
@@ -152,7 +151,7 @@ fn record_scans_preserve_raw_names_and_own_results(db: &impl Store) {
             .rev()
             .map(move |name| put(id, name, b"data"))
     });
-    cells.apply(&mut tx, RootRef::Empty, changes).unwrap();
+    cells.apply(&mut tx, 0, RootRef::Empty, changes).unwrap();
     tx.commit().unwrap();
     let result = {
         let tx = db.begin_read().unwrap();
@@ -182,6 +181,7 @@ fn batches_report_original_and_final_values_and_skip_noops(db: &impl Store) {
     let first = cells
         .apply(
             &mut tx,
+            0,
             RootRef::Empty,
             [put(42, b"a", b"old"), put(42, b"b", b"same")],
         )
@@ -190,6 +190,7 @@ fn batches_report_original_and_final_values_and_skip_noops(db: &impl Store) {
     let noops = cells
         .apply(
             &mut tx,
+            0,
             first.root,
             [
                 put(42, b"a", b"intermediate"),
@@ -207,6 +208,7 @@ fn batches_report_original_and_final_values_and_skip_noops(db: &impl Store) {
     let changed = cells
         .apply(
             &mut tx,
+            0,
             first.root,
             [
                 put(43, b"a", b"inserted"),
@@ -242,7 +244,7 @@ fn batches_report_original_and_final_values_and_skip_noops(db: &impl Store) {
         cells.get(&tx, &key(42, b"a")).unwrap(),
         Some(value(b"final"))
     );
-    let empty_batch = cells.apply(&mut tx, changed.root, []).unwrap();
+    let empty_batch = cells.apply(&mut tx, 0, changed.root, []).unwrap();
     assert_eq!(empty_batch.root, changed.root);
     assert!(empty_batch.changed_cells.is_empty());
 }
@@ -253,6 +255,7 @@ fn snapshots_abort_and_old_branches(db: &impl Store) {
     let root = cells
         .apply(
             &mut tx,
+            0,
             RootRef::Empty,
             [put(42, b"a", b"one"), put(42, b"b", b"two")],
         )
@@ -262,10 +265,12 @@ fn snapshots_abort_and_old_branches(db: &impl Store) {
     tx.commit().unwrap();
     let snapshot = db.begin_read().unwrap();
     let old_branches = rows(&snapshot, tables::CELL_TRIE);
+    // Later batches are later commits; earlier commits' rows are never rewritten.
     let mut tx = db.begin_write().unwrap();
     let next = cells
         .apply(
             &mut tx,
+            1,
             root,
             [put(42, b"a", b"three"), put(43, b"new", b"four")],
         )
@@ -282,6 +287,7 @@ fn snapshots_abort_and_old_branches(db: &impl Store) {
         cells
             .apply(
                 &mut tx,
+                1,
                 root,
                 [put(42, b"a", b"discarded"), put(44, b"x", b"y")],
             )
@@ -294,10 +300,10 @@ fn snapshots_abort_and_old_branches(db: &impl Store) {
         read.get(HEAD, b"root").unwrap(),
         Some(root.hash(&HASH).to_vec())
     );
-    assert_eq!(cells.reopen(&read, root.hash(&HASH)).unwrap(), root);
+    cells.validate_root(&read, root).unwrap();
     let mut tx = db.begin_write().unwrap();
     let next = cells
-        .apply(&mut tx, root, [put(42, b"a", b"three")])
+        .apply(&mut tx, 1, root, [put(42, b"a", b"three")])
         .unwrap()
         .root;
     tx.put(HEAD, b"root", &next.hash(&HASH)).unwrap();
@@ -332,19 +338,19 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     assert!(matches!(
-        cells.reopen(&tx, [7; 32]),
+        cells.validate_root(&tx, RootRef::Leaf(LeafRef::new([7; 32], [7; 32]))),
         Err(CellError::RootMismatch)
     ));
     let first = cells
-        .apply(&mut tx, RootRef::Empty, [put(42, b"a", b"one")])
+        .apply(&mut tx, 0, RootRef::Empty, [put(42, b"a", b"one")])
         .unwrap()
         .root;
     assert!(matches!(
-        cells.reopen(&tx, HASH.hash(&[])),
+        cells.validate_root(&tx, RootRef::Empty),
         Err(CellError::RootMismatch)
     ));
     assert!(matches!(
-        cells.reopen(&tx, [7; 32]),
+        cells.validate_root(&tx, RootRef::Leaf(LeafRef::new([7; 32], [7; 32]))),
         Err(CellError::RootMismatch)
     ));
     // No-op writes must still detect a mismatched before-value commitment.
@@ -355,7 +361,7 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
     )
     .unwrap();
     assert!(matches!(
-        cells.apply(&mut tx, first, [put(42, b"a", b"other")]),
+        cells.apply(&mut tx, 0, first, [put(42, b"a", b"other")]),
         Err(CellError::RootMismatch)
     ));
     tx.abort();
@@ -363,6 +369,7 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
     let root = cells
         .apply(
             &mut tx,
+            0,
             RootRef::Empty,
             [put(42, b"a", b"one"), put(42, b"b", b"two")],
         )
@@ -371,17 +378,19 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
     tx.commit().unwrap();
     let mut tx = db.begin_write().unwrap();
     // Never treat a missing branch row as a singleton when multiple cells exist.
-    tx.delete(tables::CELL_TRIE, &root.hash(&HASH)).unwrap();
+    tx.delete(tables::CELL_TRIE, &root_key(&root)).unwrap();
     assert!(matches!(
-        cells.reopen(&tx, root.hash(&HASH)),
-        Err(CellError::RootMismatch)
+        cells.validate_root(&tx, root),
+        Err(CellError::Merkle(
+            golemdb_merkle::MerkleError::MissingBranch(_)
+        ))
     ));
     tx.abort();
     let mut tx = db.begin_write().unwrap();
-    tx.put(tables::CELL_TRIE, &root.hash(&HASH), b"broken")
+    tx.put(tables::CELL_TRIE, &root_key(&root), b"broken")
         .unwrap();
     assert!(matches!(
-        cells.reopen(&tx, root.hash(&HASH)),
+        cells.validate_root(&tx, root),
         Err(CellError::Merkle(_))
     ));
     tx.abort();
@@ -392,7 +401,7 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
         Err(CellError::Value(CellValueParseError::AbsentTag))
     ));
     assert!(matches!(
-        cells.apply(&mut tx, root, [delete(42, b"a")]),
+        cells.apply(&mut tx, 0, root, [delete(42, b"a")]),
         Err(CellError::Value(_))
     ));
     let mut scan = cells.scan_record(&tx, 42).unwrap();
@@ -407,7 +416,18 @@ fn malformed_singleton_key_is_rejected(db: &impl Store) {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     tx.put(tables::CELL, b"short", b"\x02value").unwrap();
-    assert!(matches!(cells.reopen(&tx, [7; 32]), Err(CellError::Key(_))));
+    assert!(matches!(
+        cells.validate_root(&tx, RootRef::Leaf(LeafRef::new([7; 32], [7; 32]))),
+        Err(CellError::Key(_))
+    ));
+}
+
+/// Row key of a branch root: its commit and the empty route.
+fn root_key(root: &RootRef<CELL_TRIE_PATH_BYTES>) -> Vec<u8> {
+    let RootRef::Branch(branch) = root else {
+        panic!("not a branch root")
+    };
+    golemdb_merkle::node_key(branch.commit, &[], &[])
 }
 
 fn memory_db() -> ((), MemoryStore) {
@@ -459,7 +479,7 @@ proptest! {
                     CellChange::Put { key, value }
                 }
             }).collect();
-            let update = cells.apply(&mut tx, root, changes).unwrap();
+            let update = cells.apply(&mut tx, 0, root, changes).unwrap();
             root = update.root;
             let mut expected_changes = BTreeMap::new();
             for key in before.keys().chain(model.keys()) {
@@ -470,14 +490,14 @@ proptest! {
             prop_assert_eq!(update.changed_cells, expected_changes.into_values().collect::<Vec<_>>());
             let got: BTreeMap<_, _> = rows(&tx, tables::CELL).into_iter().map(|(k,v)| (CellKey::decode(&k).unwrap(), CellValue::parse(v).unwrap())).collect();
             prop_assert_eq!(&got, &model);
-            prop_assert_eq!(cells.reopen(&tx, root.hash(&HASH)).unwrap(), root);
+            cells.validate_root(&tx, root).unwrap();
             // Rebuild in the opposite order in a separate store. Same final
             // state must have the same root despite different write history.
             let fresh = MemoryStore::new();
             let mut fresh_tx = fresh.begin_write().unwrap();
             let mut fresh_root = RootRef::Empty;
             for (key, value) in model.iter().rev() {
-                fresh_root = cells.apply(&mut fresh_tx, fresh_root, [CellChange::Put { key: key.clone(), value: value.clone() }]).unwrap().root;
+                fresh_root = cells.apply(&mut fresh_tx, 0, fresh_root, [CellChange::Put { key: key.clone(), value: value.clone() }]).unwrap().root;
             }
             prop_assert_eq!(root, fresh_root);
         }

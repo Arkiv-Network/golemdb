@@ -1,13 +1,17 @@
-use golemdb_merkle::Hash;
+use golemdb_merkle::{Hash, HashProvider};
 use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
-use crate::{BranchError, CommitId, Result};
+use crate::{
+    BranchError, CommitId, Result,
+    roots::{Roots, put_roots},
+};
 
 const SUPERBLOCK: Table = Table("Superblock");
 const HEAD_KEY: &[u8] = b"head";
 const HEAD_BYTES: usize = 8 + 32 + 32;
 
 /// Durable head metadata shared by genesis opening and branch publication.
+/// The roots' locators live in the `Roots` row for `commit_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Head {
     pub commit_id: CommitId,
@@ -38,9 +42,25 @@ pub fn read_head_state(tx: &impl ReadTransaction) -> Result<Head> {
     })
 }
 
-/// Stage head metadata in the same transaction as its cells and trie writes.
-/// This is a trusted engine operation, not a public data API operation.
-pub fn write_head(tx: &mut impl WriteTransaction, head: &Head) -> Result<()> {
+/// Stage the head for `commit_id` and its `Roots` row; the head's hashes come from `roots`.
+pub fn write_head(
+    tx: &mut impl WriteTransaction,
+    commit_id: CommitId,
+    roots: &Roots,
+    hasher: &impl HashProvider,
+) -> Result<Head> {
+    let head = Head {
+        commit_id,
+        state_root: roots.state.hash(hasher),
+        index_root: roots.index.hash(hasher),
+    };
+    put_roots(tx, commit_id, roots)?;
+    put_head(tx, &head)?;
+    Ok(head)
+}
+
+/// The head row alone.
+pub(crate) fn put_head(tx: &mut impl WriteTransaction, head: &Head) -> Result<()> {
     let mut bytes = [0; HEAD_BYTES];
     bytes[..8].copy_from_slice(&head.commit_id.get().to_be_bytes());
     bytes[8..40].copy_from_slice(&head.state_root);

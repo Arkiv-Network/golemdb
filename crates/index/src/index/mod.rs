@@ -1,9 +1,8 @@
-use golemdb_merkle::{Hash, HashProvider};
+use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::ReadTransaction;
 
 use crate::{
-    IndexTerm, Result,
-    bitmap_trie::BitmapTrie,
+    BITMAP_TRIE_PATH_BYTES, IndexTerm, Result,
     index_trie::{IndexTrie, decode_root},
     tables,
 };
@@ -19,7 +18,6 @@ pub use writer::{IndexUpdate, PostingChange, TermRootChange};
 /// during `apply` require aborting the transaction. Publish roots only on commit.
 pub struct Index<'h, H: HashProvider> {
     hasher: &'h H,
-    bitmaps: BitmapTrie<'h, H>,
     trie: IndexTrie<'h, H>,
 }
 
@@ -27,14 +25,17 @@ impl<'h, H: HashProvider> Index<'h, H> {
     pub fn new(hasher: &'h H) -> Self {
         Self {
             hasher,
-            bitmaps: BitmapTrie::new(hasher),
             trie: IndexTrie::new(hasher),
         }
     }
 
-    fn bitmap_root(&self, tx: &impl ReadTransaction, term: &IndexTerm) -> Result<Option<Hash>> {
+    fn bitmap_root(
+        &self,
+        tx: &impl ReadTransaction,
+        term: &IndexTerm,
+    ) -> Result<Option<RootRef<BITMAP_TRIE_PATH_BYTES>>> {
         tx.get(tables::INDEX, term.as_bytes())?
-            .map(|bytes| decode_root(&bytes, self.hasher))
+            .map(|bytes| decode_root(&bytes))
             .transpose()
     }
 }
