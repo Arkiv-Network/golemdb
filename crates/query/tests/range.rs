@@ -10,12 +10,16 @@ use std::{
     ops::Bound,
 };
 
-use golemdb_api::{ApiError, RecordKey};
-use golemdb_cells::{CellType, CellValue};
+use golemdb_api::{
+    ApiError, Bounds, CellNameRef, Filter, RecordKey,
+    marker::{Date32, Dec32, I32, I64},
+};
+use golemdb_cells::{CellType, CellValue, Width};
 use golemdb_index::TermError;
 use proptest::prelude::*;
 use support::{
-    TestDb, is_between, key, native_cmp, range, record, small_bounds_of_one_type, small_value,
+    TestDb, is_between, key, native_cmp, range, range_of, record, small_bounds_of_one_type,
+    small_value,
 };
 
 fn f32_value(value: f32) -> CellValue {
@@ -264,33 +268,58 @@ fn names_sharing_a_prefix_are_distinct() {
 }
 
 #[test]
-fn malformed_range_is_an_invalid_query() {
+fn two_unbounded_sides_match_every_cell_of_the_type() {
     let test = TestDb::default();
-    test.create([record(key(1), &[("f", CellValue::from_i32(1))])]);
-    let i = CellValue::from_i32;
-    for filter in [
-        range("f", Bound::Unbounded, Bound::Unbounded),
-        range(
-            "f",
-            Bound::Included(i(1)),
-            Bound::Excluded(CellValue::from_i64(2)),
-        ),
-    ] {
-        assert!(
-            matches!(
-                test.keys(filter.clone()),
-                Err(ApiError::InvalidQuery { .. })
-            ),
-            "{filter:?}"
-        );
-        assert!(
-            matches!(
-                test.count(filter.clone()),
-                Err(ApiError::InvalidQuery { .. })
-            ),
-            "{filter:?}"
-        );
-    }
+    test.create([
+        record(key(1), &[("f", CellValue::from_i32(1))]),
+        record(key(2), &[("f", CellValue::from_i64(1))]),
+        record(key(3), &[("f", CellValue::from_i32(i32::MIN))]),
+        record(key(4), &[("g", CellValue::from_i32(1))]),
+    ]);
+    let filter = range_of(
+        "f",
+        CellType::Int(Width::W4),
+        Bound::Unbounded,
+        Bound::Unbounded,
+    );
+    assert_eq!(test.keys(filter.clone()).unwrap(), [key(1), key(3)]);
+    assert_eq!(test.count(filter).unwrap(), 2);
+    let typed = Filter::Range {
+        field: CellNameRef::parse_user(b"f", 32)
+            .expect("valid name")
+            .into(),
+        bounds: Bounds::new(I64, Bound::Unbounded, Bound::Unbounded),
+    };
+    assert_eq!(test.keys(typed).unwrap(), [key(2)]);
+}
+
+#[test]
+fn typed_bounds_match_as_their_runtime_form_does() {
+    let test = TestDb::default();
+    test.create([
+        record(key(1), &[("f", CellValue::from_dec32_unscaled(5))]),
+        record(key(2), &[("f", CellValue::from_i32(5))]),
+        record(key(3), &[("f", CellValue::from_date32(5))]),
+    ]);
+    let typed = |bounds| Filter::Range {
+        field: CellNameRef::parse_user(b"f", 32)
+            .expect("valid name")
+            .into(),
+        bounds,
+    };
+    // One Rust value, three cell types: the marker decides which matches.
+    let dec32 = Bounds::new(Dec32, Bound::Included(0), Bound::Excluded(10));
+    assert_eq!(test.keys(typed(dec32.clone())).unwrap(), [key(1)]);
+    let i32s = Bounds::new(I32, Bound::Included(5), Bound::Unbounded);
+    assert_eq!(test.keys(typed(i32s)).unwrap(), [key(2)]);
+    let dates = Bounds::new(Date32, Bound::Unbounded, Bound::Included(5));
+    assert_eq!(test.keys(typed(dates)).unwrap(), [key(3)]);
+    let runtime = range(
+        "f",
+        Bound::Included(CellValue::from_dec32_unscaled(0)),
+        Bound::Excluded(CellValue::from_dec32_unscaled(10)),
+    );
+    assert_eq!(runtime, typed(dec32));
 }
 
 #[test]
@@ -329,23 +358,12 @@ fn invalid_arguments_are_errors_not_empty_results() {
         cause(test.keys(range("not valid", one(), Bound::Unbounded))),
         Some(TermError::InvalidName)
     );
-    let bytes = Bound::Included(CellValue::from_bytes(b"x"));
-    assert_eq!(
-        cause(test.keys(range("f", Bound::Unbounded, bytes))),
-        Some(TermError::UnsupportedType(CellType::Bytes))
-    );
 }
 
 const FIELDS: [&str; 3] = ["a", "ab", "b"];
 
 fn field() -> impl Strategy<Value = &'static str> {
     prop::sample::select(&FIELDS[..])
-}
-
-/// Whether admission accepts the bounds: at least one. Bounds of two types
-/// are left to the unit tests; bounds that admit no value are well-formed.
-fn well_formed(lower: &Bound<CellValue>, upper: &Bound<CellValue>) -> bool {
-    !matches!((lower, upper), (Bound::Unbounded, Bound::Unbounded))
 }
 
 proptest! {
@@ -365,22 +383,19 @@ proptest! {
             let cells: Vec<_> = cells.iter().map(|(field, value)| (*field, value.clone())).collect();
             record(key(n as u64), &cells)
         }));
-        for (field, (lower, upper)) in filters {
-            let filter = range(field, lower.clone(), upper.clone());
-            if !well_formed(&lower, &upper) {
-                let result = test.keys(filter);
-                prop_assert!(matches!(result, Err(ApiError::InvalidQuery { .. })), "{:?}", result);
-                continue;
-            }
-            // A record matches iff its cell under `field` has the bounds' type
-            // and lies between them in that type's native order. Records are
-            // created in order, so record IDs, and with them the query order,
-            // follow `n`.
+        for (field, (ty, lower, upper)) in filters {
+            let filter = range_of(field, ty, lower.clone(), upper.clone());
+            // A record matches iff its cell under `field` has the range's type
+            // and lies between the bounds in that type's native order. Records
+            // are created in order, so record IDs, and with them the query
+            // order, follow `n`.
             let expected: Vec<_> = records
                 .iter()
                 .enumerate()
                 .filter(|(_, cells): &(usize, &BTreeMap<&str, CellValue>)| {
-                    cells.get(field).is_some_and(|cell| is_between(cell, &lower, &upper))
+                    cells
+                        .get(field)
+                        .is_some_and(|cell| cell.cell_type() == ty && is_between(cell, &lower, &upper))
                 })
                 .map(|(n, _)| key(n as u64))
                 .collect();

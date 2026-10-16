@@ -5,8 +5,11 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use golemdb_api::{ApiError, RecordKey};
-use golemdb_cells::{CellType, CellValue};
+use golemdb_api::{
+    ApiError, CellNameRef, Filter, InValues, RecordKey,
+    marker::{Date32, Dec32, I32},
+};
+use golemdb_cells::CellValue;
 use golemdb_index::TermError;
 use proptest::prelude::*;
 use support::{TestDb, eq, is_in, key, record, small_value, small_values_of_one_type};
@@ -57,29 +60,37 @@ fn other_types_under_the_same_name_are_absent() {
 }
 
 #[test]
-fn malformed_in_is_an_invalid_query() {
+fn typed_values_match_as_their_runtime_form_does() {
     let test = TestDb::default();
-    test.create([record(key(1), &[("f", CellValue::from_i32(1))])]);
-    for filter in [
-        is_in("f", [CellValue::from_i32(1), CellValue::from_i64(1)]),
-        // Mixed types are reported before a value with no term.
-        is_in("f", [str("x"), CellValue::from_bytes(b"x")]),
-    ] {
-        assert!(
-            matches!(
-                test.keys(filter.clone()),
-                Err(ApiError::InvalidQuery { .. })
-            ),
-            "{filter:?}"
-        );
-        assert!(
-            matches!(
-                test.count(filter.clone()),
-                Err(ApiError::InvalidQuery { .. })
-            ),
-            "{filter:?}"
-        );
-    }
+    test.create([
+        record(key(1), &[("f", CellValue::from_dec32_unscaled(5))]),
+        record(key(2), &[("f", CellValue::from_i32(5))]),
+        record(key(3), &[("f", CellValue::from_date32(5))]),
+    ]);
+    let typed = |values| Filter::In {
+        field: CellNameRef::parse_user(b"f", 32)
+            .expect("valid name")
+            .into(),
+        values,
+    };
+    // One Rust value, three cell types: the marker decides which matches.
+    assert_eq!(
+        test.keys(typed(InValues::of(Dec32, [5, 7]))).unwrap(),
+        [key(1)]
+    );
+    assert_eq!(test.keys(typed(InValues::of(I32, [5]))).unwrap(), [key(2)]);
+    assert_eq!(
+        test.keys(typed(InValues::of(Date32, [5]))).unwrap(),
+        [key(3)]
+    );
+    let runtime = is_in(
+        "f",
+        [
+            CellValue::from_dec32_unscaled(7),
+            CellValue::from_dec32_unscaled(5),
+        ],
+    );
+    assert_eq!(runtime, typed(InValues::of(Dec32, [5, 7])));
 }
 
 #[test]
@@ -107,10 +118,6 @@ fn invalid_arguments_are_errors_not_empty_results() {
     assert_eq!(
         cause(test.keys(is_in("not valid", []))),
         Some(TermError::InvalidName)
-    );
-    assert_eq!(
-        cause(test.keys(is_in("f", [CellValue::from_bytes(b"x")]))),
-        Some(TermError::UnsupportedType(CellType::Bytes))
     );
 }
 

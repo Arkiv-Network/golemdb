@@ -6,7 +6,7 @@ use std::{
     ops::Bound,
 };
 
-use golemdb_cells::{CellNameRef, CellType, CellValue};
+use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
 use golemdb_index::{
     BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, TermRange,
     tables,
@@ -27,6 +27,7 @@ fn tag_range(lower: Bound<u8>, upper: Bound<u8>) -> Option<TermRange> {
     let (lower, upper) = (lower.map(value), upper.map(value));
     TermRange::between(
         CellNameRef::raw(b"tag"),
+        CellType::Str,
         lower.as_ref().map(CellValue::as_view),
         upper.as_ref().map(CellValue::as_view),
     )
@@ -392,6 +393,7 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
         );
         TermRange::between(
             CellNameRef::raw(b"a"),
+            CellType::Uint(Width::W4),
             lower.as_ref().map(CellValue::as_view),
             upper.as_ref().map(CellValue::as_view),
         )
@@ -429,6 +431,43 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
     // Excluded neighbours with no value between are still a key range: the
     // scan finds no term in it.
     assert!(u32_run(Bound::Excluded(5), Bound::Excluded(6)).is_empty());
+}
+
+#[test]
+fn prefix_scans_hold_the_strings_that_start_with_the_prefix() {
+    let (_dir, db) = fixture::db();
+    let index = Index::new(&HASH);
+    let at =
+        |name: &str, value: CellValue| IndexTerm::from_str_name(name, value.as_view()).unwrap();
+    // In key order: UTF-8 bytes.
+    let strings = ["", "a", "ab", "ab\u{10FFFF}", "ac", "é", "\u{10FFFF}"]
+        .map(|value| at("a", CellValue::from_str(value)));
+    let neighbours = [
+        at("a", CellValue::from_bytes4(*b"abcd")),
+        at("ab", CellValue::from_str("ab")),
+        at("b", CellValue::from_str("a")),
+    ];
+    let mut tx = db.begin_write().unwrap();
+    let changes = strings
+        .iter()
+        .chain(&neighbours)
+        .enumerate()
+        .map(|(n, t)| add(t, n as u64));
+    index.apply(&mut tx, RootRef::Empty, changes).unwrap();
+    let scan = |prefix: &str| {
+        let range = TermRange::with_prefix(CellNameRef::raw(b"a"), prefix).unwrap();
+        index
+            .terms(&tx, range)
+            .unwrap()
+            .map(|entry| entry.unwrap().0)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(scan(""), strings);
+    assert_eq!(scan("a"), strings[1..5]);
+    assert_eq!(scan("ab"), strings[2..4]);
+    assert_eq!(scan("é"), strings[5..6]);
+    assert_eq!(scan("\u{10FFFF}"), strings[6..]);
+    assert!(scan("b").is_empty());
 }
 
 #[test]

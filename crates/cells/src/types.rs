@@ -126,6 +126,27 @@ impl CellType {
         }
     }
 
+    /// Whether the index holds values of this type: every type but
+    /// variable-length `bytes`, which has no order.
+    ///
+    /// Exhaustive: a new cell type must choose before the crate builds again,
+    /// and [`crate::marker`]'s build-time check then asks for its marker.
+    pub const fn is_indexable(self) -> bool {
+        match self {
+            Self::Bytes => false,
+            Self::Bool
+            | Self::Str
+            | Self::Bytes20
+            | Self::FixedBytes(_)
+            | Self::Uint(_)
+            | Self::Int(_)
+            | Self::Decimal(_)
+            | Self::Float(_)
+            | Self::Date32
+            | Self::Timestamp64 => true,
+        }
+    }
+
     /// The value width in bytes, or `None` for the variable-width `str` and
     /// `bytes`.
     pub const fn width(self) -> Option<usize> {
