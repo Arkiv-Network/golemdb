@@ -1,0 +1,17 @@
+name: Node ID stale-list prototype
+on:
+  pull_request:
+    paths:
+      - prototypes/gc/node-id-stale.patch
+      - prototypes/gc/node-id-stale/**
+      - .github/workflows/node-id-stale.yml
+jobs:
+  prototype:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: bash prototypes/gc/node-id-stale/check.sh

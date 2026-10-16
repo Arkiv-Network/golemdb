@@ -10,5 +10,6 @@ environment variables.
 | `pr35-window.patch` | PR #35 (`ed77b05`) | A1 and A2, reference counts with a window (`GOLEMDB_GCA` = `window`, `defer`; `GOLEMDB_GCA_W`, `_K`); test `gcwin` |
 | `hash-marksweep.patch` | `57c48ca` | E on hash keys (`GOLEMDB_GC=marksweep`, `GOLEMDB_GC_N`) |
 | `mdbx-page-size.patch` | this branch | `GOLEMDB_PAGE_SIZE` for new databases |
+| `node-id-stale.patch` | #60 at `6ac18eb` | Same cache, APPEND and durable stale lists for version/path and node-ID layouts; [method and measured results](node-id-stale/README.md) |
 
 Example: `GOLEMDB_GC=sweep GOLEMDB_GC_W=5 GOLEMDB_GC_K=4 cargo test -p golemdb-integration-tests --test gcproto`

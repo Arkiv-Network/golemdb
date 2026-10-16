@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/harness"]
+# golem-db is its own workspace; keep cargo from adopting it as a member.
+exclude = ["golem-db"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+
+# Symbols, including inlined functions, for perf and flamegraphs; no effect on speed.
+[profile.release]
+debug = true
