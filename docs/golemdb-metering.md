@@ -209,7 +209,7 @@ first. The first failure is returned; no later stage runs.
 | --- | --- | --- | --- |
 | 1. Handle | writes and branch reads: the branch handle is known, not consumed, its origin is still the head, and, for writes, not sealed. Committed reads instead select their snapshot: the head, or the requested commit | 0 | `HandleInvalid`, `Sealed`, `CommitUnavailable` |
 | 2. Admission | input form, including errors found while the request was built; reserved keys; key mode; cell names and value lengths against the genesis limits. Reads no record state | admission cost | `InvalidArgument`, `Reserved`, `KeyModeMismatch` |
-| 3. Record state | the binding, then `#meta`, cells and index terms; the per-record caps | `w_rec[op]` plus the reads performed | `NotFound`, `AlreadyExists`, `CellNotFound`, cap violations |
+| 3. Record state | the binding, then `#meta`, cells and index terms; the per-record caps | `write.record.{op}` plus the reads performed | `NotFound`, `AlreadyExists`, `CellNotFound`, cap violations |
 
 Stage 1 comes first because it fixes the pricing snapshot (D9): without a valid handle or
 snapshot, there is no schedule to charge with, so a call rejected there costs nothing (D8).
@@ -217,7 +217,7 @@ Validating a handle reads only the current head, a fixed-size row, not record st
 limits and key mode used in stage 2 are `#params` cells, fixed at genesis, so they count as
 configuration rather than state. Within stage 3, the steps below fix the order.
 
-Before each charged planning step, starting with admission and later the `w_rec[op]` binding lookup,
+Before each charged planning step, starting with admission and later the `write.record.{op}` binding lookup,
 check that its charge fits the remaining limited budget. If it does not, stop without
 performing the step and return `OutOfBudget{spent, required: None}`. Each step must have
 a known, bounded charge before execution; the calibration requirements below cover
@@ -227,7 +227,7 @@ exhausting the budget does not by itself fail a call if no further charge is nee
 
 1. **Plan** (reads only, no writes):
   1. Admission (stage 2): check the input's form, reserved keys, the key mode, cell names and value lengths, charging incrementally as defined below. No record state is read. Rejected input still incurs the admission cost performed before rejection.
-   2. Read the key binding (`w_rec[op]`). `create` fails with `AlreadyExists` if it exists; `patch` and `delete` fail with `NotFound` if it does not. A deleted record has no binding, so its key can be re-created.
+   2. Read the key binding (`write.record.{op}`). `create` fails with `AlreadyExists` if it exists; `patch` and `delete` fail with `NotFound` if it does not. A deleted record has no binding, so its key can be re-created.
    3. `patch` and `delete` only: read [`#meta`](#the-meta-cell) for the current counts. A `create` starts from zero.
    4. `patch` and `delete`: read every touched cell. All operations: read every touched index term. The results decide each operation and its bytes.
    5. Compute the resulting counts and check them against the per-record caps (D5).
@@ -239,23 +239,23 @@ A failure in the plan phase writes nothing, so it is charged no write cost (D8).
 The plan phase yields the call's cell and index operations, including the per-record system cells listed below. Host-funded commit overhead is separate (D8). The four cost components are:
 
 ```
-record op cost       = admission cost + w_rec[op]
+record op cost       = admission cost + write.record.{op}
                      + Σ cell operation costs
                      + Σ index operation costs
 
-admission cost       = w_admission_base
-                     + entries inspected × w_admission_entry
-                     + bytes validated × w_admission_byte
+admission cost       = write.admission.base
+                     + entries inspected × write.admission.entry
+                     + bytes validated × write.admission.byte
 
-cell operation cost  = w_cell_read                         (only when read)
-                     + w_cell[create | update | delete]
-                     + cell_trie_depth × w_cell_trie_update
-                     + cell bytes written × w_cell_write_byte
+cell operation cost  = write.cell_read                         (only when read)
+                     + write.cell.{create | update | delete}
+                     + cell_trie_depth × write.cell_trie_update
+                     + cell bytes written × write.cell_byte
 
-index operation cost = w_idx_read + w_idx[join | leave]
-                     + index_trie_depth × w_index_trie_update
-                     + w_idx_term_create                  (only if the term is new)
-                     + index bytes written × w_idx_write_byte
+index operation cost = write.index_read + write.index.{join | leave}
+                     + index_trie_depth × write.index_trie_update
+                     + write.index_term_create                 (only if the term is new)
+                     + index bytes written × write.index_byte
 
 batch cost           = Σ record op costs
 ```
@@ -282,9 +282,9 @@ input, rejected input, and budget exhaustion. These rules form part of the versi
 metering model; they must not vary between implementations. The model must also pin
 planning-read order and test charges at budget-exhaustion checkpoints.
 
-Every planned cell or index mutation pays for one leaf's trie path, priced at the modeled depth (D3). Required reads remain charged even for no-ops. `w_cell_read` is charged only where a cell is read: by `patch` and `delete`, never by `create`.
+Every planned cell or index mutation pays for one leaf's trie path, priced at the modeled depth (D3). Required reads remain charged even for no-ops. `write.cell_read` is charged only where a cell is read: by `patch` and `delete`, never by `create`.
 
-**Record base cost.** `w_rec[op]` covers the fixed per-record work that is not a cell operation:
+**Record base cost.** `write.record.{op}` covers the fixed per-record work that is not a cell operation:
 
 - All operations: reading the key's binding in `#recordKeys`. Input validation is charged separately as admission.
 - `create`: increment the in-memory branch record ID counter. Persisting and merkleizing the final `#alloc` value is host-funded commit overhead (D8). A key collision fails with `AlreadyExists` (D8).
@@ -293,16 +293,16 @@ Every planned cell or index mutation pays for one leaf's trie path, priced at th
 
 This fixed work folds into one weight per operation with no depth term. The allocator's committed cell and trie update are accounted for separately as host-funded overhead (D8).
 
-`w_rec[op]` must be calibrated excluding the admission work now covered by the separate
+`write.record.{op}` must be calibrated excluding the admission work now covered by the separate
 weights; adding admission to the former combined base would double charge validation.
 
 **System cell operations.** The system cells (Record Model) are charged as cell operations, like user cells:
 
 | Record operation | System cell operations |
 | --- | --- |
-| `create` | create binding, create `#key`, create `#meta`; no reads, the record is new and the binding read is in `w_rec` |
+| `create` | create binding, create `#key`, create `#meta`; no reads, the record is new and the binding read is in `write.record` |
 | `patch` | read `#meta`, even for empty patches; update it only when a count changes |
-| `delete` | delete binding (read in `w_rec`), read and delete `#key`, read and delete `#meta` |
+| `delete` | delete binding (read in `write.record`), read and delete `#key`, read and delete `#meta` |
 
 System cells have fixed-length encodings, so their byte terms are constants. They are not included in `#meta`'s counts or the receipt's user-cell counts (D4).
 
@@ -315,30 +315,30 @@ System cells have fixed-length encodings, so their byte terms are constants. The
 | cell present, different type, kind or value assigned | update | new cell | old cell |
 | cell present, its current type, kind and value assigned | no-op: read only; no index operation | – | – |
 | cell present, deletion requested | delete | – | old cell |
-| cell missing, deletion requested | read only (`w_cell_read`); no index operation | – | – |
+| cell missing, deletion requested | read only (`write.cell_read`); no index operation | – | – |
 
 Bytes written are made live and charged (D4). Bytes deleted leave live state but stay in the change-set until pruned; they are reported, not charged.
 
-- `w_cell[op]` covers the cell row, its history entry and its change-set entry; the cell-trie path is the depth term.
+- `write.cell.{op}` covers the cell row, its history entry and its change-set entry; the cell-trie path is the depth term.
 - An old value causes three kinds of work:
   - **Change-set copy.** At commit, the pre-image goes into `CellChangeSet`, once per modified cell per commit, however often the branch touched it. The work grows with the old value's size, not with the number of earlier versions. The write byte weight pre-pays it: every byte is copied at most once, when it is overwritten or deleted, so it is charged once, when written (D4).
-  - **History append.** At commit, the commit number is added to the cell's `CellHistory` bitmap, once per modified cell per commit. The bitmap grows with the cell's retained modifications; `w_cell[op]` covers it as a fixed charge, calibrated for `#minRetention` (D4).
-  - **Branch processing.** On every touch, planning reads the old value and the operation log captures it; a rollback copies it back. This work grows with the old value's size and recurs per touch. `w_cell_read` and `w_cell[op]` cover it as fixed charges, calibrated up to `#maxBytesLen`.
+  - **History append.** At commit, the commit number is added to the cell's `CellHistory` bitmap, once per modified cell per commit. The bitmap grows with the cell's retained modifications; `write.cell.{op}` covers it as a fixed charge, calibrated for `#minRetention` (D4).
+  - **Branch processing.** On every touch, planning reads the old value and the operation log captures it; a rollback copies it back. This work grows with the old value's size and recurs per touch. `write.cell_read` and `write.cell.{op}` cover it as fixed charges, calibrated up to `#maxBytesLen`.
 - A patch's `set` takes the kind from the cell read in step 4, so for `set` only the type or value can differ. Its failure on a missing cell is decided by a read the patch owes anyway (R3).
 - A record `delete` performs a cell delete for every user cell.
 - Assigning a cell its current value with its current kind is a no-op: it pays only for the reads that establish that nothing changes. A kind change alone is an update, since it joins or leaves the index. No cell write, index leave or join, or history entry follows.
 
-**Index operations.** Leave the old term if the old cell was indexed; join the new term if the resulting cell is indexed, including attribute/field transitions. Each join or leave charges `w_idx_read`, even for the same term:
+**Index operations.** Leave the old term if the old cell was indexed; join the new term if the resulting cell is indexed, including attribute/field transitions. Each join or leave charges `write.index_read`, even for the same term:
 
 | Read result and request | Index operation | Charged |
 | --- | --- | --- |
-| term exists, record joins | join | `w_idx_read + w_idx[join]` |
-| term missing, record joins | create term, then join | `w_idx_read + w_idx_term_create + w_idx[join]` |
-| record leaves, whether or not it is the last member | leave | `w_idx_read + w_idx[leave]` |
+| term exists, record joins | join | `write.index_read + write.index.join` |
+| term missing, record joins | create term, then join | `write.index_read + write.index_term_create + write.index.join` |
+| record leaves, whether or not it is the last member | leave | `write.index_read + write.index.leave` |
 | value or type changes | leave the old term, join the new one | both |
 
-- `w_idx[join]` and `w_idx[leave]` cover the membership change, the bitmap container and the posting-list path; the index-trie path is the depth term.
-- `w_idx_term_create` covers both creating a term and its later removal: the term row and the leaf insert and removal. It has no depth term, because the join that follows and the eventual leave already pay for the leaf's path. Removing a term emptied by its last member costs nothing at that point, so every leave costs the same and deletion stays predictable.
+- `write.index.join` and `write.index.leave` cover the membership change, the bitmap container and the posting-list path; the index-trie path is the depth term.
+- `write.index_term_create` covers both creating a term and its later removal: the term row and the leaf insert and removal. It has no depth term, because the join that follows and the eventual leave already pay for the leaf's path. Removing a term emptied by its last member costs nothing at that point, so every leave costs the same and deletion stays predictable.
 - A join writes the term's bytes (D4); a leave deletes them.
 
 **Common rules.**
@@ -390,7 +390,7 @@ The modeled depth is derived from these counters by a pinned table. Tries are 16
 Depth is capped at 7. ⌈log₁₆ N⌉ would reach 8 only above 16⁷ (≈268M) leaves in one trie, which the current architecture is very unlikely to reach.
 
 - The cell trie uses the live-cell count; the index trie uses the distinct-term count. The posting-list trie keeps a constant modeled depth, at a low-cardinality envelope.
-- Path-rewrite cost = `cell_trie_depth × w_cell_trie_update` or `index_trie_depth × w_index_trie_update`, using the counters at the branch base.
+- Path-rewrite cost = `cell_trie_depth × write.cell_trie_update` or `index_trie_depth × write.index_trie_update`, using the counters at the branch base.
 - The write already knows whether it adds or removes a cell or term, so counters need no extra read (R3).
 - Database growth leaves the weights: they reflect cost per node only.
 - The model over-charges repeated writes to one cell and writes sharing trie prefixes; deeper paths can be under-charged unless calibration provides sufficient upward margins (R4).
@@ -422,7 +422,7 @@ nodes of a deployment charge the same.
 - A cell counts `8 + |name|` bytes for its key (ID prefix and name) and `1 + |value|` bytes for its value (type tag and value).
 - An index entry counts `|name| + 2 + |value|` bytes: its term key, name ‖ `0x00` ‖ type tag ‖ value.
 - [`#meta`](#the-meta-cell) keeps four counts per record on this basis: cells, cell bytes, indexed cells, and index bytes. They cover user cells only; system cells are fixed-size and charged separately (D2).
-- When details are requested for a write call, its receipt must report cells created, updated and deleted; index joins, leaves and terms created; and cell and index bytes written and deleted, on this basis (R9). Terms created come from the index-term reads of D2 step 4, which planning performs anyway to price `w_idx_term_create`; an implementation without metering may not report them yet. Deleted counts are reported, never refunded (R6).
+- When details are requested for a write call, its receipt must report cells created, updated and deleted; index joins, leaves and terms created; and cell and index bytes written and deleted, on this basis (R9). Terms created come from the index-term reads of D2 step 4, which planning performs anyway to price `write.index_term_create`; an implementation without metering may not report them yet. Deleted counts are reported, never refunded (R6).
 - Counting per record overcounts popular index terms: the safe direction (R4).
 
 ## D5. Record Shape and Deletion Bound
@@ -432,10 +432,10 @@ Meets R10.
 By D2, deleting a record costs:
 
 ```
-delete cost = admission cost + w_rec[delete]
+delete cost = admission cost + write.record.delete
             + system cell deletes                        (binding, #key, #meta; fixed size)
-            + cells         × (w_cell_read + w_cell[delete] + cell_trie_depth  × w_cell_trie_update)
-            + indexed cells × (w_idx_read  + w_idx[leave]   + index_trie_depth × w_index_trie_update)
+            + cells         × (write.cell_read + write.cell.delete + cell_trie_depth  × write.cell_trie_update)
+            + indexed cells × (write.index_read  + write.index.leave   + index_trie_depth × write.index_trie_update)
 ```
 
 Every leave costs the same, whether or not it empties the term (D2), and deleted bytes were pre-paid at write (D4). A valid delete request carries a fixed-size record key and no cell changes, so its admission cost is fixed by the schedule. The total therefore depends only on the record's counts and is exact at current weights and depth.
@@ -464,22 +464,22 @@ the execution rules of the [query proposal](query-proposal.md#execution-rules-no
   one storage snapshot is opened, and the target commit is checked against its head; every state
   read uses that snapshot.
 - **Admission** has D2's three-part shape, with weights of its own that start at D2's values:
-  `query_admission_base` once per query or count, `query_admission_entry` per entry (each filter
-  node, `In` value, `Range` bound, projected name and sort key) and `query_admission_byte` per byte
+  `read.admission.base` once per query or count, `read.admission.entry` per entry (each filter
+  node, `In` value, `Range` bound, projected name and sort key) and `read.admission.byte` per byte
   of names and values inspected. It is charged incrementally, each part checked before its work,
   so an oversized filter stops early with `OutOfBudget`. `In` values must be given in strictly
   ascending order and are checked in one pass, so admission stays linear in their number.
 - **Logical steps only.** The counted descent is the reference one, whether or not an
   implementation short-circuits it (D1, R5).
-- **Leaves.** An `Eq` is one term lookup (`index_seek`), present or absent. An `In` is one term
+- **Leaves.** An `Eq` is one term lookup (`read.term`), present or absent. An `In` is one term
   lookup per distinct value, in term key order. Every term found then pays for its posting list:
-  one `bitmap_container_read` per bitmap container loaded, and one `set_container` per container
+  one `read.container` per bitmap container loaded, and one `read.set_container` per container
   merged into the running result.
 - **Range scans.** Positioning the cursor at the lower bound reads the first index entry and is
-  one `index_seek`; every further entry read is one `index_scan_step`, including the entry that
+  one `read.term`; every further entry read is one `read.term_step`, including the entry that
   ends the scan: past the upper bound, past the end of the name and type run, or at the end of the
   table. A scan over `k` terms therefore costs `index_seek + k × index_scan_step` plus their
-  containers, and a range with no term in it costs one `index_seek`, like an absent `Eq`. An
+  containers, and a range with no term in it costs one `read.term`, like an absent `Eq`. An
   `Excluded` lower bound that matches an existing term costs one more step, for the entry read
   and skipped. Bounds that admit no value read nothing ([query proposal](query-proposal.md#range-bounds)).
   So ranges over attributes with many distinct values pay for their width.
@@ -528,7 +528,7 @@ the execution rules of the [query proposal](query-proposal.md#execution-rules-no
   far back.
 - Reading `#meta` is a `get` of one cell; the full record includes it. The `id_of` and `key_of`
   accessors, to be specified with the proof API, are fixed-size point reads with a flat charge:
-  `id_of` is one key resolution (`key_resolve`), `key_of` one cell read (`cell_read`).
+  `id_of` is one key resolution (`read.key`), `key_of` one cell read (`read.cell`).
 - Bulk deletion, such as a host's expiry purge, uses ordinary reads: Arkiv's purge queries one
   equality term of its expiry attribute in record-ID order and deletes record by record under its
   own budget ([tokenomics](arkiv-tokenomics.md#purge-budget)). It reads the parent block's
@@ -543,17 +543,17 @@ them apart later.
 
 | Step | When | Weight |
 | --- | --- | --- |
-| Call base | once per read call: open the snapshot, read the head | `read_base` |
-| Admission | once per query, per entry and per byte inspected | `query_admission_base`, `query_admission_entry`, `query_admission_byte` |
-| Key resolution | `get`: look up the key's binding, present or absent | `key_resolve` |
-| Cell point read | `#key`, each projected cell, present or absent | `cell_read` |
-| Cell scan step | full-record read: per cell row | `cell_scan_step` |
-| Bytes read | per byte of each cell value returned | `bytes_read` |
-| Term lookup | `Eq`, each `In` value: look up the term, present or absent | `index_seek` |
-| Term stepped | `Range`, `Prefix`, `Exists`: per term stepped over | `index_scan_step` |
-| Bitmap container loaded | per bitmap container when a term's posting list is loaded | `bitmap_container_read` |
-| Set combination | per bitmap container processed by `And`, `Or` and `Not` | `set_container` |
-| Sort comparison | modeled, `⌈N log₂ N⌉ × S` | `sort_compare` (deferred) |
+| Call base | once per read call: open the snapshot, read the head | `read.base` |
+| Admission | once per query, per entry and per byte inspected | `read.admission.base`, `read.admission.entry`, `read.admission.byte` |
+| Key resolution | `get`: look up the key's binding, present or absent | `read.key` |
+| Cell point read | `#key`, each projected cell, present or absent | `read.cell` |
+| Cell scan step | full-record read: per cell row | `read.cell_scan` |
+| Bytes read | per byte of each cell value returned | `read.byte` |
+| Term lookup | `Eq`, each `In` value: look up the term, present or absent | `read.term` |
+| Term stepped | `Range`, `Prefix`, `Exists`: per term stepped over | `read.term_step` |
+| Bitmap container loaded | per bitmap container when a term's posting list is loaded | `read.container` |
+| Set combination | per bitmap container processed by `And`, `Or` and `Not` | `read.set_container` |
+| Sort comparison | modeled, `⌈N log₂ N⌉ × S` | `read.sort_compare` (deferred) |
 | Historical read | per item resolved at a past commit | flat surcharge (deferred) |
 
 - **Bitmap containers are the unit for posting lists** ([The Index](#the-index)). They are part of
@@ -605,9 +605,9 @@ rules above carry its content and the list is removed.
 | 2 | Order of checks | decided | `NotImplemented` first, then admission, then snapshot and commit check, then reads |
 | 3 | Read steps and their weights | proposed | [Read Steps](#read-steps); separate weights, similar steps start equal |
 | 4 | Unit for combining sets | decided | per bitmap container, a logical unit (D1) |
-| 5 | Equality lookup, including an absent term | proposed | one `index_seek`, present or absent, plus the containers of a term found |
+| 5 | Equality lookup, including an absent term | proposed | one `read.term`, present or absent, plus the containers of a term found |
 | 6 | `In` | decided | one term read per distinct term, in key order |
-| 7 | `Range` scan | proposed | `index_seek` plus one `index_scan_step` per further entry read, including the one ending the scan; an empty range costs one `index_seek` |
+| 7 | `Range` scan | proposed | `read.term` plus one `read.term_step` per further entry read, including the one ending the scan; an empty range costs one `read.term` |
 | 8 | Materialization | proposed | `#key` plus projected cells, or `#meta` then a full scan; bytes charged after the read and before the copy |
 | 9 | Admission for queries | proposed | D2's three-part shape, own weights starting at D2's values; `In` values strictly ascending, checked linearly |
 | 10 | `get` | proposed | one key resolution, then one cell read per cell |
@@ -633,8 +633,8 @@ history. Each append and read is attributable to one call, so it is metered per 
 unlike commit overhead (D8).
 
 ```
-append cost     = w_append_base + row bytes × w_append_byte
-read cost       = rows read × w_imm_read_base + bytes read × bytes_read
+append cost     = write.log_append.base + row bytes × write.log_append.byte
+read cost       = rows read × read.log_row + bytes read × read.byte
 ```
 
 - Row bytes are the sum of the row's column lengths, before compression (R5).
@@ -643,7 +643,7 @@ read cost       = rows read × w_imm_read_base + bytes read × bytes_read
 - `immutable_data_append` checks its cost against the budget before staging the row; if
   it does not fit, it fails with `OutOfBudget` and stages nothing. Staged rows that never
   commit, for example because the sealed branch loses the commit race, are not refunded (R6).
-- `w_append_byte` covers writing the row and its residency in the segment's shards until
+- `write.log_append.byte` covers writing the row and its residency in the segment's shards until
   pruned. Like the write byte weights, it is calibrated for `#minRetention` (D4); a
   pruning strategy that keeps a segment longer does so at the node's own cost.
 - `immutable_data_get` reads one row, `immutable_data_rows_of` the commit's whole run;
@@ -676,14 +676,14 @@ Meets R6, R7.
   | Failure | Charge |
   | --- | --- |
   | Admission (malformed input, `Reserved`, `KeyModeMismatch`) | Admission work performed, including the check that detects the error |
-  | Key failure (`AlreadyExists`, `NotFound`) | Admission cost + `w_rec[op]` |
-  | Later check (cap exceeded, invalid value, `CellNotFound`) | Admission cost + `w_rec[op]` + the cell and index reads performed |
+  | Key failure (`AlreadyExists`, `NotFound`) | Admission cost + `write.record.{op}` |
+  | Later check (cap exceeded, invalid value, `CellNotFound`) | Admission cost + `write.record.{op}` + the cell and index reads performed |
   | `OutOfBudget{spent, required?}` | `spent`: completed charged planning steps, never more than a limited budget; `required` is present only after the full cost is established |
 
   The key-failure and later-check rows assume the preceding charged steps fit the budget;
   otherwise the call stops earlier with `OutOfBudget`. If the remaining budget after
-  admission is below `w_rec[op]`, no binding lookup is performed; `spent` is the admission
-  cost and `required` is `None`. `w_rec[op]` includes work a failed
+  admission is below `write.record.{op}`, no binding lookup is performed; `spent` is the admission
+  cost and `required` is `None`. `write.record.{op}` includes work a failed
   call never reaches, such as the record ID counter; that difference is the penalty for
   a failed call. Returning a receipt with an error code costs nothing extra.
 - Rollback and branch discard carry no charge, and no weight covers undo. Undo replays the frame's operation log in memory; a rolled-back operation has already paid for deferred work (trie paths, history, persistence) that is never performed, which exceeds that undo. This mirrors Ethereum, where reverting a call frame's journal costs no gas and the gas spent is kept. Rollback refunds nothing, nor does discarding a branch. A receipt is a return value, not state, so a later rollback cannot revoke it.
@@ -701,7 +701,7 @@ including empty and admin commits; it does not depend on collecting record-call 
 
 Record-call charges still cover their own cell and index mutations, per-record system
 cells, and associated deferred history and trie work. Host funding does not make that
-work free merely because it is performed at commit. `w_rec[create]` pays for in-memory
+work free merely because it is performed at commit. `write.record.create` pays for in-memory
 ID allocation, not the final committed allocator update.
 
 For Arkiv, this overhead belongs to the host's block-processing resource budget. The
@@ -777,7 +777,7 @@ if that number can be reused after a rewind.
 - **Patch the active model.** A weight change staged while head is H takes effect only after the commit containing it succeeds and head becomes H+1. It cannot change pricing mid-branch or before persistence; a failed or discarded change has no effect. An immediate patch remains possible, for example to repair a missing weight. A host that wants a weight to change only with a delay enforces that in its admin authorization: GolemDB does not.
 - **Capture pricing once.** Branch calls retain the pricing snapshot from their base commit; stale branches remain subject to the existing invalidation rules. Calls without a branch capture the current head's snapshot at admission. `priced_at` records that pricing commit, not the data commit being read. A call already in progress keeps its captured snapshot even if head advances.
 - **Historical data does not select historical prices.** A read targeting an old commit uses the same current pricing snapshot as a current-data read admitted at the same head. Each query page is a new call: pinning the data commit does not pin the pricing schedule across pages.
-- **Pre-paid work is not re-priced.** Work paid in advance keeps the schedule of the call that paid it: term removal (`w_idx_term_create`), copying bytes into history (write byte weights) and record-induced deferred commit work. Host-funded block/commit overhead is separate (D8). Re-pricing prepaid work after a weight change is impractical; if weights rise, the later work is underpaid, bounded to one term removal per term and one copy per byte. Accepted. The same holds for a host that collects a record's deletion cost in advance, as Arkiv does for expiry: the D5 bound is computed at the weights and depth current when it is collected.
+- **Pre-paid work is not re-priced.** Work paid in advance keeps the schedule of the call that paid it: term removal (`write.index_term_create`), copying bytes into history (write byte weights) and record-induced deferred commit work. Host-funded block/commit overhead is separate (D8). Re-pricing prepaid work after a weight change is impractical; if weights rise, the later work is underpaid, bounded to one term removal per term and one copy per byte. Accepted. The same holds for a host that collects a record's deletion cost in advance, as Arkiv does for expiry: the D5 bound is computed at the weights and depth current when it is collected.
 - **Authorization is the host's.** GolemDB validates the lifecycle; the host decides who may change weights. A host that changes weights inside its own commits needs branch-scoped admin calls, an API extension not yet specified.
 
 For example, a model version with activation commit 100 becomes active when committed head
@@ -800,8 +800,8 @@ version and weight name.
 
 ```
 @meteringModel  1 → (A: 0, G: 1, H: 1)
-@modelWeight    1 ‖ w_cell_read               → 100
-                1 ‖ w_cell_write_byte         → 2
+@modelWeight    1 ‖ write.cell_read           → 100
+                1 ‖ write.cell_byte           → 2
                 1 ‖ host.storage_price        → 5
 ```
 
@@ -810,21 +810,21 @@ is unchanged, so `G` and `H` are too; the model carries its complete weight set.
 
 ```
 @meteringModel  2 → (A: 1000, G: 1, H: 1)      A ≥ 400 + 1 + #minActivationDelay
-@modelWeight    2 ‖ w_cell_read               → 100
-                2 ‖ w_cell_write_byte         → 2
+@modelWeight    2 ‖ write.cell_read           → 100
+                2 ‖ write.cell_byte           → 2
                 2 ‖ host.storage_price        → 8
 ```
 
 From head 1000 every call is priced with model 2. No node halts: all run code for `(1, 1)`.
 
-*Code change, model 3:* a GolemDB release adds `w_cell_trie_update`, so it is GolemDB
+*Code change, model 3:* a GolemDB release adds `write.cell_trie_update`, so it is GolemDB
 code version 2. The host's names are unchanged, so `H` stays 1.
 
 ```
 @meteringModel  3 → (A: 5000, G: 2, H: 1)
-@modelWeight    3 ‖ w_cell_read               → 100
-                3 ‖ w_cell_write_byte         → 2
-                3 ‖ w_cell_trie_update        → 100
+@modelWeight    3 ‖ write.cell_read           → 100
+                3 ‖ write.cell_byte           → 2
+                3 ‖ write.cell_trie_update    → 100
                 3 ‖ host.storage_price        → 8
 ```
 
@@ -836,22 +836,28 @@ the host allows it is its admin policy.
 
 ## D10. GolemDB Weights
 
-| Weight | Used for | Calibrated from op classes |
+Weight names are dotted: `write.*` for write calls, `read.*` for read calls, `host.*` for a host's
+own weights (D9); a family of weights shares a stem, such as `write.cell.create`,
+`write.cell.update` and `write.cell.delete`, written `write.cell.{op}`. A weight is a price in the
+cost schedule. Op classes, `op.*`, are not weights: they name kinds of measured work in the
+implementation, from which weights are calibrated, and are never stored or charged.
+
+| Weight | Used for | Calibrated from op classes (`op.*`) |
 | --- | --- | --- |
-| `w_admission_base`, `w_admission_entry`, `w_admission_byte` | Fixed request validation, entries inspected and bytes validated, including rejected input (D2) | reference admission validation |
-| `w_rec[create]`, `w_rec[patch]`, `w_rec[delete]` | Record base cost excluding admission: binding read, in-memory record ID counter, cap check, cell enumeration (D2) | `key_resolve`, `record_create` (in-memory allocator part) |
-| `w_cell_read` | Read of a touched cell before its operation (D2) | `cell_read` |
-| `w_cell[create]`, `w_cell[update]`, `w_cell[delete]` | Cell compute (D2) | `cell_write` / `cell_remove`, `cell_history_append`, `cell_changeset_write` |
-| `w_cell_trie_update` | Cell-trie path, per node × `cell_trie_depth` (D2, D3) | `celltrie_path_rewrite` |
-| `w_cell_write_byte` | Cell storage: bytes written, including their later copy into history (D2, D4) | byte term, plus the change-set copy |
-| `w_idx_read` | Read of an index term before join or leave (D2) | `index_seek` |
-| `w_idx[join]`, `w_idx[leave]` | Index membership change (D2) | `index_term_flip`, `secidx_container_rewrite`, `secidx_path_rewrite` |
-| `w_idx_term_create` | Creating a new term, including its later removal (D2) | new index row and index-trie leaf, plus their removal |
-| `w_index_trie_update` | Index-trie path, per node × `index_trie_depth` (D2, D3) | `indextrie_path_rewrite` |
-| `w_idx_write_byte` | Index storage: bytes written (D2, D4) | byte term (new term keys) |
-| Read weights (`read_base`, `query_admission_base`, `query_admission_entry`, `query_admission_byte`, `key_resolve`, `cell_read`, `cell_scan_step`, `bytes_read`, `index_seek`, `index_scan_step`, `bitmap_container_read`, `set_container`, `sort_compare`) | Read steps (D6) | read op classes |
-| `w_append_base`, `w_append_byte` | Immutable-log append: fixed staging work, row bytes written and their shard residency (D7) | `immutable_data_append` plus the byte term |
-| `w_imm_read_base` | Immutable-log row read (D7); bytes read use the `bytes_read` read weight (D6) | `immutable_data_read` |
+| `write.admission.base`, `write.admission.entry`, `write.admission.byte` | Fixed request validation, entries inspected and bytes validated, including rejected input (D2) | reference admission validation |
+| `write.record.create`, `write.record.patch`, `write.record.delete` | Record base cost excluding admission: binding read, in-memory record ID counter, cap check, cell enumeration (D2) | `op.key_resolve`, `op.record_create` (in-memory allocator part) |
+| `write.cell_read` | Read of a touched cell before its operation (D2) | `op.cell_read` |
+| `write.cell.create`, `write.cell.update`, `write.cell.delete` | Cell compute (D2) | `op.cell_write` / `op.cell_remove`, `op.cell_history_append`, `op.cell_changeset_write` |
+| `write.cell_trie_update` | Cell-trie path, per node × `cell_trie_depth` (D2, D3) | `op.celltrie_path_rewrite` |
+| `write.cell_byte` | Cell storage: bytes written, including their later copy into history (D2, D4) | byte term, plus the change-set copy |
+| `write.index_read` | Read of an index term before join or leave (D2) | `op.index_seek` |
+| `write.index.join`, `write.index.leave` | Index membership change (D2) | `op.index_term_flip`, `op.secidx_container_rewrite`, `op.secidx_path_rewrite` |
+| `write.index_term_create` | Creating a new term, including its later removal (D2) | new index row and index-trie leaf, plus their removal |
+| `write.index_trie_update` | Index-trie path, per node × `index_trie_depth` (D2, D3) | `op.indextrie_path_rewrite` |
+| `write.index_byte` | Index storage: bytes written (D2, D4) | byte term (new term keys) |
+| Read weights (`read.base`, `read.admission.base`, `read.admission.entry`, `read.admission.byte`, `read.key`, `read.cell`, `read.cell_scan`, `read.byte`, `read.term`, `read.term_step`, `read.container`, `read.set_container`, `read.sort_compare`) | Read steps (D6) | read op classes |
+| `write.log_append.base`, `write.log_append.byte` | Immutable-log append: fixed staging work, row bytes written and their shard residency (D7) | `op.immutable_data_append` plus the byte term |
+| `read.log_row` | Immutable-log row read (D7); bytes read use the `read.byte` read weight (D6) | `op.immutable_data_read` |
 | `host.*` (host-declared) | The host's own prices and limits; never used by GolemDB (D9) | the host's calibration and capacity planning |
 
 Not weights: the D3 depth table (code, metering model version) and the D5 per-record caps (deployment parameters).
@@ -866,18 +872,18 @@ the accounting for these operations; remaining specification gaps are tracked in
 
 Let `A_create`, `A_patch` and `A_delete` denote the admission costs calculated by D2
 for these requests. The tables show the remaining costs; add the corresponding admission
-cost to obtain the full charge. The illustrative `w_rec` values below exclude admission.
+cost to obtain the full charge. The illustrative `write.record` values below exclude admission.
 Admission weights and exact reference counts are not assigned numerical values here.
 
 | Weight | Value | Weight | Value |
 | --- | --- | --- | --- |
-| `w_rec[create]` | 300 | `w_idx_read` | 100 |
-| `w_rec[patch]` | 200 | `w_idx[join]`, `w_idx[leave]` | 650 |
-| `w_rec[delete]` | 250 | `w_idx_term_create` | 400 |
-| `w_cell_read` | 100 | `w_index_trie_update` | 100 per node |
-| `w_cell[create]`, `[update]`, `[delete]` | 350 | `w_idx_write_byte` | 2 |
-| `w_cell_trie_update` | 100 per node | | |
-| `w_cell_write_byte` | 2 | | |
+| `write.record.create` | 300 | `write.index_read` | 100 |
+| `write.record.patch` | 200 | `write.index.join`, `write.index.leave` | 650 |
+| `write.record.delete` | 250 | `write.index_term_create` | 400 |
+| `write.cell_read` | 100 | `write.index_trie_update` | 100 per node |
+| `write.cell.create`, `[update]`, `[delete]` | 350 | `write.index_byte` | 2 |
+| `write.cell_trie_update` | 100 per node | | |
+| `write.cell_byte` | 2 | | |
 
 **The record.** A 32-byte record key and three user cells. Bytes follow D4.
 
@@ -896,7 +902,7 @@ The key has no binding. The term `owner` = 0x71C7… is new; the term `status` =
 
 | Operation | Terms | Cost |
 | --- | --- | --- |
-| Record base | `w_rec[create]`: binding read (absent), record ID | 300 |
+| Record base | `write.record.create`: binding read (absent), record ID | 300 |
 | Create binding | 350 + 600 + 49 × 2 | 1,048 |
 | Create `#key` | 350 + 600 + 45 × 2 | 1,040 |
 | Create `#meta` | 350 + 600 + 46 × 2 | 1,042 |
@@ -917,7 +923,7 @@ No cell reads: the record is new. Receipt: 3 cells created, 2 index joins, 1 ter
 
 | Operation | Terms | Cost |
 | --- | --- | --- |
-| Record base | `w_rec[patch]`: binding read, cap check | 200 |
+| Record base | `write.record.patch`: binding read, cap check | 200 |
 | Read and update `#meta` | 100 + 350 + 600 + 46 × 2 | 1,142 |
 | Update `status` | 100 + 350 + 600 + 21 × 2 | 1,092 |
 | Update `payload` | 100 + 350 + 600 + 116 × 2 | 1,282 |
@@ -931,7 +937,7 @@ Receipt: 2 cells updated, 1 index leave, 1 index join; 137 cell bytes written an
 
 **The same patch with a budget of `A_patch + 5,000`** fails in the plan phase with
 `OutOfBudget{spent: A_patch + 700, required: Some(A_patch + 6,444)}`. Beyond admission,
-`spent` is `w_rec[patch]` (200) plus the reads performed: `#meta` (100), two cells (200)
+`spent` is `write.record.patch` (200) plus the reads performed: `#meta` (100), two cells (200)
 and two index terms (200). Nothing is written.
 
 **With `Limited(A_patch + 250)`**, admission completes and the binding lookup costs
@@ -942,7 +948,7 @@ the patch succeeds at the exact budget. With `Unlimited`, the same planner retur
 
 **Rejected input also costs.** If validation finds an invalid cell name after inspecting
 some entries and bytes, the call returns `InvalidArgument` with
-`spent = w_admission_base + entries inspected × w_admission_entry + bytes validated × w_admission_byte`.
+`spent = write.admission.base + entries inspected × write.admission.entry + bytes validated × write.admission.byte`.
 The counts include the work that detected the invalid name, but not uninspected input.
 No binding lookup or write is charged. If the next validation step cannot be funded,
 the call instead stops before that step with `OutOfBudget` and no `required` total.
@@ -953,8 +959,8 @@ the call instead stops before that step with `OutOfBudget` and no `required` tot
 
 | Operation | Terms | Cost |
 | --- | --- | --- |
-| Record base | `w_rec[delete]`: binding read, cell enumeration | 250 |
-| Delete binding | 350 + 600 (read in `w_rec`) | 950 |
+| Record base | `write.record.delete`: binding read, cell enumeration | 250 |
+| Delete binding | 350 + 600 (read in `write.record`) | 950 |
 | Read and delete `#key` | 100 + 350 + 600 | 1,050 |
 | Read and delete `#meta` | 100 + 350 + 600 | 1,050 |
 | Read and delete `owner`, `status`, `payload` | 3 × (100 + 350 + 600) | 3,150 |
@@ -978,4 +984,5 @@ Receipt: 3 cells deleted, 2 index leaves; 171 cell bytes and 41 index bytes dele
 
 1. **Is the D3 depth table worth it?** Realistic depths span 4–7 nodes, more likely 4–6. Is that range worth the extra code and a more complex pricing story for users, compared with one fixed depth folded into the weights?
 2. **Depth table as code or weights?** [Design §4](golemdb-design.md#meteringmodel-recordid-32) expresses tunable constants such as a modeled depth as named weights. Should D3's thresholds and depths be weights, tunable without a new model version?
-3. **Value of `#minRetention`.** How many commits must every node retain? It bounds full-node storage and sets the history residency that the write byte weights and the history part of `w_cell[op]` are calibrated for (D4).
+3. **Value of `#minRetention`.** How many commits must every node retain? It bounds full-node storage and sets the history residency that the write byte weights and the history part of `write.cell.{op}` are calibrated for (D4).
+4. **Define the op classes.** D10 names the op classes (`op.*`) weights are calibrated from, but their definitions lived in the architecture document, which no longer exists. Before calibration, each op class needs a short definition: the work it measures, and how.

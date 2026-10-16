@@ -2,9 +2,8 @@
 
 This document is the **design record** of the GolemDB database: the schema, the
 commitment, the history mechanism, and the reserved-record structure that carries the engine's own
-state. It supersedes the working draft [golem-db-architecture.md](../golem-db-architecture.md) and
-the change set collected in [golem-db-proposals.md](../golem-db-proposals.md) for everything it
-covers. Its status is tracked **per chapter** in the register below; no chapter is called settled
+state. It supersedes the earlier working draft of the architecture and the change set of proposals
+collected alongside it, neither kept in this repository, for everything it covers. Its status is tracked **per chapter** in the register below; no chapter is called settled
 until it has passed the acceptance checks in [CHANGES.md](CHANGES.md). Requirement IDs cited here
 (SE-1, CS-5 and others) refer to the GolemDB requirements document,
 `arkiv-source-of-truth/golem-db.md`, which is maintained outside this repository.
@@ -2946,7 +2945,7 @@ The physical layout of the key index is open.
 Two additions to the shared surfaces:
 
 - **`Pruned`**, a new error — the ordinal existed but is beyond the retention window — distinct from `NotFound`, which means it never existed. A node serving historical reads needs to tell a caller which of the two happened.
-- **Metering.** Appends consume disk, so under the security property of [architecture §10](../golem-db-architecture.md#what-cost-must-be) they are metered: a `immutable_data_append` op class plus the byte term, and `immutable_data_read` plus `bytes_read` on the way out ([metering D7](golemdb-metering.md#d7-immutable-log-metering)). Who pays is the host's decision: a deployment may pass the cost to its clients, absorb it, or set the weights to zero when its clients already pay for the same bytes elsewhere.
+- **Metering.** Appends consume disk, so under metering's security aim, that no caller obtains more work or storage than it pays for ([metering](golemdb-metering.md#why)), they are metered: an `op.immutable_data_append` op class plus the byte term, and `op.immutable_data_read` plus the `read.byte` weight on the way out ([metering D7](golemdb-metering.md#d7-immutable-log-metering)). Who pays is the host's decision: a deployment may pass the cost to its clients, absorb it, or set the weights to zero when its clients already pay for the same bytes elsewhere.
 
 ### Genesis Declaration
 
@@ -3399,11 +3398,11 @@ queries, which is the one way this design can be quietly got wrong.
 
 **Cost is the canonical execution, warm or cold.** The receipt reports filter evaluation, sort and
 materialisation for the requested window, whether or not the node short-circuited any of it. This is
-not a new rule: [architecture §10](../golem-db-architecture.md#read-metering) already pins that cost
+not a new rule: [metering D6](golemdb-metering.md#d6-read-cost-model) already pins that cost
 counts the _canonical_ descent "whether or not an implementation short-circuits it", precisely so
 that a warm node and a cold one return the same receipt. A held sequence is that same situation one
-layer up, and letting it reach the ledger would make cost node-local — the fault [architecture
-§10](../golem-db-architecture.md#where-metering-happens) exists to prevent.
+layer up, and letting it reach the ledger would make cost node-local — the fault [metering D1 and
+R5](golemdb-metering.md#d1-where-metering-happens) exist to prevent.
 
 The **operator** therefore captures the saving, not the caller.
 
