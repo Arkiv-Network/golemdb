@@ -3,14 +3,14 @@
 Where to spend effort on the GolemDB API over the next weeks, and why. A working document for
 discussion, not a spec.
 
-Status: draft, 2026-10-09.
+Status: draft, 2026-10-16.
 
 ## The situation
 
-- **One implementation counts: `feature/golem-db-api`** (`95a24ea`). `feat/record-ops` was an
-  experiment to find a good shape for the API. The API spec, [golemdb-api.md](golemdb-api.md), records
-  the shape it arrived at, so the spec is the target and `feature/golem-db-api` is the code that
-  gets there.
+- **One implementation counts: `main`.** `feature/golem-db-api` is merged there (#32), followed
+  by the query MVP's first leaves (#50). `feat/record-ops` was an experiment to find a good shape
+  for the API. The API spec, [golemdb-api.md](golemdb-api.md), records the shape it arrived at, so
+  the spec is the target and `main` is the code that gets there.
 - **Breaking changes are nearly free for about four weeks.** No consumer depends on the API yet,
   and every database is disposable. After that, as integration starts, each break costs more.
 - **The lower layers already match the spec:** branch lifecycle, seal and commit, stale-branch rules,
@@ -37,11 +37,11 @@ spreads into every test, mock and adapter built from week five on. Today, changi
 afternoon; the experiment has already shown how. `#meta` belongs here too: it is the one
 stored-format change whose later migration grows with the data.
 
-| Gap in `feature/golem-db-api` | Target | Reference |
+| Gap on `main` | Target | Reference |
 | --- | --- | --- |
 | Record calls return `Result<T>` | `Metered<T>`: result plus receipt, also on failure | API [Receipts](golemdb-api.md#receipts) |
 | `RecordOp::create(key)` requires a key | `create()` with an optional `.key(k)`, decided by the key mode | API [Record keys](golemdb-api.md#record-keys) |
-| No budget | explicit `Budget::Limited(n) \| Unlimited`, no default | API [Agreed changes](golemdb-api.md#agreed-changes-not-yet-implemented) |
+| `RecordOp` has no budget; `QueryOp` and `CountOp` take it as an optional `.budget(…)` step | the budget as a **constructor argument**, `Budget::Limited(n) \| Unlimited`, no default: `RecordOp::get(k, budget)`, `QueryOp::filter(f, budget)`, `CountOp::filter(f, budget)`, so an operation without a budget does not compile (decided 2026-10-16) | API [Agreed changes](golemdb-api.md#agreed-changes-not-yet-implemented); [query proposal](query-proposal.md#the-call) |
 | `insert` (create) and `set` (patch) keep the *value's* kind, which defaults to field | `insert` removed; `set` keeps the **stored** cell's kind and fails with the new `CellNotFound { name }` if the cell does not exist | API [Agreed changes](golemdb-api.md#agreed-changes-not-yet-implemented) |
 | Builder steps return `Result<Self>` | **proposed:** steps never fail; the first invalid step is reported by the call, with a receipt, which is the shape the metering spec asks for | API [`RecordOp`](golemdb-api.md#recordop) |
 | No `#meta` cell | `#meta` on every user record: four counts over its user cells, maintained by every write | API [`#meta`](golemdb-api.md#meta) |
@@ -54,7 +54,7 @@ building them together costs little more than building either.
 whole database and grows with it. It is needed for the deletion bound (metering D5), completeness
 proofs, sizing Arkiv's `extend`, and pricing a patch without reading the whole record.
 
-**Keep while closing the gaps.** `feature/golem-db-api` has two things the spec does not cover:
+**Keep while closing the gaps.** `main` has two things the spec does not cover:
 `Genesis` as `#[non_exhaustive]` with `Genesis::new`, and the branch concurrency, lifecycle and
 publication tests with the integration-test crate. Do not lose them in the rework. (Its
 `CommitId` / `BranchId` newtypes and `RecordOp` accessors are now in the spec.)
@@ -93,8 +93,12 @@ Additive, so the window does not matter. Schedule by need, not by risk.
   flag.
 - `OutOfBudget`, `KeyModeMismatch` and other new error variants (the enum is non-exhaustive).
 - Metering itself: costs, budget enforcement, ledger, admin API.
-- Immutable-data storage, including the row-key index (design §11), query and count, proofs
-  with `id_of` / `key_of`, history.
+- Immutable-data storage, including the row-key index (design §11); the rest of query and count
+  beyond `Eq`, `In` and `Range` ([query proposal](query-proposal.md#staging)); proofs with
+  `id_of` / `key_of`; history.
+- `ImmutableDataOp`, to be discussed, low priority: an operation type for the immutable-data
+  calls, taking the budget in its constructor like the other operations. Worth it once those calls
+  gain optional parts; until then they take the budget as an argument.
 
 ## When the window closes
 
