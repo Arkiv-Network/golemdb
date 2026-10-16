@@ -111,7 +111,7 @@ pub struct Trie<'h, H: HashProvider, const N: usize> {
 
 impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     /// The owner assigns `domain`, the byte prefixed to every branch hash.
-    /// Configure a trie. Path widths outside 1..=32 bytes fail at compile time.
+    /// Configure a trie. Path widths outside 1..=40 bytes fail at compile time.
     ///
     /// ```compile_fail,E0080
     /// use golemdb_merkle::{Keccak256Hasher, Trie};
@@ -124,13 +124,13 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     /// use golemdb_merkle::{Keccak256Hasher, Trie};
     /// use golemdb_storage::Table;
     /// const EXAMPLE_BRANCH_DOMAIN: u8 = 0x03;
-    /// let _ = Trie::<_, 33>::new(Table("Branches"), EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
+    /// let _ = Trie::<_, 41>::new(Table("Branches"), EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
     /// ```
     pub fn new(table: Table, domain: u8, hasher: &'h H) -> Self {
         const {
             assert!(
-                N >= 1 && N <= 32,
-                "Merkle paths must contain between 1 and 32 bytes"
+                N >= 1 && N <= 40,
+                "Merkle paths must contain between 1 and 40 bytes"
             )
         };
         Self {

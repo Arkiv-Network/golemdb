@@ -146,8 +146,9 @@ pub use order::{decode_float, encode_float, flip_sign};
 pub use types::{CellKind, CellType, FloatWidth, Width};
 pub use value::{CellValue, CellValueRef};
 
-/// Cell trie paths are full hash digests of the encoded cell key.
-pub const CELL_TRIE_PATH_BYTES: usize = size_of::<golemdb_merkle::Hash>();
+/// Cell trie paths are the record ID (eight bytes BE) followed by the full hash
+/// digest of the encoded cell key, so each record's cells share one subtree.
+pub const CELL_TRIE_PATH_BYTES: usize = 8 + size_of::<golemdb_merkle::Hash>();
 
 /// The metadata byte's high bit: whether the cell is indexable. The low 7
 /// bits are the type id.

@@ -41,7 +41,9 @@ fn leaf(key: &CellKey, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
     // Independently spell out the spec's key and leaf preimages.
     let mut routing = key.record_id().to_be_bytes().to_vec();
     routing.extend_from_slice(key.name().as_bytes());
-    let path = HASH.hash(&routing);
+    let mut path = [0; CELL_TRIE_PATH_BYTES];
+    path[..8].copy_from_slice(&key.record_id().to_be_bytes());
+    path[8..].copy_from_slice(&HASH.hash(&routing));
     let mut preimage = vec![0];
     preimage.extend_from_slice(&path);
     preimage.push(value.metadata());
@@ -442,6 +444,40 @@ fn malformed_singleton_key_is_rejected(db: &impl Store) {
     ));
 }
 
+fn a_record_writes_one_path_and_its_own_subtree(db: &impl Store) {
+    let mut tx = db.begin_write().unwrap();
+    let existing =
+        (64..96).flat_map(|record| [b"a", b"b", b"c"].map(|name| put(record, name, b"old")));
+    let root = Cells::new(&HASH)
+        .at(1)
+        .apply(&mut tx, RootRef::Empty, existing)
+        .unwrap()
+        .root;
+    let created = (0..8).map(|i| put(96, &[b'n', b'0' + i], b"new"));
+    Cells::new(&HASH)
+        .at(2)
+        .apply(&mut tx, root, created)
+        .unwrap();
+    // Every row commit 2 wrote is on the path down to record 96 or inside its subtree.
+    let nibbles =
+        |bytes: &[u8]| -> Vec<u8> { bytes.iter().flat_map(|b| [b >> 4, b & 15]).collect() };
+    let record = nibbles(&96u64.to_be_bytes());
+    let routes: Vec<Vec<u8>> = scan_prefix(&tx, tables::CELL_TRIE, 2u64.to_be_bytes().to_vec())
+        .unwrap()
+        .map(|row| {
+            let (key, _) = row.unwrap();
+            nibbles(&key[9..])[..usize::from(key[8])].to_vec()
+        })
+        .collect();
+    assert!(routes.len() >= 2);
+    for route in &routes {
+        assert!(
+            record.starts_with(route) || route.starts_with(&record),
+            "row at route {route:?} is outside record 96's path and subtree"
+        );
+    }
+}
+
 /// Row key of a branch root: its commit and the empty route.
 fn root_key(root: &RootRef<CELL_TRIE_PATH_BYTES>) -> Vec<u8> {
     golemdb_merkle::version_key(root.branch_commit().unwrap(), &[], &[0])
@@ -470,6 +506,7 @@ suite!(
     snapshots_abort_and_old_branches,
     root_mismatches_and_corrupt_rows_are_errors,
     malformed_singleton_key_is_rejected,
+    a_record_writes_one_path_and_its_own_subtree,
 );
 
 proptest! {
