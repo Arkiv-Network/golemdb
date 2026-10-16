@@ -4,7 +4,9 @@
 //!
 //! 1. `query` only: the parts not built yet (sort, limit, offset) are
 //!    rejected as `NotImplemented`.
-//! 2. Admission validates the whole request, without reading state.
+//! 2. Admission validates the whole request, without reading state. A filter
+//!    part not built yet (a `Prefix` on `bytesN` values) is rejected here as
+//!    `NotImplemented`, for `count` too.
 //! 3. One storage snapshot is opened. Opening it reads the head, so a
 //!    requested commit other than the head fails here, after admission. All
 //!    reads then use this snapshot.
@@ -36,8 +38,9 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
     }
 
     /// The records matching `op`'s filter at `commit` (`None` for the head),
-    /// in record ID order, projected as `get` projects. Sort, limit and offset
-    /// return `NotImplemented` for now, and the budget is not enforced yet.
+    /// in record ID order, projected as `get` projects. Sort, limit, offset
+    /// and a `Prefix` on `bytesN` values return `NotImplemented` for now, and
+    /// the budget is not enforced yet.
     pub fn query(&self, commit_id: Option<CommitId>, op: QueryOp) -> Result<QueryPage> {
         let QueryOp {
             filter,
@@ -82,7 +85,8 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
     }
 
     /// The size of the filter's match set at `commit` (`None` for the head).
-    /// The budget is not enforced yet.
+    /// A `Prefix` on `bytesN` values returns `NotImplemented` for now, and the
+    /// budget is not enforced yet.
     pub fn count(&self, commit_id: Option<CommitId>, op: CountOp) -> Result<u64> {
         let CountOp { filter, budget: _ } = op;
         Ok(self.evaluate(commit_id, &filter)?.matches.treemap().len())

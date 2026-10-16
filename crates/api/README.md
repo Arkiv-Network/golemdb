@@ -434,7 +434,8 @@ the future behavior, including pruning and rewind of key bindings.
 
 All four iterations are implemented: typed cells, the facade contract and builders,
 atomic opening/genesis, and a cloneable `Database` with shared branch state.
-Queries support `Eq`, `In` and `Range` filters with full or projected records, and `count`.
+Queries support `Eq`, `In`, `Range` and `Prefix` filters with full or projected records, and `count`.
+A `Prefix` applies to `str` values; on `bytesN` values it returns `ApiError::NotImplemented`.
 Queries read committed state only: `None` reads the head, and an explicit commit
 other than the head returns `ApiError::CommitUnavailable`. Sort, limit and offset
 return `ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost

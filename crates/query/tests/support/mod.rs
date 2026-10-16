@@ -100,6 +100,14 @@ pub fn range(field: &str, lower: Bound<CellValue>, upper: Bound<CellValue>) -> F
     }
 }
 
+/// Raw, so tests can also build names the grammar rejects.
+pub fn prefix(field: &str, prefix: CellValue) -> Filter {
+    Filter::Prefix {
+        field: CellNameRef::raw(field.as_bytes()).into(),
+        prefix,
+    }
+}
+
 /// Whether `value` lies between `lower` and `upper` in the native order of
 /// its type: a value of another type than a bound never does.
 pub fn is_between(value: &CellValue, lower: &Bound<CellValue>, upper: &Bound<CellValue>) -> bool {

@@ -4,7 +4,7 @@
 
 use std::{collections::BTreeSet, ops::Bound};
 
-use golemdb_cells::{CellName, CellValue};
+use golemdb_cells::{CellName, CellType, CellValue};
 use golemdb_index::{IndexTerm, RangeError, TermError, TermRange};
 
 use crate::{Filter, QueryError, Result};
@@ -19,7 +19,7 @@ pub(crate) enum Plan {
     /// once: the union of their postings.
     TermReads(BTreeSet<IndexTerm>),
     /// A scan of the range's terms in ascending key order, one term read
-    /// each: the union of their postings.
+    /// each: the union of their postings. `Range` and `Prefix` leaves.
     Scan(TermRange),
     /// A leaf no record can match, an `In` with no value or a `Range` whose
     /// bounds admit none: nothing is read.
@@ -32,7 +32,9 @@ impl TryFrom<&Filter> for Plan {
     /// Admission: fails with [`QueryError::InvalidArgument`] on a leaf with no
     /// valid index term, and with [`QueryError::InvalidQuery`] on a malformed
     /// leaf (an `In` whose values differ in type; a `Range` with no bound, or
-    /// bounds of two types). A leaf that admits no value is [`Plan::Empty`].
+    /// bounds of two types; a `Prefix` of a type that has none). A leaf that
+    /// admits no value is [`Plan::Empty`]. A `bytesN` prefix is
+    /// [`QueryError::NotImplemented`] for now.
     fn try_from(filter: &Filter) -> Result<Self> {
         match filter {
             Filter::Eq { field, value } => Ok(Self::TermRead(term(field, value)?)),
@@ -44,8 +46,37 @@ impl TryFrom<&Filter> for Plan {
                 lower,
                 upper,
             } => Ok(range(field, lower, upper)?.map_or(Self::Empty, Self::Scan)),
+            Filter::Prefix { field, prefix } => Ok(Self::Scan(with_prefix(field, prefix)?)),
         }
     }
+}
+
+/// The terms of `field` whose value starts with `prefix`. The prefix's type
+/// is checked first, without building a term: only `str` and `bytesN` have
+/// prefixes, and only `str` is built so far. Then the field and the type, as
+/// for an `Eq` leaf: variable-length `bytes` has no term.
+fn with_prefix(field: &CellName, prefix: &CellValue) -> Result<TermRange> {
+    match prefix.cell_type() {
+        CellType::Str | CellType::Bytes => {}
+        CellType::Bytes20 | CellType::FixedBytes(_) => {
+            return Err(QueryError::NotImplemented {
+                operation: "query: Prefix on bytesN",
+            });
+        }
+        CellType::Bool
+        | CellType::Uint(_)
+        | CellType::Int(_)
+        | CellType::Decimal(_)
+        | CellType::Float(_)
+        | CellType::Date32
+        | CellType::Timestamp64 => {
+            return Err(QueryError::InvalidQuery {
+                reason: "`Prefix` applies to `str` and `bytesN` values only",
+            });
+        }
+    }
+    TermRange::with_prefix(field.as_view(), prefix.as_view())
+        .map_err(|source| invalid_argument(field, source))
 }
 
 /// The terms of `field` between `lower` and `upper`, checked as
@@ -314,5 +345,109 @@ mod tests {
             result,
             Err(QueryError::InvalidArgument { field: got, .. }) if got == field
         ));
+    }
+
+    /// Admission of `field` starting with `prefix`. Raw, so tests can also
+    /// pass names the grammar rejects.
+    fn prefix(field: &[u8], prefix: CellValue) -> Result<Plan> {
+        Plan::try_from(&Filter::Prefix {
+            field: CellNameRef::raw(field).into(),
+            prefix,
+        })
+    }
+
+    #[test]
+    fn a_str_prefix_resolves_to_a_scan_of_the_strings_starting_with_it() {
+        for value in ["", "ab", "é"] {
+            let value = CellValue::from_str(value);
+            let expected = TermRange::with_prefix(CellNameRef::raw(b"f"), value.as_view())
+                .expect("valid prefix");
+            assert_eq!(
+                prefix(b"f", value.clone()).expect("valid Prefix"),
+                Plan::Scan(expected),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bytes_n_prefix_is_not_implemented_yet() {
+        for value in [
+            CellValue::from_bytes4([1; 4]),
+            CellValue::from_bytes8([1; 8]),
+            CellValue::from_bytes16([1; 16]),
+            CellValue::from_bytes20([1; 20]),
+            CellValue::from_bytes32([1; 32]),
+        ] {
+            assert!(
+                matches!(
+                    prefix(b"f", value.clone()),
+                    Err(QueryError::NotImplemented {
+                        operation: "query: Prefix on bytesN"
+                    })
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_types_have_no_prefix() {
+        for value in [
+            CellValue::from_bool(true),
+            CellValue::from_u32(1),
+            CellValue::from_u256_be([1; 32]),
+            CellValue::from_i64(1),
+            CellValue::from_i256_be([1; 32]),
+            CellValue::from_dec32_unscaled(1),
+            CellValue::from_dec256_unscaled_be([1; 32]),
+            CellValue::from_f32(1.0).expect("not NaN"),
+            CellValue::from_f64(1.0).expect("not NaN"),
+            CellValue::from_date32(1),
+            CellValue::from_timestamp64(1),
+        ] {
+            assert!(
+                matches!(
+                    prefix(b"f", value.clone()),
+                    Err(QueryError::InvalidQuery { .. })
+                ),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bytes_prefix_has_no_term() {
+        assert!(matches!(
+            prefix(b"f", CellValue::from_bytes(b"x")),
+            Err(QueryError::InvalidArgument {
+                source: TermError::UnsupportedType(CellType::Bytes),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_prefix_type_is_checked_before_its_field() {
+        assert!(matches!(
+            prefix(b"1bad", CellValue::from_u32(1)),
+            Err(QueryError::InvalidQuery { .. })
+        ));
+        assert!(matches!(
+            prefix(b"1bad", CellValue::from_bytes4([1; 4])),
+            Err(QueryError::NotImplemented { .. })
+        ));
+        for field in [&b"1bad"[..], &[0xff]] {
+            assert!(
+                matches!(
+                    prefix(field, CellValue::from_str("a")),
+                    Err(QueryError::InvalidArgument {
+                        source: TermError::InvalidName,
+                        ..
+                    })
+                ),
+                "{field:?}"
+            );
+        }
     }
 }

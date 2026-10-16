@@ -201,6 +201,13 @@ mod tests {
         }
     }
 
+    fn prefix(field: &str, prefix: CellValue) -> Filter {
+        Filter::Prefix {
+            field: name(field.as_bytes()),
+            prefix,
+        }
+    }
+
     fn str(value: &str) -> CellValue {
         CellValue::from_str(value)
     }
@@ -429,6 +436,72 @@ mod tests {
     }
 
     #[test]
+    fn prefix_matches_the_union_of_the_strings_starting_with_it() {
+        let source = FakeSource::default()
+            .with("s", str(""), [1])
+            .with("s", str("a"), [2, 40])
+            .with("s", str("ab"), [3])
+            .with("s", str("abc"), [4, 40])
+            .with("s", str("b"), [5])
+            .with("s", str("é"), [6])
+            .with("s", CellValue::from_bytes4(*b"abcd"), [7])
+            .with("sa", str("a"), [8]);
+        for (filter, expected) in [
+            (prefix("s", str("")), &[1, 2, 3, 4, 5, 6, 40][..]),
+            (prefix("s", str("a")), &[2, 3, 4, 40]),
+            (prefix("s", str("ab")), &[3, 4, 40]),
+            (prefix("s", str("abc")), &[4, 40]),
+            (prefix("s", str("abcd")), &[]),
+            (prefix("s", str("e")), &[]),
+            (prefix("s", str("é")), &[6]),
+        ] {
+            assert_eq!(ids(&source, filter.clone()), expected, "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn prefix_reads_only_its_strings_in_key_order() {
+        let inner = FakeSource::default()
+            .with("s", str("a"), [1])
+            .with("s", str("ab"), [2])
+            .with("s", str("a\u{10FFFF}"), [3])
+            .with("s", str("aa"), [4])
+            .with("s", str(""), [5])
+            .with("s", str("b"), [6])
+            .with("s", CellValue::from_bytes4(*b"abcd"), [7])
+            .with("sa", str("a"), [8]);
+        let source = RecordingSource {
+            inner,
+            reads: RefCell::default(),
+        };
+        let matches = evaluate(&source, &prefix("s", str("a"))).expect("filter evaluates");
+        assert_eq!(matches.treemap().iter().collect::<Vec<_>>(), [1, 2, 3, 4]);
+        let term = |value| IndexTerm::from_str_name("s", str(value).as_view()).expect("term");
+        assert_eq!(
+            *source.reads.borrow(),
+            [term("a"), term("aa"), term("ab"), term("a\u{10FFFF}")]
+        );
+    }
+
+    #[test]
+    fn unsupported_prefixes_are_rejected_before_reading() {
+        // FailingSource would surface as QueryError::Internal if it were consulted.
+        let result = evaluate(
+            &FailingSource,
+            &prefix("s", CellValue::from_bytes20([0; 20])),
+        );
+        assert!(
+            matches!(result, Err(QueryError::NotImplemented { .. })),
+            "{result:?}"
+        );
+        let result = evaluate(&FailingSource, &prefix("s", CellValue::from_u32(1)));
+        assert!(
+            matches!(result, Err(QueryError::InvalidQuery { .. })),
+            "{result:?}"
+        );
+    }
+
+    #[test]
     fn malformed_range_is_rejected_before_reading() {
         use Bound::{Excluded, Included, Unbounded};
         let u = CellValue::from_u32;
@@ -547,6 +620,16 @@ mod tests {
                 name(b"b"),
                 TermError::UnsupportedType(CellType::Bytes),
             ),
+            (
+                prefix("1bad", str("a")),
+                name(b"1bad"),
+                TermError::InvalidName,
+            ),
+            (
+                prefix("b", CellValue::from_bytes(b"x")),
+                name(b"b"),
+                TermError::UnsupportedType(CellType::Bytes),
+            ),
         ] {
             match evaluate(&FailingSource, &filter) {
                 Err(QueryError::InvalidArgument { field: got, source }) => {
@@ -568,6 +651,7 @@ mod tests {
                 Bound::Included(CellValue::from_i32(1)),
                 Bound::Unbounded,
             ),
+            prefix("a", str("")),
         ] {
             let result = evaluate(&FailingSource, &filter);
             assert!(is_injected_failure(&result), "{filter:?}: {result:?}");

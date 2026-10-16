@@ -432,6 +432,47 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
 }
 
 #[test]
+fn prefix_scans_hold_the_strings_that_start_with_the_prefix() {
+    let (_dir, db) = fixture::db();
+    let index = Index::new(&HASH);
+    let at =
+        |name: &str, value: CellValue| IndexTerm::from_str_name(name, value.as_view()).unwrap();
+    // In key order: UTF-8 bytes.
+    let strings = ["", "a", "ab", "ab\u{10FFFF}", "ac", "é", "\u{10FFFF}"]
+        .map(|value| at("a", CellValue::from_str(value)));
+    let neighbours = [
+        at("a", CellValue::from_bytes4(*b"abcd")),
+        at("ab", CellValue::from_str("ab")),
+        at("b", CellValue::from_str("a")),
+    ];
+    let mut tx = db.begin_write().unwrap();
+    let changes = strings
+        .iter()
+        .chain(&neighbours)
+        .enumerate()
+        .map(|(n, t)| add(t, n as u64));
+    index.apply(&mut tx, RootRef::Empty, changes).unwrap();
+    let scan = |prefix: &str| {
+        let range = TermRange::with_prefix(
+            CellNameRef::raw(b"a"),
+            CellValue::from_str(prefix).as_view(),
+        )
+        .unwrap();
+        index
+            .terms(&tx, range)
+            .unwrap()
+            .map(|entry| entry.unwrap().0)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(scan(""), strings);
+    assert_eq!(scan("a"), strings[1..5]);
+    assert_eq!(scan("ab"), strings[2..4]);
+    assert_eq!(scan("é"), strings[5..6]);
+    assert_eq!(scan("\u{10FFFF}"), strings[6..]);
+    assert!(scan("b").is_empty());
+}
+
+#[test]
 fn corrupt_missing_and_mismatched_state_is_not_absence() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
