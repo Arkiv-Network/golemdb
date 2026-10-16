@@ -3,6 +3,7 @@
 `golemdb-api` defines one synchronous, dyn-compatible `Api` trait:
 
 - Records: create, get, patch, delete.
+- Queries: query, count, over committed state (from `golemdb-query`).
 - Branches: head, begin, branch_info, checkpoint, rollback, seal, commit, discard.
 
 Consumers accept `&dyn Api` or `Arc<dyn Api + Send + Sync>`. The trait does not
@@ -433,7 +434,11 @@ the future behavior, including pruning and rewind of key bindings.
 
 All four iterations are implemented: typed cells, the facade contract and builders,
 atomic opening/genesis, and a cloneable `Database` with shared branch state.
-Budgets, cost receipts, generated keys, OCC, and transport serialization are deferred.
+Queries support `Eq`, `In` and `Range` filters with full or projected records, and `count`.
+Queries read committed state only: `None` reads the head, and an explicit commit
+other than the head returns `ApiError::CommitUnavailable`. Sort, limit and offset
+return `ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost
+receipts, generated keys, OCC, and transport serialization are deferred.
 
 The [consumer test](src/tests/consumer.rs) demonstrates a single facade mock and
 commit failure injection behind `Arc<dyn Api + Send + Sync>`. Use scripted mocks

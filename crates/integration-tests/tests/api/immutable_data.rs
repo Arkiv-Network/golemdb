@@ -9,6 +9,8 @@ use std::{
 use golemdb_api::*;
 use golemdb_storage::{MemoryStore, Store};
 
+/// Clones share the wrapped store and the switches.
+#[derive(Clone)]
 struct Guarded<S> {
     database: S,
     forbid_io: Arc<AtomicBool>,
@@ -85,7 +87,7 @@ fn check(api: &dyn Api, branch: BranchId) {
     }
 }
 
-fn contract(database: impl Store + Send + Sync + 'static, hash_function: HashAlgorithm) {
+fn contract(database: impl Store + Clone + Send + Sync + 'static, hash_function: HashAlgorithm) {
     let forbid_io = Arc::new(AtomicBool::new(false));
     let config = OpenConfig::new(Genesis::new(
         hash_function,

@@ -54,12 +54,14 @@ mod index_trie;
 pub mod path;
 pub mod tables;
 mod term;
+mod term_range;
 
 pub use bitmap::Bitmap;
 pub use container::BitmapContainer;
 pub use error::{BitmapError, IndexError, Result};
 pub use index::{Index, IndexUpdate, PostingChange, TermRootChange, TermScan};
 pub use term::{IndexTerm, TermError};
+pub use term_range::{RangeError, TermRange};
 
 /// IndexTrie routes by a complete term digest (32 bytes).
 /// This is a byte width, not the compressed trie's depth.
@@ -81,7 +83,7 @@ pub const BITMAP_TRIE_PATH_BYTES: usize = PATH_BITS as usize / 8;
 /// These assignments are part of the commitment format: changing them changes
 /// leaf hashes and all roots that depend on them. The owning crate assigns the
 /// domains; the generic Merkle trie receives its branch domain from the caller.
-/// See [Domain Separation and Preimage Encoding](https://github.com/golemfactory/golem-db/blob/main/docs/golem-db-design.md#domain-separation-and-preimage-encoding).
+/// See [Domain Separation and Preimage Encoding](https://github.com/Arkiv-Network/golemdb/blob/main/docs/golemdb-design.md#domain-separation-and-preimage-encoding).
 pub const INDEX_LEAF_DOMAIN: u8 = 0x02;
 
 /// Domain byte for IndexTrie branch hashes.
@@ -90,7 +92,7 @@ pub const INDEX_LEAF_DOMAIN: u8 = 0x02;
 /// `H(INDEX_BRANCH_DOMAIN || prefix_len || prefix || state_mask || tree_mask || child_hashes)`.
 /// It separates index branches from leaves and from branches of other tries,
 /// which share the same structural encoding. Stored `leaf_paths` are excluded.
-/// See [Domain Separation and Preimage Encoding](https://github.com/golemfactory/golem-db/blob/main/docs/golem-db-design.md#domain-separation-and-preimage-encoding).
+/// See [Domain Separation and Preimage Encoding](https://github.com/Arkiv-Network/golemdb/blob/main/docs/golemdb-design.md#domain-separation-and-preimage-encoding).
 pub const INDEX_BRANCH_DOMAIN: u8 = 0x03;
 
 /// Domain byte for bitmap container leaf hashes.
@@ -99,7 +101,7 @@ pub const INDEX_BRANCH_DOMAIN: u8 = 0x03;
 /// bytes: `H(BITMAP_LEAF_DOMAIN || hi48 || roaring)`. This identifies a bitmap
 /// leaf independently of index leaves and branch nodes; including `hi48` binds
 /// the container to its routing path. The digest also keys its stored row.
-/// See [Domain Separation and Preimage Encoding](https://github.com/golemfactory/golem-db/blob/main/docs/golem-db-design.md#domain-separation-and-preimage-encoding).
+/// See [Domain Separation and Preimage Encoding](https://github.com/Arkiv-Network/golemdb/blob/main/docs/golemdb-design.md#domain-separation-and-preimage-encoding).
 pub const BITMAP_LEAF_DOMAIN: u8 = 0x04;
 
 /// Domain byte for BitmapTrie branch hashes.
@@ -107,7 +109,7 @@ pub const BITMAP_LEAF_DOMAIN: u8 = 0x04;
 /// Prepended to the same canonical branch payload as [`INDEX_BRANCH_DOMAIN`],
 /// but identifies a branch in the posting-list bitmap trie. Thus identical
 /// branch payloads in the two trie kinds have distinct hash inputs.
-/// See [Domain Separation and Preimage Encoding](https://github.com/golemfactory/golem-db/blob/main/docs/golem-db-design.md#domain-separation-and-preimage-encoding).
+/// See [Domain Separation and Preimage Encoding](https://github.com/Arkiv-Network/golemdb/blob/main/docs/golemdb-design.md#domain-separation-and-preimage-encoding).
 pub const BITMAP_BRANCH_DOMAIN: u8 = 0x05;
 
 pub(crate) const PATH_BITS: u8 = 48;

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::collections::{BTreeMap, btree_map::Entry};
 
 use golemdb_record::{CellPatch, RecordCells, RecordPatch};
 
@@ -227,14 +227,7 @@ impl RecordOp<op::Get> {
         I: IntoIterator<Item = N>,
         N: AsRef<[u8]>,
     {
-        self.operation.names = Some(
-            names
-                .into_iter()
-                .map(|name| CellName::from(CellNameRef::raw(name.as_ref())))
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
-        );
+        self.operation.names = Some(CellName::projection(names));
         self
     }
 

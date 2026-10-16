@@ -1,12 +1,13 @@
-//! Public Rust contracts for GolemDB record CRUD and branch lifecycle.
+//! Public Rust contracts for GolemDB record CRUD, queries and branch lifecycle.
 //!
-//! [`Api`] is the synchronous facade contract for CRUD and branch operations.
+//! [`Api`] is the synchronous facade contract for CRUD, query and branch operations.
 //! Consumers can use `Arc<dyn Api + Send + Sync>`; builders accept explicit cell values.
 //! All results own their data and expose no storage transaction or cell writer.
 //!
 //! [`Database`] implements Api on a cloneable handle with a shared branch registry.
 //! Its constructors initialize or validate genesis and select the configured hash.
-//! These contracts are unmetered: no budget, receipt, debug flag, or record version.
+//! These contracts are unmetered: no receipt, debug flag, or record version. Queries
+//! take a budget, which is not enforced yet.
 //! Current record storage supports branch reads and committed-head reads only.
 //! Immutable-data types and methods are exposed, but every such Database call
 //! returns [`ApiError::NotImplemented`] immediately without I/O or state changes.
@@ -58,6 +59,7 @@ pub use types::SealInfo;
 
 pub use golemdb_branch::{BranchId, BranchInfo, CommitId};
 pub use golemdb_cells::{CellKind, CellName, CellNameRef, CellType, CellValue, FloatWidth, Width};
+pub use golemdb_query::{Budget, CountOp, Direction, Filter, QueryOp, QueryPage, SortKey};
 pub use golemdb_record::{ReadTarget, Record, RecordKey};
 
 /// Synchronous record and branch facade. Builders assist callers; implementations
@@ -78,6 +80,17 @@ pub trait Api {
 
     /// Delete the record and its binding without reclaiming the internal ID.
     fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()>;
+
+    /// Committed records matching the operation's filter, in record ID order,
+    /// projected as `get` projects. Matching and materialization share one
+    /// snapshot. `commit` names the commit to read, `None` the head; explicit
+    /// non-head commits are not yet supported; sort, limit and offset return
+    /// NotImplemented.
+    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Result<QueryPage>;
+
+    /// The number of committed records matching the operation's filter, under
+    /// the same commit rules as `query`.
+    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Result<u64>;
 
     // Branch lifecycle. IDs are valid only for their issuing engine.
     fn head(&self) -> Result<CommitId>;

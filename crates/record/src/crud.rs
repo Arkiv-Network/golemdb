@@ -1,10 +1,12 @@
-use golemdb_branch::{BranchId, Branches, CellRead, read_head};
+use golemdb_branch::{BranchId, Branches, CellRead, CommitId};
 use golemdb_cells::{CellKey, CellLimits, CellName, CellReader, CellValue, reserved, system};
 use golemdb_merkle::HashProvider;
 use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{
-    CellPatch, ReadTarget, Record, RecordCells, RecordError, RecordKey, RecordPatch, Result, state,
+    CellPatch, ReadTarget, Record, RecordCells, RecordError, RecordKey, RecordPatch, Result,
+    committed::{committed_snapshot, read_committed_by_key},
+    state,
 };
 
 /// Cloneable record facade; clones share the supplied branch manager.
@@ -47,17 +49,21 @@ impl<S: Store, H: HashProvider> Records<S, H> {
                     read_branch_record(cell_reader, key, projection)
                 })
                 .map_err(Into::into),
-            ReadTarget::Head | ReadTarget::Commit(_) => {
-                let tx = self.branches.store().begin_read()?;
-                let head = read_head(&tx)?;
-                if let ReadTarget::Commit(requested) = target
-                    && requested != head
-                {
-                    return Err(RecordError::CommitUnavailable { requested, head });
-                }
-                read_committed_record(&CellReader::new(&tx), key, projection)
-            }
+            ReadTarget::Head => self.read_committed(None, key, projection),
+            ReadTarget::Commit(commit) => self.read_committed(Some(commit), key, projection),
         }
+    }
+
+    // Explicit storage path: cell storage owns decoding and scanning; record owns
+    // the binding/identity checks. No branch or empty overlay is created for reads.
+    fn read_committed(
+        &self,
+        commit: Option<CommitId>,
+        key: RecordKey,
+        projection: Option<&[CellName]>,
+    ) -> Result<Record> {
+        let (tx, _) = committed_snapshot(self.branches.store(), commit)?;
+        read_committed_by_key(&CellReader::new(&tx), key, projection)
     }
 
     /// Create a record with zero or more user cells. Exact reserved keys are
@@ -208,35 +214,6 @@ fn read_branch_record<R: ReadTransaction>(
         }
         None => {
             for row in cell_reader.scan_prefix(&id.to_be_bytes())? {
-                let (address, value) = row?;
-                values.insert(address.name().into(), value);
-            }
-        }
-    }
-    Ok(Record { key, cells: values })
-}
-
-// Explicit storage path: cell storage owns decoding and scanning; record owns
-// the binding/identity checks. No branch or empty overlay is created for reads.
-fn read_committed_record<R: ReadTransaction>(
-    cell_reader: &CellReader<'_, R>,
-    key: RecordKey,
-    projection: Option<&[CellName]>,
-) -> Result<Record> {
-    let id = state::record_id(key, cell_reader.get(&state::binding(key))?)?
-        .ok_or(RecordError::NotFound)?;
-    state::check_identity(key, cell_reader.get(&CellKey::new(id, reserved::KEY))?)?;
-    let mut values = RecordCells::new();
-    match projection {
-        Some(names) => {
-            for name in names {
-                if let Some(value) = cell_reader.get(&CellKey::new(id, name.clone()))? {
-                    values.insert(name.clone(), value);
-                }
-            }
-        }
-        None => {
-            for row in cell_reader.scan_record(id)? {
                 let (address, value) = row?;
                 values.insert(address.name().into(), value);
             }
