@@ -120,6 +120,8 @@ impl MdbxStore {
             },
         )
         .map_err(backend)?;
+        // The wrapper does not expose these limits.
+        // Requested as a safe accessor upstream: https://github.com/vorot93/libmdbx-rs/issues/64
         // SAFETY: the environment is successfully opened and remains alive;
         // both functions are read-only queries with normal (non-DUPSORT) flags.
         let (key, value) = unsafe {
@@ -177,6 +179,9 @@ impl Store for MdbxStore {
     /// transaction copies and then frees, as when a table empties. A session
     /// lasts while any process has the environment open.
     fn stats(&self) -> Result<Option<StoreStats>> {
+        // Mirrors `Database::info()`, whose `Info` keeps these counters private:
+        // https://github.com/vorot93/libmdbx-rs/blob/212bcb8df325c16de8c4cedad6006fde2f80cdbf/src/database.rs#L362-L374
+        // Requested as a safe accessor upstream: https://github.com/vorot93/libmdbx-rs/issues/64
         // SAFETY: `MDBX_envinfo` holds only integers, so all zeros is valid; the
         // environment remains open and `info` is writable for its full size.
         let (code, info) = unsafe {
