@@ -147,7 +147,8 @@ pub use types::{CellKind, CellType, FloatWidth, Width};
 pub use value::{CellValue, CellValueRef};
 
 /// Cell trie paths are full hash digests of the encoded cell key.
-pub const CELL_TRIE_PATH_BYTES: usize = size_of::<golemdb_merkle::Hash>();
+/// Experiment: `recordID (8 B) ‖ H(encoded CellKey)`, so a record's cells share a subtree.
+pub const CELL_TRIE_PATH_BYTES: usize = 8 + size_of::<golemdb_merkle::Hash>();
 
 /// The metadata byte's high bit: whether the cell is indexable. The low 7
 /// bits are the type id.

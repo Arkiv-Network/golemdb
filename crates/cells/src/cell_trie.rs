@@ -30,7 +30,19 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
     /// Construct a virtual leaf binding the complete routing path to the tagged
     /// cell value: `H(CELL_LEAF_DOMAIN || path || typeTag || value)`.
     /// The caller supplies `path = H(encoded CellKey)`; no leaf row is written.
-    fn leaf(&self, path: Hash, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
+    /// Experiment: routing path `recordID ‖ H(key)`; the key starts with the record ID.
+    fn path(&self, key: &[u8]) -> [u8; CELL_TRIE_PATH_BYTES] {
+        let mut path = [0; CELL_TRIE_PATH_BYTES];
+        path[..8].copy_from_slice(&key[..8]);
+        path[8..].copy_from_slice(&self.hasher.hash(key));
+        path
+    }
+
+    fn leaf(
+        &self,
+        path: [u8; CELL_TRIE_PATH_BYTES],
+        value: &CellValue,
+    ) -> LeafRef<CELL_TRIE_PATH_BYTES> {
         LeafRef::new(
             path,
             self.hasher
@@ -49,7 +61,7 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         key: &[u8],
         before: Option<&CellValue>,
     ) -> Result<()> {
-        let path = self.hasher.hash(key);
+        let path = self.path(key);
         if self.trie.get(tx, root, &path)? != before.map(|value| self.leaf(path, value)) {
             return Err(CellError::RootMismatch);
         }
@@ -68,7 +80,7 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         changes: impl IntoIterator<Item = (&'a [u8], Option<&'a CellValue>)>,
     ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
         let edits = changes.into_iter().map(|(key, value)| {
-            let path = self.hasher.hash(key);
+            let path = self.path(key);
             (path, value.map(|value| self.leaf(path, value).hash))
         });
         Ok(self.trie.apply(tx, root, edits)?)
@@ -108,7 +120,7 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         }
         CellKey::decode(&key)?;
         let value = CellValue::parse(value)?;
-        let leaf = self.leaf(self.hasher.hash(&key), &value);
+        let leaf = self.leaf(self.path(&key), &value);
         if leaf.hash != hash {
             return Err(CellError::RootMismatch);
         }

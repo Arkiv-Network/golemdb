@@ -23,7 +23,7 @@ impl<const N: usize> BranchNodeCompact<N> {
     ///
     /// ```compile_fail,E0080
     /// use golemdb_merkle::BranchNodeCompact;
-    /// let _ = BranchNodeCompact::<33>::new(vec![], 0, 3, 3, vec![[0; 32]; 2], vec![]);
+    /// let _ = BranchNodeCompact::<41>::new(vec![], 0, 3, 3, vec![[0; 32]; 2], vec![]);
     /// ```
     pub fn new(
         prefix: Vec<u8>,
@@ -35,8 +35,8 @@ impl<const N: usize> BranchNodeCompact<N> {
     ) -> Result<Self> {
         const {
             assert!(
-                N >= 1 && N <= 32,
-                "Merkle paths must contain between 1 and 32 bytes"
+                N >= 1 && N <= 40,
+                "Merkle paths must contain between 1 and 40 bytes"
             )
         };
         if prefix_len as usize >= 2 * N || prefix.len() != (prefix_len as usize).div_ceil(2) {
@@ -165,8 +165,8 @@ impl<const N: usize> BranchNodeCompact<N> {
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         const {
             assert!(
-                N >= 1 && N <= 32,
-                "Merkle paths must contain between 1 and 32 bytes"
+                N >= 1 && N <= 40,
+                "Merkle paths must contain between 1 and 40 bytes"
             )
         };
         let bad = || MerkleError::InvalidNode("invalid encoded length");

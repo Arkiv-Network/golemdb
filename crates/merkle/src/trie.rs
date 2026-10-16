@@ -124,12 +124,12 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     /// use golemdb_merkle::{Keccak256Hasher, Trie};
     /// use golemdb_storage::Table;
     /// const EXAMPLE_BRANCH_DOMAIN: u8 = 0x03;
-    /// let _ = Trie::<_, 33>::new(Table("Branches"), EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
+    /// let _ = Trie::<_, 41>::new(Table("Branches"), EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
     /// ```
     pub fn new(table: Table, domain: u8, hasher: &'h H) -> Self {
         const {
             assert!(
-                N >= 1 && N <= 32,
+                N >= 1 && N <= 40,
                 "Merkle paths must contain between 1 and 32 bytes"
             )
         };

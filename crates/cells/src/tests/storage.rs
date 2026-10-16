@@ -41,7 +41,9 @@ fn leaf(key: &CellKey, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
     // Independently spell out the spec's key and leaf preimages.
     let mut routing = key.record_id().to_be_bytes().to_vec();
     routing.extend_from_slice(key.name().as_bytes());
-    let path = HASH.hash(&routing);
+    let mut path = [0u8; CELL_TRIE_PATH_BYTES];
+    path[..8].copy_from_slice(&key.record_id().to_be_bytes());
+    path[8..].copy_from_slice(&HASH.hash(&routing));
     let mut preimage = vec![0];
     preimage.extend_from_slice(&path);
     preimage.push(value.metadata());

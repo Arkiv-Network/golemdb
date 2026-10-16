@@ -37,7 +37,7 @@ fn head(
     tx: &mut impl WriteTransaction,
     hash: &impl HashProvider,
     id: u64,
-    state: RootRef<32>,
+    state: RootRef<40>,
     index: RootRef<32>,
 ) {
     let commit_id = golemdb_branch::CommitId::new(id);
