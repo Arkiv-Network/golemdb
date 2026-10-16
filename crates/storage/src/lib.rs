@@ -33,11 +33,13 @@
 mod error;
 mod memory;
 mod scan;
+mod stats;
 mod table;
 
 pub use error::StorageError;
 pub use memory::{MemoryCursor, MemoryReadTransaction, MemoryStore, MemoryWriteTransaction};
 pub use scan::{Scan, scan, scan_prefix};
+pub use stats::StoreStats;
 pub use table::Table;
 
 pub type Entry = (Vec<u8>, Vec<u8>);
@@ -55,6 +57,11 @@ pub trait Store {
     }
     fn max_value_size(&self) -> usize {
         usize::MAX
+    }
+    /// Physical storage stats, or `None` if the backend has no physical storage,
+    /// like [`MemoryStore`]. Readable while a writer is active.
+    fn stats(&self) -> Result<Option<StoreStats>> {
+        Ok(None)
     }
 
     type Read<'db>: ReadTransaction
