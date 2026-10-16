@@ -96,7 +96,7 @@ The metering layer itself (property 7 in §1) is out of scope here: it is specif
 - **[6. Merkleizing the Posting List (`BitmapTrie`)](#6-merkleizing-the-posting-list-bitmaptrie)**
   - [Binding a Container to Its Path](#binding-a-container-to-its-path)
   - [Update Mechanics (Copy-on-Write)](#update-mechanics-copy-on-write)
-  - [Structural Deduplication and Zero-Cost History](#structural-deduplication-and-zero-cost-history)
+  - [Structural Sharing and Zero-Cost History](#structural-sharing-and-zero-cost-history)
 - **[7. Point-in-Time History](#7-point-in-time-history)**
   - [Resolving a Value as of a Commit](#resolving-a-value-as-of-a-commit)
   - [Historical Query Execution Example](#historical-query-execution-example)
@@ -109,7 +109,7 @@ The metering layer itself (property 7 in §1) is out of scope here: it is specif
 - **[9. Trie Representation: Canonical vs. Physical](#9-trie-representation-canonical-vs-physical)**
   - [The Canonical Trie and the Physical Trie](#the-canonical-trie-and-the-physical-trie)
   - [Precedent: How Ethereum Clients Chose](#precedent-how-ethereum-clients-chose)
-  - [Trade-offs: Content-Addressed vs. Path-Based Physical Storage](#trade-offs-content-addressed-vs-path-based-physical-storage)
+  - [Trade-offs: Versioned vs. Path-Based Physical Storage](#trade-offs-versioned-vs-path-based-physical-storage)
 - **[10. Write Branches and Checkpoint Frames](#10-write-branches-and-checkpoint-frames)**
   - [Branches over the Head](#branches-over-the-head)
   - [Frames and Checkpoints](#frames-and-checkpoints)
@@ -172,12 +172,12 @@ adopted here is stated and the document follows it.
 | **index term** | `cellKey ‖ 0x00 ‖ typeTag ‖ cellValue` — one attribute value; the key of `Index` (§5) |
 | **posting list** | The set of `recordID`s holding an index term, stored as a `BitmapTrie` over Roaring containers (§5, §6) |
 | **container** | A `BitmapContainer` row: `hi48 ‖ roaring`, the leaf of a `BitmapTrie` holding one 48-bit region's 16-bit offsets (§2, §6) |
-| **trie** | A Merkle Patricia Trie. **Canonical trie:** path-addressed, the object the commitment is defined over. **Physical trie:** how nodes are stored — here content-addressed rows keyed by node hash (§9) |
+| **trie** | A Merkle Patricia Trie. **Canonical trie:** path-addressed, the object the commitment is defined over. **Physical trie:** how nodes are stored — here rows keyed `commitNr ‖ route` (§9) |
 | **leaf** | A trie vertex holding one item's hash. **Virtual leaf:** a leaf never stored as a row, recomputed from `Cell` / `Index` (§8) |
 | **root** | The hash at the top of a trie. `StateRoot` (`CellTrie`), `IndexRoot` (`IndexTrie`), `bitmapHash` (one term's `BitmapTrie`), `GlobalRoot = Hash(0x06 ‖ StateRoot ‖ IndexRoot)` (§8) |
 | **domain prefix** | The one-byte tag that begins every hash preimage, separating kinds of preimage (§8) |
 | **head** | The most recent commit: `(commitNr, StateRoot, IndexRoot)` in the `Superblock` (§4) |
-| **superblock** | The one uncommitted table: format identifiers and the head (§4) |
+| **superblock** | An uncommitted table: format identifiers and the head (§4). `Roots` is the other |
 | **reserved records** | `recordID` 0–63: **system** records (0–31, `#`) written by the engine, **admin** records (32–63, `@`) written by admin operations; everything ≥ 64 is a **user** record (§4) |
 | **pre-image** | The value an item held immediately before a given commit changed it; what `CellChangeSet` / `IndexChangeSet` store, and what the branch log stores per operation (§7, §10) |
 | **history** | `CellHistory` / `IndexHistory`: per item, the Roaring set of commits that changed it — the reverse index over the change-sets (§7) |
@@ -313,24 +313,24 @@ encoded parts, and the value is a byte payload; both sides pass through the type
 
 The schema is written entirely in the abstractions of [§1](#abstract-primitives-to-physical-mdbx-mapping):
 a set of **tables**, each with a composite **key** of one or more typed parts and one typed **value**,
-every field passing through its type's **codec**. Ten tables carry the data; an eleventh, the
-`Superblock`, stands outside the cell machinery ([§4](#the-superblock)).
+every field passing through its type's **codec**. Ten tables carry the data; two more, the
+`Superblock` and `Roots`, stand outside the cell machinery ([§4](#the-superblock)).
 
 ```mermaid
 flowchart TB
     subgraph PRIM["Primary state"]
         direction TB
         Cell["<b>Cell</b><br/>─────────────────────<br/>PK · recordID : u64<br/>PK · cellKey : Bytes<br/>─────────────────────<br/>typeTag : u8<br/>cellValue : Bytes"]
-        CellTrie["<b>CellTrie</b><br/>─────────────────────<br/>PK · hashedNode : B256<br/>─────────────────────<br/>node : BranchNodeCompact"]
+        CellTrie["<b>CellTrie</b><br/>─────────────────────<br/>PK · commitNr : u64<br/>PK · route : Bytes<br/>─────────────────────<br/>node : BranchNodeCompact"]
         Cell ~~~ CellTrie
     end
 
     subgraph IDX["Index"]
         direction TB
-        Index["<b>Index</b><br/>─────────────────────<br/>PK · cellKey : Bytes<br/>PK · typeTag : u8<br/>PK · cellValue : Bytes<br/>─────────────────────<br/>bitmapHash : B256"]
-        IndexTrie["<b>IndexTrie</b><br/>─────────────────────<br/>PK · hashedNode : B256<br/>─────────────────────<br/>node : BranchNodeCompact"]
-        BitmapTrie["<b>BitmapTrie</b><br/>─────────────────────<br/>PK · hashedNode : B256<br/>─────────────────────<br/>node : BranchNodeCompact"]
-        BitmapContainer["<b>BitmapContainer</b><br/>─────────────────────<br/>PK · hashedContainer : B256<br/>─────────────────────<br/>hi48 : 6 B<br/>roaring : Roaring32"]
+        Index["<b>Index</b><br/>─────────────────────<br/>PK · cellKey : Bytes<br/>PK · typeTag : u8<br/>PK · cellValue : Bytes<br/>─────────────────────<br/>bitmapHash : B256<br/>commitNr : u64<br/>hi48 : 6 B (leaf root only)"]
+        IndexTrie["<b>IndexTrie</b><br/>─────────────────────<br/>PK · commitNr : u64<br/>PK · route : Bytes<br/>─────────────────────<br/>node : BranchNodeCompact"]
+        BitmapTrie["<b>BitmapTrie</b><br/>─────────────────────<br/>PK · commitNr : u64<br/>PK · termPath : B256<br/>PK · route : Bytes<br/>─────────────────────<br/>node : BranchNodeCompact"]
+        BitmapContainer["<b>BitmapContainer</b><br/>─────────────────────<br/>PK · commitNr : u64<br/>PK · termPath : B256<br/>PK · hi48 : 6 B<br/>─────────────────────<br/>hi48 : 6 B<br/>roaring : Roaring32"]
         Index ~~~ IndexTrie ~~~ BitmapTrie ~~~ BitmapContainer
     end
 
@@ -346,15 +346,16 @@ flowchart TB
     subgraph ENG["Engine state and shared payload"]
         direction TB
         Superblock["<b>Superblock</b><br/>─────────────────────<br/>PK · superKey : Bytes<br/>─────────────────────<br/>superValue : Bytes"]
-        BNC["<b>BranchNodeCompact</b><br/><i>value payload, not a table</i><br/>─────────────────────<br/>prefix : Bytes<br/>prefix_len : u8<br/>state_mask : u16<br/>tree_mask : u16<br/>child_hashes : B256 list<br/>leaf_paths : B256 list"]
-        Superblock ~~~ BNC
+        Roots["<b>Roots</b><br/>─────────────────────<br/>PK · commitNr : u64<br/>─────────────────────<br/>stateRoot : locator<br/>indexRoot : locator"]
+        BNC["<b>BranchNodeCompact</b><br/><i>value payload, not a table</i><br/>─────────────────────<br/>prefix : Bytes<br/>prefix_len : u8<br/>state_mask : u16<br/>tree_mask : u16<br/>child_hashes : B256 list<br/>leaf_paths : path list<br/>child_commits : u64 list"]
+        Superblock ~~~ Roots ~~~ BNC
     end
 
     classDef committed fill:#d5e8d4,stroke:#82b366,color:#000000
     classDef utility fill:#f5f5f5,stroke:#666666,color:#000000
     classDef payload fill:#ffe6cc,stroke:#d79b00,color:#000000
     class Cell,Index,BitmapTrie,BitmapContainer committed
-    class CellTrie,IndexTrie,CellHistory,CellChangeSet,IndexHistory,IndexChangeSet,Superblock utility
+    class CellTrie,IndexTrie,CellHistory,CellChangeSet,IndexHistory,IndexChangeSet,Superblock,Roots utility
     class BNC payload
 ```
 
@@ -365,38 +366,39 @@ the `PK` rows above the rule are its key parts, in order; the rows below are its
 structures outside it — the split is worked through in
 [§8](#which-tables-are-under-commitment). The `0x00` separator that follows the variable-length
 `cellKey` on the index side is a byte-layout detail and is elided here; the dictionary below gives
-the exact layouts._
+the exact layouts. `route` is a node's path in its trie; `termPath` is the term's `IndexTrie` path._
 
 ### Table Dictionary
 
-| Table             | Key schema                                                         | Value schema                          | Purpose                                                                                     |
-| ----------------- | ------------------------------------------------------------------ | ------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `Cell`            | `recordID: u64` ‖ `cellKey`                                        | `typeTag: u8` ‖ `cellValue: Bytes`    | Primary state: the live value of every cell, prefixed by its kind/type tag.                 |
-| `CellTrie`        | `hashedNode: B256`                                                 | `BranchNodeCompact`                   | Nodes of the primary-state MPT — produces `StateRoot`.                                      |
-| `Index`           | `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue`                   | `bitmapHash: B256`                    | Tier 1: an index term → the root of that term's `BitmapTrie`.                               |
-| `IndexTrie`       | `hashedNode: B256`                                                 | `BranchNodeCompact`                   | Nodes of the meta-trie over index terms — produces `IndexRoot`.                             |
-| `BitmapTrie`      | `hashedNode: B256`                                                 | `BranchNodeCompact`                   | Tier 2: per-term trie over the chunks of that term's bitmap — produces `bitmapHash`.        |
-| `BitmapContainer` | `hashedContainer: B256`                                            | `hi48: 6 B` ‖ `roaring`               | Bitmap chunks: the `recordID`s of one 48-bit region of a term's bitmap.                     |
-| `CellHistory`     | `recordID: u64` ‖ `cellKey`                                        | `commitsList: Roaring64`              | Every commit number that modified a given cell.                                             |
-| `CellChangeSet`   | `commitNr: u64` ‖ `recordID: u64` ‖ `cellKey`                      | `typeTag: u8` ‖ `cellOldValue: Bytes` | Pre-image of a cell **before** the change made at `commitNr`.                               |
-| `IndexHistory`    | `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue`                   | `commitsList: Roaring64`              | Every commit number that modified a given index term.                                       |
-| `IndexChangeSet`  | `commitNr: u64` ‖ `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue` | `bitmapHash: B256`                    | Pre-image of a term's bitmap root before the change made at `commitNr`.                     |
-| `Superblock`      | `superKey: Bytes`                                                  | `superValue: Bytes`                   | The only uncommitted engine state: format identifiers and the head ([§4](#the-superblock)). |
+| Table             | Key schema                                                         | Value schema                                    | Purpose                                                                              |
+| ----------------- | ------------------------------------------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `Cell`            | `recordID: u64` ‖ `cellKey`                                        | `typeTag: u8` ‖ `cellValue: Bytes`              | Primary state: the live value of every cell, prefixed by its kind/type tag.          |
+| `CellTrie`        | `commitNr: u64` ‖ `route`                                          | `BranchNodeCompact`                             | Nodes of the primary-state MPT — produces `StateRoot`.                               |
+| `Index`           | `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue`                   | `bitmapHash: B256` ‖ `commitNr: u64` [‖ `hi48`] | Tier 1: an index term → the root of that term's `BitmapTrie`, as a locator.          |
+| `IndexTrie`       | `commitNr: u64` ‖ `route`                                          | `BranchNodeCompact`                             | Nodes of the meta-trie over index terms — produces `IndexRoot`.                      |
+| `BitmapTrie`      | `commitNr: u64` ‖ `termPath: B256` ‖ `route`                       | `BranchNodeCompact`                             | Tier 2: per-term trie over the chunks of that term's bitmap — produces `bitmapHash`. |
+| `BitmapContainer` | `commitNr: u64` ‖ `termPath: B256` ‖ `hi48: 6 B`                   | `hi48: 6 B` ‖ `roaring`                         | Bitmap chunks: the `recordID`s of one 48-bit region of a term's bitmap.              |
+| `CellHistory`     | `recordID: u64` ‖ `cellKey`                                        | `commitsList: Roaring64`                        | Every commit number that modified a given cell.                                      |
+| `CellChangeSet`   | `commitNr: u64` ‖ `recordID: u64` ‖ `cellKey`                      | `typeTag: u8` ‖ `cellOldValue: Bytes`           | Pre-image of a cell **before** the change made at `commitNr`.                        |
+| `IndexHistory`    | `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue`                   | `commitsList: Roaring64`                        | Every commit number that modified a given index term.                                |
+| `IndexChangeSet`  | `commitNr: u64` ‖ `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue` | `bitmapHash: B256`                              | Pre-image of a term's bitmap root before the change made at `commitNr`.              |
+| `Superblock`      | `superKey: Bytes`                                                  | `superValue: Bytes`                             | Uncommitted engine state: format identifiers and the head ([§4](#the-superblock)).   |
+| `Roots`           | `commitNr: u64`                                                    | `stateRoot` ‖ `indexRoot` locators              | Uncommitted: where each commit's two roots are stored, so old tries stay walkable.   |
 
 The ten data tables fall into three groups — **primary state and its commitment** (`Cell`,
 `CellTrie`), **indexing** (`Index`, `IndexTrie`, `BitmapTrie`, `BitmapContainer`) and **history**
-(`CellHistory`, `CellChangeSet`, `IndexHistory`, `IndexChangeSet`) — with the `Superblock` standing
-apart from all three as the one structure outside the transactional cell machinery.
+(`CellHistory`, `CellChangeSet`, `IndexHistory`, `IndexChangeSet`) — with the `Superblock` and
+`Roots` standing apart from all three, outside the transactional cell machinery.
 
 The history group mirrors the primary/index split exactly: `CellHistory`/`CellChangeSet` stand to
 `Cell` precisely as `IndexHistory`/`IndexChangeSet` stand to `Index`. `BitmapTrie` is named for what
 it holds; the hash of a `BitmapTrie` root **is** the `bitmapHash` stored in `Index`.
 
-**There is no identity table, no root table and no engine-singleton table.** The `recordKey →
-recordID` mapping, the root history and the ID allocator are all ordinary committed cells of
-reserved system records ([§4](#record-classes-and-the-reserved-catalogue)). Only the four
-`Superblock` rows sit outside the commitment, and only because they structurally cannot sit inside
-it.
+**There is no identity table, no committed root table and no engine-singleton table.** The
+`recordKey → recordID` mapping, the root history and the ID allocator are all ordinary committed
+cells of reserved system records ([§4](#record-classes-and-the-reserved-catalogue)). Only the four
+`Superblock` rows and the `Roots` rows sit outside the commitment: the former structurally cannot sit
+inside it, and `Roots` only locates stored roots, which are re-hashed when read.
 
 ### Dependencies
 
@@ -509,8 +511,10 @@ pub struct BranchNodeCompact {
     pub child_hashes: Vec<B256>,   // 32-byte hashes of active children (len = popcnt(state_mask))
 
     // ---- stored only: never part of any hash ----
-    pub leaf_paths: Vec<B256>,     // Full trieKey of each leaf child
+    pub leaf_paths: Vec<[u8; N]>,  // Full routing path of each leaf child
                                    // (len = popcnt(state_mask & !tree_mask))
+    pub child_commits: Vec<u64>,   // Commit that wrote each child's row
+                                   // (one per child stored as a row)
 }
 ```
 
@@ -522,10 +526,13 @@ pub struct BranchNodeCompact {
   `state_mask & !tree_mask`. Both lengths are derivable from the masks, so neither needs a length
   tag. Its purpose — making structural changes possible without materialising leaves — is covered in
   [§8](#bare-leaf-roots-and-virtual-leaves).
+- **Child commits.** Rows are keyed `commitNr ‖ route` ([§9](#9-trie-representation-canonical-vs-physical)),
+  and a child's route follows from its parent's, so the parent stores only the commit that wrote each
+  child row.
 
-`leaf_paths` is populated for `CellTrie` and `IndexTrie`, whose leaves are virtual. `BitmapTrie`
-leaves it empty: its leaves **are** materialised, since `child_hashes[i]` is the `hashedContainer`
-key under which the container row — carrying its own `hi48` — is stored.
+`N` is the path width: 32 bytes, or 6 (`hi48`) for `BitmapTrie`. `CellTrie` and `IndexTrie` leaves
+are virtual, so only interior children have commits. `BitmapTrie` leaves **are** materialised as
+`BitmapContainer` rows, so every child has one.
 
 ### Note on Hashing
 
@@ -1426,9 +1433,8 @@ The container payload therefore carries its own **full** 48-bit path (`hi48`,
 HASH_BITMAP_LEAF = Hash( 0x04 ‖ hi48 ‖ roaring )
 ```
 
-This value is simultaneously the leaf hash used in the parent's `child_hashes` **and** the
-`hashedContainer` key under which the payload is stored — one hash serving both roles, not two
-separate domains.
+This value is the leaf hash in the parent's `child_hashes`; the payload is stored under
+`commitNr ‖ termPath ‖ hi48`.
 
 Interior nodes in `BitmapTrie` are hashed over their structural components, under their own domain
 ([§8](#domain-separation-and-preimage-encoding)):
@@ -1453,20 +1459,20 @@ All three share the 10-nibble prefix `0x0000_0000_00`; they diverge at nibbles 1
 
 ```mermaid
 flowchart TB
-    subgraph PHYS["Physical MDBX rows — content-addressed"]
+    subgraph PHYS["Physical MDBX rows — keyed commitNr ‖ termPath ‖ route, all written at commit 7"]
         direction TB
-        IX["<b>Index</b> row<br/>─────────────────────<br/><b><i>key:</i></b> index term<br/>Price ‖ 0x00 ‖ tag ‖ 100<br/><b><i>value:</i></b> bitmapHash 0xR00T"]
-        PR["<b>BitmapTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> node hash 0xR00T<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: 0x0000_0000_00<br/>prefix_len: 10<br/>state_mask: 0b0000_0000_0000_0011<br/>tree_mask: 0b0000_0000_0000_0001<br/>child_hashes: [0xMID0, 0xH333]"]
-        PM0["<b>BitmapTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> node hash 0xMID0<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: []<br/>prefix_len: 0<br/>state_mask: 0b0000_0000_0000_0011<br/>tree_mask: 0b0000_0000_0000_0000<br/>child_hashes: [0xH111, 0xH222]"]
-        PA["<b>BitmapContainer</b> row<br/>─────────────────────<br/><b><i>key:</i></b> container hash 0xH111<br/><b><i>value:</i></b> hi48 0x0000_0000_0000 ‖ roaring 0064"]
-        PB["<b>BitmapContainer</b> row<br/>─────────────────────<br/><b><i>key:</i></b> container hash 0xH222<br/><b><i>value:</i></b> hi48 0x0000_0000_0001 ‖ roaring 1170"]
-        PC["<b>BitmapContainer</b> row<br/>─────────────────────<br/><b><i>key:</i></b> container hash 0xH333<br/><b><i>value:</i></b> hi48 0x0000_0000_0012 ‖ roaring 0034"]
+        IX["<b>Index</b> row<br/>─────────────────────<br/><b><i>key:</i></b> index term<br/>Price ‖ 0x00 ‖ tag ‖ 100<br/><b><i>value:</i></b> locator 0xR00T ‖ 7"]
+        PR["<b>BitmapTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ T ‖ route []<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: 0x0000_0000_00<br/>prefix_len: 10<br/>state_mask: 0b0000_0000_0000_0011<br/>tree_mask: 0b0000_0000_0000_0001<br/>child_hashes: [0xMID0, 0xH333]<br/>leaf_paths: [0x0000_0000_0012]<br/>child_commits: [7, 7]"]
+        PM0["<b>BitmapTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ T ‖ route 0x0000_0000_000<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: []<br/>prefix_len: 0<br/>state_mask: 0b0000_0000_0000_0011<br/>tree_mask: 0b0000_0000_0000_0000<br/>child_hashes: [0xH111, 0xH222]<br/>leaf_paths: [0x0000_0000_0000, 0x0000_0000_0001]<br/>child_commits: [7, 7]"]
+        PA["<b>BitmapContainer</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ T ‖ 0x0000_0000_0000<br/><b><i>value:</i></b> hi48 0x0000_0000_0000 ‖ roaring 0064"]
+        PB["<b>BitmapContainer</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ T ‖ 0x0000_0000_0001<br/><b><i>value:</i></b> hi48 0x0000_0000_0001 ‖ roaring 1170"]
+        PC["<b>BitmapContainer</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ T ‖ 0x0000_0000_0012<br/><b><i>value:</i></b> hi48 0x0000_0000_0012 ‖ roaring 0034"]
 
-        IX -- "value is the next key" --> PR
-        PR -- "child_hashes[0]" --> PM0
-        PR -- "child_hashes[1]" --> PC
-        PM0 -- "child_hashes[0]" --> PA
-        PM0 -- "child_hashes[1]" --> PB
+        IX -- "commit 7, route []" --> PR
+        PR -- "slot 0: commit 7" --> PM0
+        PR -- "slot 1: commit 7" --> PC
+        PM0 -- "slot 0: commit 7" --> PA
+        PM0 -- "slot 1: commit 7" --> PB
     end
     subgraph CANON["Canonical MPT — path-addressed"]
         direction TB
@@ -1497,10 +1503,8 @@ leaf. Edge labels are the nibble consumed at each step. Root slot 1 terminates d
 `0xH333` (`tree_mask` bit 1 = 0): a patricia trie has no single-child branch, and nibble 12 of that
 path is held by neither node — which is why the leaf payload carries `hi48`. **Right:** the same
 trie as physically
-stored. **Read across the two panels:** a canonical node's *value* — its hash — is
-the physical row's *key*. `0xR00T` is the value of the canonical root and the key of the
-`BitmapTrie` row that holds it; `0xH111` is the value of a canonical leaf and the key of a
-`BitmapContainer` row. Both panels
+stored, `T` being the term's path. **Read across the two panels:** a canonical node's *key* — its
+path — is the physical row's route, under the commit that wrote it. Both panels
 yield the same root; the distinction is developed in
 [§9](#9-trie-representation-canonical-vs-physical)._
 
@@ -1555,23 +1559,14 @@ re-hashed (`0xMID0` → `0xMID2`, `0xR00T` → `0xR00T1`). Untouched siblings �
 `0xH333` — keep their keys and are referenced by both the old and the new root. `Index` advances to
 the new root while `IndexChangeSet` records the previous one under the mutating commit._
 
-### Structural Deduplication and Zero-Cost History
+### Structural Sharing and Zero-Cost History
 
-Because `BitmapTrie` and `BitmapContainer` are **content-addressed** (`Key = Hash`), the engine gets
-structural deduplication for free — the general mechanism is discussed in
-[§9](#9-trie-representation-canonical-vs-physical); its concrete effects here are three:
+Rows are keyed by commit and position, not by hash
+([§9](#9-trie-representation-canonical-vs-physical)), so equal content written twice is stored
+twice; there is no deduplication. What remains is:
 
-1. **Cross-term container sharing.** If `Status = 'Active'` and `IsDeleted = 'False'` are held by an
-   identical set of `recordID`s within some 48-bit region, both tries reference the exact same
-   `hashedContainer` and the payload is written to disk only once. Because `hi48` is part of the
-   payload, sharing requires the same region as well as the same offsets — identical offset patterns
-   under _different_ paths no longer collapse, which is the price of binding a container to its
-   position.
-2. **Self-healing convergence.** If a series of additions and deletions returns a term to a state it
-   previously held, its root hash naturally collapses back to the original without leaving duplicate
-   branches behind.
-3. **Zero-cost copy-on-write history.** Modifying a term creates a new root via CoW, as in Figure 6.
-   Unmodified interior nodes and containers keep their hashes and are shared between the old and new
+1. **Zero-cost copy-on-write history.** Modifying a term creates a new root via CoW, as in Figure 6.
+   Unmodified interior nodes and containers keep their rows and are shared between the old and new
    roots rather than copied — so retaining the previous version of a term costs only the nodes on one
    path.
 
@@ -1881,24 +1876,22 @@ exactly one container, which is every term while the allocator has minted fewer 
 `recordID`s. That is an allocation extent, not a live count — IDs are never reused, so after churn
 two live records can sit in different regions however few there are.
 
-The root's kind is not recorded anywhere and does not need to be. It is recovered by **probe and
-verify**:
+The root's kind is not committed; it is stored in the root's **locator** (in `Roots`, or the
+`Index` value for a `bitmapHash`): empty, a branch (`hash ‖ commitNr`) or a leaf
+(`hash ‖ commitNr ‖ path`). The engine follows it and **verifies**:
 
-1. Look up the root hash in the trie table. A hit means the root is an interior node — descend normally.
-2. A miss means a bare leaf (or an empty trie). Recompute the candidate leaf hash from the item
-   itself and compare against the root.
+1. A branch row is re-hashed against the root.
+2. A bare leaf's hash is recomputed from the item itself and compared against the root.
 
-The probe is sound because of domain separation: a leaf preimage (`0x00`, `0x02`, `0x04`) can never
-hash to a value stored as a branch (`0x01`, `0x03`, `0x05`), so a leaf root cannot spuriously hit a
-node. And step 2 never _assumes_ the shape — a matching recomputation is proof that the trie held
-exactly that one leaf, since no larger trie could produce that root. For `BitmapTrie` the miss falls
-through to `BitmapContainer`, where the leaf is materialised and carries its own `hi48`; that is also
-how a later split recovers the lone container's path.
+Step 2 never _assumes_ the shape — a matching recomputation is proof that the trie held exactly that
+one leaf, since no larger trie could produce that root. For `BitmapTrie` the leaf locator names the
+`BitmapContainer` row, where the leaf is materialised and carries its own `hi48`; that is also how a
+later split recovers the lone container's path.
 
 #### Proofs are generated top-down
 
-Proofs are produced by descending from a root, never by ascending from a leaf. Content-addressed
-nodes hold no parent pointer and cannot: a shared sub-trie genuinely has many parents, so "the
+Proofs are produced by descending from a root, never by ascending from a leaf. Stored nodes hold no
+parent pointer and cannot: a shared sub-trie genuinely has many parents, so "the
 parent" is not a well-defined thing to record. Knowing a leaf's hash and `trieKey` therefore reveals
 nothing about its ancestors.
 
@@ -1944,12 +1937,12 @@ three cells with routing paths `0x912a…3ce2`, `0x2197…9baa` and `0x9a95…18
 
 ```mermaid
 flowchart TB
-    subgraph PHYS["Physical MDBX rows — content-addressed"]
+    subgraph PHYS["Physical MDBX rows — keyed commitNr ‖ route, written at commit 7"]
         direction TB
-        PR["<b>CellTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> node hash 0xR00T<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: []<br/>prefix_len: 0<br/>state_mask: 0b0000_0010_0000_0100<br/>tree_mask: 0b0000_0010_0000_0000<br/>child_hashes: [0xH222 · slot 2, 0xMID · slot 9]<br/>leaf_paths: [0x2197…9baa]"]
-        PM["<b>CellTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> node hash 0xMID<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: []<br/>prefix_len: 0<br/>state_mask: 0b0000_0100_0000_0010<br/>tree_mask: 0b0000_0000_0000_0000<br/>child_hashes: [0xH111 · slot 1, 0xH333 · slot A]<br/>leaf_paths: [0x912a…3ce2, 0x9a95…1873]"]
+        PR["<b>CellTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ route []<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: []<br/>prefix_len: 0<br/>state_mask: 0b0000_0010_0000_0100<br/>tree_mask: 0b0000_0010_0000_0000<br/>child_hashes: [0xH222 · slot 2, 0xMID · slot 9]<br/>leaf_paths: [0x2197…9baa]<br/>child_commits: [7 · slot 9]"]
+        PM["<b>CellTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ route 0x9<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: []<br/>prefix_len: 0<br/>state_mask: 0b0000_0100_0000_0010<br/>tree_mask: 0b0000_0000_0000_0000<br/>child_hashes: [0xH111 · slot 1, 0xH333 · slot A]<br/>leaf_paths: [0x912a…3ce2, 0x9a95…1873]<br/>child_commits: []"]
         PC["<b>Cell</b> rows<br/>─────────────────────<br/><b><i>key:</i></b> 100 ‖ Price · <b><i>value:</i></b> tag ‖ 100<br/><b><i>key:</i></b> 100 ‖ Status · <b><i>value:</i></b> tag ‖ 'Active'<br/><b><i>key:</i></b> 101 ‖ Price · <b><i>value:</i></b> tag ‖ 500"]
-        PR -- "child_hashes[1]" --> PM
+        PR -- "slot 9: commit 7" --> PM
         PR -. "leaf hash recomputed from" .-> PC
         PM -. "leaf hashes recomputed from" .-> PC
     end
@@ -1976,10 +1969,10 @@ flowchart TB
 
 _Figure 8 — Read exactly as Figure 5. **Left:** the canonical trie, five nodes, each a **key** (its
 path) bound to a **value** (the hash of its payload). **Right:** the same trie physically stored,
-where that hash becomes the row's **key**. Only **two** rows exist: the three leaves are never
+where that path is the row's route, under the commit that wrote it. Only **two** rows exist: the three leaves are never
 written, their hashes being recomputed in RAM from the `Cell` rows whenever a parent is loaded — so
 `0xH111`, `0xH222` and `0xH333` appear on the left and inside `child_hashes` on the right, but never
-as a key of their own. `leaf_paths` carries each leaf child's full `trieKey` so restructuring never
+as a row of their own. `leaf_paths` carries each leaf child's full `trieKey` so restructuring never
 has to read a value._
 
 #### Restructuring: splits and merges
@@ -2049,7 +2042,8 @@ contents are gone.
 Third, and new relative to a design with dedicated side tables: **the engine's own operational state
 is inside the commitment,** because it lives in `Cell`. The root history, the `recordKey → recordID`
 mapping, the ID allocator and the chain parameters are all committed cells, so two nodes agreeing on
-the root necessarily agree on all of them. The uncommitted surface is exactly four `Superblock` rows.
+the root necessarily agree on all of them. The uncommitted surface is exactly four `Superblock` rows
+plus the `Roots` rows.
 
 ### Depth Bounds and Future Optimization Paths
 
@@ -2115,33 +2109,26 @@ hashes are defined recursively — an interior node hashes its own structure tog
 representation the protocol cares about: **the state commitment is a function of the canonical trie
 alone**, and the canonical definition says nothing about how nodes are laid out on disk.
 
-**Physically, the engine stores each node keyed by the hash of its own payload** (`Key = HASH_NODE`),
-which has three consequences:
+**Physically, the engine stores each node under the commit that wrote it and its path**
+(`Key = commitNr ‖ route`; `BitmapTrie` adds `termPath`). A parent records each child's commit in
+`child_commits`, and a root's is in its locator. This has three consequences:
 
-- **Trie nodes are immutable.** A node's key is derived from its content, so a modified node is a
-  _different_ node with a different key. Writes never overwrite; they append.
-- **Updates are copy-on-write.** Changing a leaf re-hashes every node on its path to the root,
-  producing a new root; every node _not_ on that path keeps its key and is referenced by both the old
-  and the new root. Retaining history therefore costs only the nodes that actually changed.
-- **Identical structure is stored once.** Two sub-tries with the same content collapse to the same key
-  — deduplication is automatic rather than something the engine has to detect.
+- **Trie nodes are immutable.** A commit writes rows under its own number and never touches an
+  earlier commit's rows. Writes never overwrite; they append, in key order.
+- **Updates are copy-on-write.** Changing a leaf writes new rows for every node on its path to the
+  root, producing a new root; every node _not_ on that path keeps its row and is referenced by both
+  the old and the new root. Retaining history therefore costs only the nodes that actually changed.
+- **Stale rows are found by commit.** A superseded row's key says which commit wrote it.
 
-The price is that a node can no longer be addressed by where it sits: resolving a path means walking
-down from the root, and superseded nodes are not deleted by the write that supersedes them, so
-reclaiming them requires garbage collection.
-
-**Caveat on deduplication.** Because leaf hashes bind the _complete_ path
-([§8](#the-two-tries)), a sub-trie's hash encodes its absolute position, so two sub-tries at
-_different_ positions can never be identical. Deduplication therefore operates only across versions of
-the same position — which is where all of its practical value lies anyway: the same sub-trie shared
-between an old and a new root, and a term returning to a state it previously held. Sharing between
-unrelated positions is forfeited, but over 32-byte hashed paths it was never going to occur.
+The price is that a node can no longer be addressed by where it sits alone: resolving a path means
+walking down from the root, and superseded nodes are not deleted by the write that supersedes them,
+so reclaiming them requires garbage collection. Unlike hash keys, equal content is not deduplicated.
 
 **Why the distinction matters.** Because both representations describe the same trie and yield the
 **same root hash**, the physical layout is not consensus-critical. The engine can move between
-content-addressed and path-based storage — or run different modes on different node types — without a
-state fork or protocol migration. It also means a diagram showing a path-addressed trie and a diagram
-showing hash-keyed MDBX rows may be depicting exactly the same state; Figures 5 and 8 show both side
+versioned, content-addressed and path-based storage — or run different modes on different node types —
+without a state fork or protocol migration. It also means a diagram showing a path-addressed trie and
+a diagram showing MDBX rows may be depicting exactly the same state; Figures 5 and 8 show both side
 by side.
 
 ### Precedent: How Ethereum Clients Chose
@@ -2171,23 +2158,25 @@ migrated between them, which makes the consequences concrete:
   (`--rpc.eth-proof-window`). Deep historical proofs are correspondingly expensive and memory-hungry,
   which is why downstream forks are building versioned trie-node stores to turn historical proof
   generation back into a lookup.
+- **Diem and Aptos key nodes by version and path.** The
+  [Jellyfish Merkle Tree](https://developers.diem.com/papers/jellyfish-merkle-tree/2021-01-14.pdf)
+  stores each node under `version ‖ nibble path`, the layout this engine uses.
 
 The pattern is consistent: path-based storage wins on the footprint of the _current_ state, then has
 to re-acquire history through a second structure — reverse diffs, change-sets, or a versioned node
-store. GolemDB deliberately takes the other branch. Content-addressing keeps every historical root
-directly walkable, so a proof at commit 150 is the same operation as a proof at the tip, and the
+store. GolemDB deliberately takes the other branch. Never overwriting a node keeps every historical
+root directly walkable, so a proof at commit 150 is the same operation as a proof at the tip, and the
 change-set tables of [§7](#7-point-in-time-history) exist to time-travel _values_, not to
-reconstruct tries. The bill for that choice is the disk footprint and the garbage collection named
-below.
+reconstruct tries. The bill for that choice is the disk footprint and the garbage collection named below.
 
-### Trade-offs: Content-Addressed vs. Path-Based Physical Storage
+### Trade-offs: Versioned vs. Path-Based Physical Storage
 
-| Property               | Content-addressed storage (chosen)                                                               | Path-based physical storage                                                                            |
+| Property               | Versioned storage, `commitNr ‖ route` (chosen)                                                   | Path-based physical storage                                                                            |
 | ---------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
-| **History**            | **Native copy-on-write:** updating a node writes a new hash key; past state roots remain intact. | **Destructive in-place writes:** overwrites path keys; requires auxiliary change-set logs for history. |
-| **Node prefix splits** | **Append-only:** writing a split node creates a new payload hash without deleting existing keys. | **Complex renames:** shrinking prefixes require deleting old path keys and re-inserting children.      |
-| **Deduplication**      | **Automatic:** identical sub-tries share physical MDBX keys (subject to the caveat above).       | **None:** storage footprint scales linearly per key path.                                              |
-| **Addressing a node**  | Only top-down: a node's key is unknown until its parent has been read.                           | Direct: any node can be point-sought by its path without walking the trie.                             |
+| **History**            | **Native copy-on-write:** updating a node writes a new row; past state roots remain intact.      | **Destructive in-place writes:** overwrites path keys; requires auxiliary change-set logs for history. |
+| **Node prefix splits** | **Append-only:** writing a split node creates new rows without deleting existing keys.           | **Complex renames:** shrinking prefixes require deleting old path keys and re-inserting children.      |
+| **Deduplication**      | **None:** equal content written twice is stored twice.                                           | **None:** storage footprint scales linearly per key path.                                              |
+| **Addressing a node**  | Only top-down: a child's commit is in its parent.                                                | Direct: any node can be point-sought by its path without walking the trie.                             |
 | **Disk footprint**     | Higher, due to orphaned historical interior nodes (requires periodic garbage collection).        | Minimal; holds only current state in place.                                                            |
 
 ---
@@ -2710,8 +2699,10 @@ experiences all nine as one operation.
    — _nothing above this line has touched disk_ —
 
 7. **Persist**, inside a single MDBX write transaction so the whole of it is atomic with respect to
-   readers and to crashes: every row computed in steps 3–6, the `#alloc` cell among them.
-8. **Advance the `Superblock` head** to `(commitNr, StateRoot, IndexRoot)`. The guard of step 1 is
+   readers and to crashes: every row computed in steps 3–6, the `#alloc` cell among them. Trie rows
+   are appended in key order under the new `commitNr`.
+8. **Advance the `Superblock` head** to `(commitNr, StateRoot, IndexRoot)`, and write
+   `Roots[commitNr]` with both roots' locators. The guard of step 1 is
    re-checked here, since an arbitrary
    interval may have passed since the seal.
 9. **Invalidate every other open branch** whose origin is the superseded head. This needs no eager

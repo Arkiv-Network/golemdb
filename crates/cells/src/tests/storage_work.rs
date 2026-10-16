@@ -80,6 +80,7 @@ fn coalescing_reads_once_per_key_and_noops_do_not_write() {
     let first = cells
         .apply(
             &mut tx,
+            0,
             RootRef::Empty,
             [put(b"a", b"1"), put(b"a", b"2"), put(b"a", b"3")],
         )
@@ -91,6 +92,7 @@ fn coalescing_reads_once_per_key_and_noops_do_not_write() {
     let unchanged = cells
         .apply(
             &mut tx,
+            0,
             first.root,
             [
                 put(b"a", b"intermediate"),
@@ -114,14 +116,14 @@ fn abort_after_a_flat_write_failure_discards_intermediate_trie_nodes() {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     let root = cells
-        .apply(&mut tx, RootRef::Empty, [put(b"a", b"original")])
+        .apply(&mut tx, 0, RootRef::Empty, [put(b"a", b"original")])
         .unwrap()
         .root;
     tx.commit().unwrap();
     let mut tx = Observed::new(db.begin_write().unwrap());
     tx.fail_cells = true;
     assert!(matches!(
-        cells.apply(&mut tx, root, [put(b"b", b"new")]),
+        cells.apply(&mut tx, 0, root, [put(b"b", b"new")]),
         Err(CellError::Storage(StorageError::Poisoned(
             "injected write failure"
         )))
@@ -148,7 +150,7 @@ fn abort_after_a_flat_write_failure_discards_intermediate_trie_nodes() {
         Some("original")
     );
     assert!(cells.get(&read, &key(b"b")).unwrap().is_none());
-    assert_eq!(cells.reopen(&read, root.hash(&HASH)).unwrap(), root);
+    assert_eq!(cells.reopen(&read, root).unwrap(), root);
 }
 
 struct FailingRead;

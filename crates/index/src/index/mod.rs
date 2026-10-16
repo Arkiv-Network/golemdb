@@ -1,8 +1,8 @@
-use golemdb_merkle::{Hash, HashProvider};
+use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::ReadTransaction;
 
 use crate::{
-    IndexTerm, Result,
+    BITMAP_TRIE_PATH_BYTES, IndexTerm, Result,
     bitmap_trie::BitmapTrie,
     index_trie::{IndexTrie, decode_root},
     tables,
@@ -32,9 +32,13 @@ impl<'h, H: HashProvider> Index<'h, H> {
         }
     }
 
-    fn bitmap_root(&self, tx: &impl ReadTransaction, term: &IndexTerm) -> Result<Option<Hash>> {
+    fn bitmap_root(
+        &self,
+        tx: &impl ReadTransaction,
+        term: &IndexTerm,
+    ) -> Result<Option<RootRef<BITMAP_TRIE_PATH_BYTES>>> {
         tx.get(tables::INDEX, term.as_bytes())?
-            .map(|bytes| decode_root(&bytes, self.hasher))
+            .map(|bytes| decode_root(&bytes))
             .transpose()
     }
 }

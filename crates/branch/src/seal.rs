@@ -11,6 +11,7 @@ use crate::{
     buffer::{Buffered, Writes},
     head::read_head_state,
     overlay::CellOverlay,
+    roots::head_roots,
 };
 
 /// Computed next state, retained in memory until commit or discard.
@@ -39,11 +40,15 @@ pub(crate) fn compute(
         .checked_add(1)
         .map(crate::CommitId::new)
         .ok_or(BranchError::CommitNumberExhausted)?;
+    // New trie rows are keyed by this commit. Competing seals share its number,
+    // but only the published one leaves its buffer.
+    let commit = commit_id.get();
     let cells = Cells::new(hasher);
     let index = Index::new(hasher);
     // Reopen against the committed origin, before applying ANY staged cell.
-    let cell_root = cells.reopen(origin, head.state_root)?;
-    let index_root = index.reopen(origin, head.index_root)?;
+    let roots = head_roots(origin, &head, hasher)?;
+    let cell_root = cells.reopen(origin, roots.state)?;
+    let index_root = index.reopen(origin, roots.index)?;
     let roots_key = CellKey::new(
         system::ROOTS.id,
         CellNameRef::raw(&head.commit_id.get().to_be_bytes()),
@@ -64,7 +69,7 @@ pub(crate) fn compute(
         value: roots_value,
     }]);
     let mut tx = Buffered::new(origin);
-    let cells_update = cells.apply(&mut tx, cell_root, changes)?;
+    let cells_update = cells.apply(&mut tx, commit, cell_root, changes)?;
     let mut postings = Vec::new();
     for change in &cells_update.changed_cells {
         let before = term(&change.key, change.before.as_ref())?;
@@ -80,7 +85,7 @@ pub(crate) fn compute(
             postings.push(PostingChange::Add { term, record_id });
         }
     }
-    let index_update = index.apply(&mut tx, index_root, postings)?;
+    let index_update = index.apply(&mut tx, commit, index_root, postings)?;
     Ok(SealedCommit {
         commit_id,
         state_root: cells_update.root.hash(hasher),

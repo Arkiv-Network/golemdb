@@ -96,6 +96,7 @@ fn one_chunk_update_does_not_rebuild_256_chunk_postings() {
     let update = index
         .apply(
             &mut tx,
+            0,
             RootRef::Empty,
             (0u64..256).flat_map(|hi| [add(term(0), hi << 16), add(term(1), hi << 16)]),
         )
@@ -104,6 +105,7 @@ fn one_chunk_update_does_not_rebuild_256_chunk_postings() {
     let update = index
         .apply(
             &mut tx,
+            0,
             update.root,
             [add(term(0), 1), add(term(0), 2), add(term(0), 1)],
         )
@@ -123,7 +125,7 @@ fn one_chunk_update_does_not_rebuild_256_chunk_postings() {
     );
     tx.reset();
     let noop = index
-        .apply(&mut tx, update.root, [add(term(0), 1), add(term(0), 2)])
+        .apply(&mut tx, 0, update.root, [add(term(0), 1), add(term(0), 2)])
         .unwrap();
     assert!(noop.changed_terms.is_empty());
     assert!(tx.counts.borrow().writes.is_empty());
@@ -143,12 +145,12 @@ fn reopened_singleton_loads_and_finalizes_its_container_once() {
     let index = Index::new(&HASH);
     let mut tx = Observed::new(db.begin_write().unwrap());
     let root = index
-        .apply(&mut tx, RootRef::Empty, [add(term(0), 1)])
+        .apply(&mut tx, 0, RootRef::Empty, [add(term(0), 1)])
         .unwrap()
         .root;
     tx.reset();
     index
-        .apply(&mut tx, root, [add(term(0), 2), add(term(0), 3)])
+        .apply(&mut tx, 0, root, [add(term(0), 2), add(term(0), 3)])
         .unwrap();
     assert_eq!(
         tx.counts.borrow().hits.get(&tables::BITMAP_CONTAINER),
@@ -161,12 +163,17 @@ fn reopened_singleton_loads_and_finalizes_its_container_once() {
 }
 
 #[test]
-fn failure_after_both_tries_change_is_rolled_back_with_flat_state() {
+fn failure_after_a_bitmap_trie_change_is_rolled_back_with_flat_state() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     let root = index
-        .apply(&mut tx, RootRef::Empty, [add(term(0), 1), add(term(1), 1)])
+        .apply(
+            &mut tx,
+            0,
+            RootRef::Empty,
+            [add(term(0), 1), add(term(1), 1)],
+        )
         .unwrap()
         .root;
     tx.commit().unwrap();
@@ -186,14 +193,15 @@ fn failure_after_both_tries_change_is_rolled_back_with_flat_state() {
     let mut tx = Observed::new(db.begin_write().unwrap());
     tx.fail_table = Some(tables::INDEX);
     assert!(matches!(
-        index.apply(&mut tx, root, [add(term(0), 65536)]),
+        index.apply(&mut tx, 0, root, [add(term(0), 65536)]),
         Err(IndexError::Storage(_))
     ));
     assert_eq!(
         tx.counts.borrow().writes.get(&tables::BITMAP_TRIE),
         Some(&1)
     );
-    assert_eq!(tx.counts.borrow().writes.get(&tables::INDEX_TRIE), Some(&1));
+    // Each term's `Index` row is written before the IndexTrie update.
+    assert_eq!(tx.counts.borrow().writes.get(&tables::INDEX_TRIE), None);
     tx.abort();
     let latest = db.begin_read().unwrap();
     for (table, old) in all_tables.into_iter().zip(before) {
@@ -205,7 +213,7 @@ fn failure_after_both_tries_change_is_rolled_back_with_flat_state() {
             old
         );
     }
-    assert_eq!(index.reopen(&latest, root.hash(&HASH)).unwrap(), root);
+    assert_eq!(index.reopen(&latest, root).unwrap(), root);
     let bitmap = index.bitmap(&latest, &term(0)).unwrap().unwrap();
     assert!(!bitmap.treemap().contains(65536));
     assert!(bitmap.treemap().contains(1));

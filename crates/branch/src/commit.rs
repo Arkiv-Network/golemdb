@@ -1,10 +1,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
-use golemdb_storage::WriteTransaction;
+use golemdb_storage::{Table, WriteTransaction};
 
 use crate::{
     BranchError, CommitId, Result, SealedCommit,
     head::{Head, read_head, write_head},
+    roots::{Roots, write_roots},
 };
 
 /// The writer has serialized with other publishers before this guard runs.
@@ -32,8 +33,11 @@ fn stage(tx: &mut impl WriteTransaction, origin: CommitId, sealed: &SealedCommit
         return Err(BranchError::Conflict);
     }
     for (table, rows) in &sealed.writes {
+        // `rows` is in key order, and this commit's version keys sort last.
+        let versioned = versioned(table);
         for (key, value) in rows {
             match value {
+                Some(value) if versioned => tx.append(*table, key, value)?,
                 Some(value) => tx.put(*table, key, value)?,
                 None => {
                     tx.delete(*table, key)?;
@@ -43,6 +47,11 @@ fn stage(tx: &mut impl WriteTransaction, origin: CommitId, sealed: &SealedCommit
     }
     // History and change-set tables remain deferred. Allocator/binding changes
     // already staged as cells participate in the same sealed write set.
+    let roots = Roots {
+        state: sealed.cells.root,
+        index: sealed.index.root,
+    };
+    write_roots(tx, sealed.commit_id, &roots)?;
     write_head(
         tx,
         &Head {
@@ -51,4 +60,10 @@ fn stage(tx: &mut impl WriteTransaction, origin: CommitId, sealed: &SealedCommit
             index_root: sealed.index_root,
         },
     )
+}
+
+/// Tables keyed by writing commit first, whose rows each commit appends.
+fn versioned(table: &Table) -> bool {
+    golemdb_cells::tables::VERSIONED.contains(table)
+        || golemdb_index::tables::VERSIONED.contains(table)
 }

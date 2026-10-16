@@ -14,7 +14,7 @@ use std::{
 };
 
 const SUPERBLOCK: Table = Table("Superblock");
-const TABLES: [Table; 7] = [
+const TABLES: [Table; 8] = [
     tables::CELL,
     tables::CELL_TRIE,
     golemdb_index::tables::INDEX,
@@ -22,6 +22,7 @@ const TABLES: [Table; 7] = [
     golemdb_index::tables::BITMAP_TRIE,
     golemdb_index::tables::BITMAP_CONTAINER,
     SUPERBLOCK,
+    Table("Roots"),
 ];
 fn key(name: &[u8]) -> CellKey {
     CellKey::new(64, CellNameRef::raw(name))
@@ -142,13 +143,13 @@ fn lifecycle(db: impl Store + Clone, hash: impl HashProvider + Copy) {
     );
     assert_eq!(
         Cells::new(&hash)
-            .reopen(&latest, sealed.state_root)
+            .reopen(&latest, sealed.cells.root)
             .unwrap(),
         sealed.cells.root
     );
     assert_eq!(
         Index::new(&hash)
-            .reopen(&latest, sealed.index_root)
+            .reopen(&latest, sealed.index.root)
             .unwrap(),
         sealed.index.root
     );

@@ -34,10 +34,13 @@ impl<H: HashProvider> Index<'_, H> {
     /// Apply postings with last-operation-wins semantics for each (term, ID).
     /// Coalesces containers and updates each affected term leaf once. The caller
     /// must supply the root matching this transaction's flat state; affected
-    /// term commitments are checked, but this is not a whole-index audit.
+    /// term commitments are checked, but this is not a whole-index audit. New
+    /// trie rows and containers are stored under `commit`, the commit this
+    /// batch publishes.
     pub fn apply(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         root: RootRef<INDEX_TRIE_PATH_BYTES>,
         changes: impl IntoIterator<Item = PostingChange>,
     ) -> Result<IndexUpdate> {
@@ -67,15 +70,26 @@ impl<H: HashProvider> Index<'_, H> {
         let mut changed_terms = Vec::new();
         for group in changes.chunk_by(|a, b| a.0 == b.0) {
             let term = &group[0].0;
-            let before = self.bitmap_root(tx, term)?;
+            let before_root = self.bitmap_root(tx, term)?;
+            let before = before_root.map(|root| root.hash(self.hasher));
             self.trie.check(tx, root, term, before)?;
-            let after = self.bitmaps.apply(
+            let after_root = self.bitmaps.apply(
                 tx,
-                before,
+                commit,
+                &term.routing_path(self.hasher),
+                before_root,
                 group.iter().map(|&(_, hi, lo, present)| (hi, lo, present)),
             )?;
+            let after = after_root.map(|root| root.hash(self.hasher));
             if before == after {
                 continue;
+            }
+            // Neither trie reads `Index`, so its row can change now.
+            match after_root {
+                Some(bitmap) => tx.put(tables::INDEX, term.as_bytes(), &bitmap.encode())?,
+                None => {
+                    tx.delete(tables::INDEX, term.as_bytes())?;
+                }
             }
             changed_terms.push(TermRootChange {
                 term: term.clone(),
@@ -87,19 +101,12 @@ impl<H: HashProvider> Index<'_, H> {
         // update for the whole batch writes each touched branch once.
         let root = self.trie.set(
             tx,
+            commit,
             root,
             changed_terms
                 .iter()
                 .map(|change| (&change.term, change.after)),
         )?;
-        for change in &changed_terms {
-            match change.after {
-                Some(hash) => tx.put(tables::INDEX, change.term.as_bytes(), &hash)?,
-                None => {
-                    tx.delete(tables::INDEX, change.term.as_bytes())?;
-                }
-            }
-        }
         Ok(IndexUpdate {
             root,
             changed_terms,

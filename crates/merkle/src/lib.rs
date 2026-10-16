@@ -24,8 +24,8 @@
 //! let mut tx = store.begin_write()?;
 //! let mut root = RootRef::Empty;
 //! for path in [[0; 6], [1; 6]] {
-//!     let leaf = LeafRef { path, hash: hash.hash_parts(&[&[EXAMPLE_LEAF_DOMAIN], &path, b"payload"]) };
-//!     root = trie.insert(&mut tx, root, leaf)?;
+//!     let leaf = LeafRef::new(path, hash.hash_parts(&[&[EXAMPLE_LEAF_DOMAIN], &path, b"payload"]));
+//!     root = trie.insert(&mut tx, 1, root, leaf)?;
 //! }
 //! tx.commit()?;
 //! let read = store.begin_read()?;
@@ -45,7 +45,7 @@ pub use config::{ConfigError, HashConfig};
 pub use error::{MerkleError, Result};
 pub use hash::{Blake3Hasher, Hash, HashAlgorithm, HashProvider, Keccak256Hasher};
 pub use node::BranchNodeCompact;
-pub use trie::{LeafRef, RootRef, Trie, Walk};
+pub use trie::{BranchRef, LeafRef, RootRef, Trie, Walk, node_key, version_key};
 
 #[cfg(test)]
 mod tests;

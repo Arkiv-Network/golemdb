@@ -17,6 +17,7 @@ fn round_trip(hasher: impl HashProvider) -> Hash {
     let root = index
         .apply(
             &mut tx,
+            0,
             RootRef::Empty,
             terms.iter().flat_map(|term| {
                 ids.map(|record_id| PostingChange::Add {
@@ -30,6 +31,7 @@ fn round_trip(hasher: impl HashProvider) -> Hash {
     let root = index
         .apply(
             &mut tx,
+            0,
             root,
             [PostingChange::Remove {
                 term: terms[0].clone(),
@@ -44,7 +46,7 @@ fn round_trip(hasher: impl HashProvider) -> Hash {
 
     let db = MdbxStore::open(dir.path()).unwrap();
     let read = db.begin_read().unwrap();
-    let reopened = index.reopen(&read, hash).unwrap();
+    let reopened = index.reopen(&read, root).unwrap();
     assert_eq!(reopened, root);
     for (i, term) in terms.iter().enumerate() {
         let expected = ids
@@ -67,6 +69,7 @@ fn round_trip(hasher: impl HashProvider) -> Hash {
     let update = index
         .apply(
             &mut tx,
+            0,
             reopened,
             terms.iter().flat_map(|term| {
                 ids.map(|record_id| PostingChange::Remove {
@@ -80,10 +83,7 @@ fn round_trip(hasher: impl HashProvider) -> Hash {
     assert_eq!(update.root.hash(&hasher), hasher.hash(b""));
     tx.commit().unwrap();
     let read = db.begin_read().unwrap();
-    assert_eq!(
-        index.reopen(&read, hasher.hash(b"")).unwrap(),
-        RootRef::Empty
-    );
+    assert_eq!(index.reopen(&read, RootRef::Empty).unwrap(), RootRef::Empty);
     for term in &terms {
         assert!(index.bitmap(&read, term).unwrap().is_none());
     }

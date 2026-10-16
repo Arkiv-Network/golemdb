@@ -81,8 +81,8 @@ impl BitmapContainer {
         Ok(out)
     }
 
-    /// `H(0x04 || hi48_be || canonical_roaring)`. This is also the key of the
-    /// persisted container row. Empty working chunks have no leaf hash.
+    /// `H(0x04 || hi48_be || canonical_roaring)`. Empty working chunks have no
+    /// leaf hash.
     pub fn leaf_hash(&self, hasher: &impl HashProvider) -> Result<Hash, BitmapError> {
         Ok(hasher.hash_parts(&[&[BITMAP_LEAF_DOMAIN], &self.canonical_bytes()?]))
     }

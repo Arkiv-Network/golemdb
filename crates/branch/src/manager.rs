@@ -74,8 +74,8 @@ struct Inner<S, H> {
 /// This increment does not initialize genesis, validate format/hash settings,
 /// authenticate entire tries, maintain history, or rewind the store. The supplied hash
 /// provider must match the deployment and is shared by all branch seals. External writers
-/// must publish cells and a strictly increasing head atomically; changing cells
-/// under an unchanged head or rewinding it violates this manager's contract.
+/// must publish cells, the head's `Roots` row and a strictly increasing head atomically;
+/// changing cells under an unchanged head or rewinding it violates this manager's contract.
 ///
 /// # Callback panics
 ///

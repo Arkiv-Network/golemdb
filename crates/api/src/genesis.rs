@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use golemdb_branch::{Head, read_head_state, write_head};
+use golemdb_branch::{CommitId, Head, Roots, head_roots, read_head_state, write_head, write_roots};
 use golemdb_cells::{CellChange, CellKey, CellNameRef, CellValue, Cells, reserved, system, tables};
 use golemdb_index::Index;
 use golemdb_merkle::{Hash, HashAlgorithm, HashProvider, RootRef};
@@ -100,8 +100,10 @@ pub(crate) fn prepare(
         )?;
         tx.put(SUPERBLOCK, b"roaring", &ROARING.to_be_bytes())?;
         tx.put(SUPERBLOCK, b"genesis_id", &genesis_id)?;
+        let commit_id = CommitId::GENESIS;
         let update = Cells::new(hasher).apply(
             tx,
+            commit_id.get(),
             RootRef::Empty,
             cells
                 .into_iter()
@@ -110,10 +112,15 @@ pub(crate) fn prepare(
         // Every genesis cell is a field, so IndexRoot is the canonical empty root.
         // #roots cannot contain its own roots and has no history entries at commit 0.
         let head = Head {
-            commit_id: crate::CommitId::GENESIS,
+            commit_id,
             state_root: update.root.hash(hasher),
             index_root: hasher.hash(&[]),
         };
+        let roots = Roots {
+            state: update.root,
+            index: RootRef::Empty,
+        };
+        write_roots(tx, head.commit_id, &roots)?;
         write_head(tx, &head)?;
         return Ok(OpenInfo::new(true, head, genesis_id));
     }
@@ -158,8 +165,9 @@ fn validate_state(
     hasher: &impl HashProvider,
 ) -> OpenResult<()> {
     let cells = Cells::new(hasher);
-    let root = cells.reopen(tx, head.state_root)?;
-    Index::new(hasher).reopen(tx, head.index_root)?;
+    let roots = head_roots(tx, head, hasher)?;
+    let root = cells.reopen(tx, roots.state)?;
+    Index::new(hasher).reopen(tx, roots.index)?;
     let allocator = cells
         .get(tx, &allocator_key())?
         .ok_or(OpenError::CorruptState("missing allocator"))?;
@@ -216,6 +224,7 @@ fn validate_state(
     // committed trie paths. This performs no writes and does not rebuild genesis.
     cells.apply(
         tx,
+        head.commit_id.get(),
         root,
         expected
             .into_iter()
