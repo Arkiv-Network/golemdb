@@ -438,3 +438,392 @@ fn projection_skips_invalid_unselected_payload_and_supports_column_63() {
             .is_err()
     );
 }
+
+#[test]
+fn end_ordinal_at_uses_latest_range_within_segment_and_commit_bound() {
+    let db = MemoryStore::new();
+    let mut tx = db.begin_write().unwrap();
+    metadata::record_commit_range(&mut tx, 0, 3, 0..5).unwrap();
+    metadata::record_commit_range(&mut tx, 0, 8, 5..9).unwrap();
+    metadata::record_commit_range(&mut tx, 1, 2, 0..20).unwrap();
+    metadata::record_commit_range(&mut tx, 1, u64::MAX, 20..u64::MAX).unwrap();
+    for (segment, commit, expected) in [
+        (0, 0, 0),
+        (0, 3, 5),
+        (0, 7, 5),
+        (0, 8, 9),
+        (0, u64::MAX, 9),
+        (1, 1, 0),
+        (1, 2, 20),
+        (1, 8, 20),
+        (1, u64::MAX, u64::MAX),
+        (2, u64::MAX, 0),
+    ] {
+        assert_eq!(
+            metadata::end_ordinal_at(&tx, segment, commit).unwrap(),
+            expected
+        );
+    }
+    let key = [0u32.to_be_bytes().as_slice(), &8u64.to_be_bytes()].concat();
+    tx.put(metadata::COMMIT_RANGES, &key, b"bad").unwrap();
+    assert!(matches!(
+        metadata::end_ordinal_at(&tx, 0, 9),
+        Err(ImmutableDataStorageError::Corrupt(_))
+    ));
+    assert_eq!(metadata::end_ordinal_at(&tx, 0, 7).unwrap(), 5);
+    tx.put(metadata::COMMIT_RANGES, &2u32.to_be_bytes(), &[0; 16])
+        .unwrap();
+    assert!(matches!(
+        metadata::end_ordinal_at(&tx, 2, 9),
+        Err(ImmutableDataStorageError::Corrupt(_))
+    ));
+}
+
+#[test]
+fn recovery_trims_partial_and_synced_tails_and_is_idempotent() {
+    use std::io::Write;
+    for compression in [
+        ImmutableDataCompression::None,
+        ImmutableDataCompression::Lz4,
+        ImmutableDataCompression::Zstd,
+    ] {
+        for damage in [
+            "data",
+            "offsets",
+            "config",
+            "recovery_offsets",
+            "recovery_data",
+            "new_file",
+            "new_file_without_config",
+            "tmp_only",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = MemoryStore::new();
+            {
+                let mut storage =
+                    ImmutableDataStorage::open(config(compression), [7; 32], dir.path()).unwrap();
+                storage.append("events_v1", 1, &row(42)).unwrap();
+                storage.sync().unwrap();
+                let mut tx = db.begin_write().unwrap();
+                storage
+                    .record_commit_range(&mut tx, "events_v1", 1, 0..1)
+                    .unwrap();
+                tx.commit().unwrap();
+                if damage == "config" || damage.starts_with("recovery_") {
+                    let data = path(dir.path(), 0);
+                    let data_len = fs::metadata(&data).unwrap().len();
+                    let offsets_len = fs::metadata(data.with_extension("off")).unwrap().len();
+                    storage.append("events_v1", 2, &row(43)).unwrap();
+                    storage.sync().unwrap();
+                    // Simulate recovery interrupted after offsets, or after both
+                    // files, were trimmed but before the config was replaced.
+                    if damage.starts_with("recovery_") {
+                        fs::OpenOptions::new()
+                            .write(true)
+                            .open(data.with_extension("off"))
+                            .unwrap()
+                            .set_len(offsets_len)
+                            .unwrap();
+                    }
+                    if damage == "recovery_data" {
+                        fs::OpenOptions::new()
+                            .write(true)
+                            .open(data)
+                            .unwrap()
+                            .set_len(data_len)
+                            .unwrap();
+                    }
+                }
+                if damage.starts_with("new_file") {
+                    storage.append("events_v1", 4, &row(43)).unwrap();
+                    storage.sync().unwrap();
+                }
+            }
+            let data = path(dir.path(), 0);
+            if damage == "data" || damage == "offsets" {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&data)
+                    .unwrap()
+                    .write_all(b"partial data")
+                    .unwrap();
+            }
+            if damage == "offsets" {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(data.with_extension("off"))
+                    .unwrap()
+                    .write_all(&[255; 5])
+                    .unwrap();
+            }
+            if damage == "new_file_without_config" {
+                fs::remove_file(path(dir.path(), 4).with_extension("conf")).unwrap();
+                fs::write(path(dir.path(), 4).with_extension("tmp"), b"torn config").unwrap();
+            }
+            if damage == "tmp_only" {
+                fs::write(path(dir.path(), 4).with_extension("tmp"), b"torn config").unwrap();
+            }
+            let mut storage =
+                ImmutableDataStorage::open(config(compression), [7; 32], dir.path()).unwrap();
+            let tx = db.begin_read().unwrap();
+            storage.recover(&tx, 3).unwrap();
+            storage.recover(&tx, 3).unwrap();
+            assert_eq!(storage.end_ordinal("events_v1").unwrap(), 1, "{damage}");
+            assert_eq!(number(&storage, 0), 42);
+            assert!(!path(dir.path(), 4).exists());
+            assert!(!path(dir.path(), 4).with_extension("tmp").exists());
+            assert_eq!(storage.append("events_v1", 4, &row(44)).unwrap(), 1);
+            storage.sync().unwrap();
+        }
+    }
+}
+
+#[test]
+fn recovery_resets_a_failed_active_writer_after_transient_sync_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = MemoryStore::new();
+    let mut storage =
+        ImmutableDataStorage::open(config(ImmutableDataCompression::None), [7; 32], dir.path())
+            .unwrap();
+    storage.append("events_v1", 1, &row(42)).unwrap();
+    storage.sync().unwrap();
+    let mut tx = db.begin_write().unwrap();
+    storage
+        .record_commit_range(&mut tx, "events_v1", 1, 0..1)
+        .unwrap();
+    tx.commit().unwrap();
+    storage.append("events_v1", 2, &row(43)).unwrap();
+    let temporary = path(dir.path(), 0).with_extension("tmp");
+    fs::create_dir(&temporary).unwrap(); // make atomic config replacement fail
+    assert!(storage.sync().is_err());
+    fs::remove_dir(&temporary).unwrap();
+    storage.recover(&db.begin_read().unwrap(), 1).unwrap();
+    assert_eq!(number(&storage, 0), 42);
+    assert_eq!(storage.append("events_v1", 2, &row(44)).unwrap(), 1);
+    storage.sync().unwrap();
+}
+
+#[test]
+fn recovery_never_discards_missing_committed_data_or_future_metadata() {
+    for damage in ["missing", "short", "future", "gap"] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MemoryStore::new();
+        let mut storage =
+            ImmutableDataStorage::open(config(ImmutableDataCompression::None), [7; 32], dir.path())
+                .unwrap();
+        storage.append("events_v1", 1, &row(42)).unwrap();
+        storage.sync().unwrap();
+        let mut tx = db.begin_write().unwrap();
+        metadata::record_commit_range(
+            &mut tx,
+            0,
+            if damage == "future" { 2 } else { 1 },
+            if damage == "gap" { 1..2 } else { 0..1 },
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        if damage == "missing" {
+            fs::remove_file(path(dir.path(), 0)).unwrap();
+        }
+        if damage == "short" {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path(dir.path(), 0))
+                .unwrap()
+                .set_len(1)
+                .unwrap();
+        }
+        let conf = fs::read(path(dir.path(), 0).with_extension("conf")).unwrap();
+        assert!(
+            storage.recover(&db.begin_read().unwrap(), 1).is_err(),
+            "{damage}"
+        );
+        assert_eq!(
+            fs::read(path(dir.path(), 0).with_extension("conf")).unwrap(),
+            conf
+        );
+    }
+}
+
+#[test]
+fn committed_reader_ignores_unflushed_and_partial_tails_without_flushing_writer() {
+    use std::io::Write;
+    for compression in [
+        ImmutableDataCompression::None,
+        ImmutableDataCompression::Lz4,
+        ImmutableDataCompression::Zstd,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MemoryStore::new();
+        let mut storage =
+            ImmutableDataStorage::open(config(compression), [7; 32], dir.path()).unwrap();
+        storage.append("events_v1", 1, &row(42)).unwrap();
+        storage.sync().unwrap();
+        let mut tx = db.begin_write().unwrap();
+        storage
+            .record_commit_range(&mut tx, "events_v1", 1, 0..1)
+            .unwrap();
+        storage
+            .bind_key(&mut tx, "events_v1", ImmutableDataKey([1; 32]), 0)
+            .unwrap();
+        tx.commit().unwrap();
+        let reader = storage.reader();
+        let tx = db.begin_read().unwrap();
+        let conf = fs::read(path(dir.path(), 0).with_extension("conf")).unwrap();
+        storage.append("events_v1", 2, &row(43)).unwrap();
+        // A process may be partway through data and offset writes. None of this
+        // tail belongs to the reader's committed prefix or should be flushed by it.
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path(dir.path(), 0))
+            .unwrap()
+            .write_all(b"partial data")
+            .unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(path(dir.path(), 0).with_extension("off"))
+            .unwrap()
+            .write_all(&[255; 5])
+            .unwrap();
+        // Global head could be 9 with no segment rows since commit 1. A partially
+        // created file in span 4 must still be ignored using this segment's bound.
+        fs::write(path(dir.path(), 4), b"partial new file").unwrap();
+        fs::write(path(dir.path(), 4).with_extension("off"), [8]).unwrap();
+        for address in [
+            ImmutableDataAddress::Ordinal(0),
+            ImmutableDataAddress::Key(ImmutableDataKey([1; 32])),
+        ] {
+            assert_eq!(
+                reader
+                    .get(
+                        &tx,
+                        9,
+                        "events_v1",
+                        address,
+                        &ImmutableDataReadOptions::columns(["number"])
+                    )
+                    .unwrap()
+                    .get::<u64>("number")
+                    .unwrap(),
+                42
+            );
+        }
+        assert_eq!(
+            reader
+                .rows_of(&tx, 9, "events_v1", 1, &ImmutableDataReadOptions::all())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            reader.get(
+                &tx,
+                9,
+                "events_v1",
+                ImmutableDataAddress::Ordinal(1),
+                &ImmutableDataReadOptions::all()
+            ),
+            Err(ImmutableDataStorageError::NotFound)
+        ));
+        assert_eq!(
+            fs::read(path(dir.path(), 0).with_extension("conf")).unwrap(),
+            conf
+        );
+        storage.recover(&tx, 9).unwrap();
+        assert_eq!(storage.end_ordinal("events_v1").unwrap(), 1);
+        assert_eq!(
+            reader
+                .get(
+                    &tx,
+                    9,
+                    "events_v1",
+                    ImmutableDataAddress::Ordinal(0),
+                    &ImmutableDataReadOptions::all()
+                )
+                .unwrap()
+                .get::<u64>("number")
+                .unwrap(),
+            42
+        );
+    }
+}
+
+#[test]
+fn reader_keeps_directory_owned_after_writer_drops() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = MemoryStore::new();
+    let cfg = config(ImmutableDataCompression::None);
+    let mut storage = ImmutableDataStorage::open(cfg.clone(), [7; 32], dir.path()).unwrap();
+    storage.append("events_v1", 1, &row(42)).unwrap();
+    storage.sync().unwrap();
+    let mut tx = db.begin_write().unwrap();
+    storage
+        .record_commit_range(&mut tx, "events_v1", 1, 0..1)
+        .unwrap();
+    tx.commit().unwrap();
+    let reader = storage.reader();
+    let last = reader.clone();
+    drop(reader);
+    drop(storage);
+    assert!(ImmutableDataStorage::open(cfg.clone(), [7; 32], dir.path()).is_err());
+    assert_eq!(
+        last.get(
+            &db.begin_read().unwrap(),
+            1,
+            "events_v1",
+            ImmutableDataAddress::Ordinal(0),
+            &ImmutableDataReadOptions::all()
+        )
+        .unwrap()
+        .get::<u64>("number")
+        .unwrap(),
+        42
+    );
+    drop(last);
+    assert!(ImmutableDataStorage::open(cfg, [7; 32], dir.path()).is_ok());
+}
+
+#[test]
+fn committed_reader_decodes_high_expansion_columns_and_preserves_projection_order() {
+    for compression in [
+        ImmutableDataCompression::None,
+        ImmutableDataCompression::Lz4,
+        ImmutableDataCompression::Zstd,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MemoryStore::new();
+        let mut storage =
+            ImmutableDataStorage::open(config(compression), [7; 32], dir.path()).unwrap();
+        let body = vec![7; 128 * 1024];
+        let large =
+            ImmutableDataRow::new(vec![CellValue::from_u64(42), CellValue::from_bytes(&body)]);
+        storage.append("events_v1", 1, &large).unwrap();
+        storage.sync().unwrap();
+        let mut tx = db.begin_write().unwrap();
+        storage
+            .record_commit_range(&mut tx, "events_v1", 1, 0..1)
+            .unwrap();
+        tx.commit().unwrap();
+        let reader = storage.reader();
+        let tx = db.begin_read().unwrap();
+        let selected = reader
+            .get(
+                &tx,
+                1,
+                "events_v1",
+                ImmutableDataAddress::Ordinal(0),
+                &ImmutableDataReadOptions::columns(["body", "number"]),
+            )
+            .unwrap();
+        assert_eq!(selected.get::<Vec<u8>>("body").unwrap(), body);
+        assert_eq!(selected.get::<u64>("number").unwrap(), 42);
+        assert_eq!(
+            selected
+                .iter()
+                .unwrap()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["body", "number"]
+        );
+    }
+}

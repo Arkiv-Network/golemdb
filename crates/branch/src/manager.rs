@@ -7,12 +7,16 @@ use std::{
     },
 };
 
+use golemdb_immutable_data::{ImmutableDataKey, ImmutableDataRow, ImmutableDataStorage};
 use golemdb_merkle::HashProvider;
 use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{
     BranchError, BranchId, BranchInfo, CellRead, CellWrite, CommitId, OperationError, Result,
-    SealedCommit, head::read_head, overlay::CellOverlay,
+    SealedCommit,
+    head::read_head,
+    immutable::{ImmutableSegments, ImmutableStaging},
+    overlay::CellOverlay,
 };
 
 // A process-wide counter prevents handle aliasing between independent managers,
@@ -22,6 +26,7 @@ static NEXT_BRANCH_ID: AtomicU64 = AtomicU64::new(0);
 struct BranchState {
     commit_id: CommitId,
     overlay: CellOverlay,
+    immutable_data: ImmutableStaging,
     sealed: Option<Arc<SealedCommit>>,
 }
 
@@ -50,13 +55,22 @@ impl BranchState {
 
 type Entry = Arc<Mutex<Option<BranchState>>>;
 
+/// Persistent immutable storage, locked through commit and any file recovery.
+pub(crate) struct ImmutableWriter {
+    pub storage: ImmutableDataStorage,
+    // Set before file changes; cleared only on a resolved outcome and cleanup.
+    pub recovery_required: bool,
+}
+
 struct Inner<S, H> {
     hasher: H,
     store: S,
     branches: Mutex<BTreeMap<BranchId, Entry>>,
+    immutable_segments: ImmutableSegments,
+    immutable_writer: Option<Mutex<ImmutableWriter>>,
 }
 
-/// Head-only branch lifecycle, metadata, and guarded access to cell working state.
+/// Head-only lifecycle with guarded cell state and independent immutable batches.
 ///
 /// Clones share the registry and store. Each branch has its own lock, held
 /// for an entire operation; independent branches can execute concurrently when
@@ -76,6 +90,8 @@ struct Inner<S, H> {
 /// provider must match the deployment and is shared by all branch seals. External writers
 /// must publish cells and a strictly increasing head atomically; changing cells
 /// under an unchanged head or rewinding it violates this manager's contract.
+/// When physical immutable storage is attached, only this manager and its clones
+/// may publish head or immutable metadata; independent publishers are unsupported.
 ///
 /// # Callback panics
 ///
@@ -106,19 +122,41 @@ impl<S, H> Clone for Branches<S, H> {
 }
 
 impl<S: Store, H: HashProvider> Branches<S, H> {
-    /// Open a manager over an initialized head. Performs no writes and fails
-    /// if the head is missing, malformed, or unreadable.
-    pub fn new(store: S, hasher: H) -> Result<Self> {
+    /// Open a manager over an initialized head. `None` disables immutable data.
+    /// Takes ownership of supplied immutable storage and recovers it to the durable
+    /// head before returning. Its genesis declarations and identity must match the store.
+    /// Obtain any independent reader with `storage.reader()` before transferring
+    /// ownership, and use it only after this constructor succeeds.
+    /// Only this manager and its clones may publish head or immutable metadata
+    /// while it owns immutable storage. The store must provide durable commit
+    /// and authoritative snapshots after commit errors.
+    /// A missing, malformed or unreadable head is rejected before recovery.
+    pub fn new(store: S, hasher: H, immutable_data: Option<ImmutableDataStorage>) -> Result<Self> {
         {
             let tx = store.begin_read()?;
             read_head(&tx)?;
         }
+        let mut inner = Inner {
+            store,
+            hasher,
+            branches: Mutex::new(BTreeMap::new()),
+            immutable_segments: ImmutableSegments::default(),
+            immutable_writer: None,
+        };
+        if let Some(mut storage) = immutable_data {
+            let segments = ImmutableSegments::new(storage.config().clone())?;
+            // Exclude publishers while recovering against an authoritative snapshot.
+            let tx = inner.store.begin_write()?;
+            storage.recover(&tx, read_head(&tx)?.get())?;
+            drop(tx);
+            inner.immutable_segments = segments;
+            inner.immutable_writer = Some(Mutex::new(ImmutableWriter {
+                storage,
+                recovery_required: false,
+            }));
+        }
         Ok(Self {
-            inner: Arc::new(Inner {
-                store,
-                hasher,
-                branches: Mutex::new(BTreeMap::new()),
-            }),
+            inner: Arc::new(inner),
         })
     }
 
@@ -144,6 +182,7 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
         let state = BranchState {
             commit_id: self.head()?,
             overlay: CellOverlay::new(),
+            immutable_data: ImmutableStaging::default(),
             sealed: None,
         };
         let branch_id = allocate_branch_id(&NEXT_BRANCH_ID)?;
@@ -222,6 +261,45 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
         })?
     }
 
+    /// Stage a complete row before or after seal, without writing files or KV.
+    /// Ordinals start at the published segment end and remain provisional. Keys
+    /// are unique against published bindings and this branch's own pending rows.
+    /// This operation never changes cell checkpoints or BranchInfo::version.
+    pub fn immutable_data_append(
+        &self,
+        branch_id: BranchId,
+        segment: &str,
+        key: Option<ImmutableDataKey>,
+        row: ImmutableDataRow,
+    ) -> Result<u64> {
+        self.with_branch(branch_id, |state, origin| {
+            let segment = self.inner.immutable_segments.get(segment)?;
+            state
+                .immutable_data
+                .append(origin, state.commit_id.get(), segment, key, row)
+                .map_err(BranchError::from)
+        })?
+    }
+
+    /// Remove only this branch's pending tail [from_ordinal, staged_end), before
+    /// or after seal. The bound must lie between the origin's published end and
+    /// the staged end, inclusive. Removed keys and ordinals become reusable in
+    /// this branch. Live cells, their checkpoints and committed rows are untouched.
+    pub fn immutable_data_truncate(
+        &self,
+        branch_id: BranchId,
+        segment: &str,
+        from_ordinal: u64,
+    ) -> Result<()> {
+        self.with_branch(branch_id, |state, origin| {
+            let segment = self.inner.immutable_segments.get(segment)?;
+            state
+                .immutable_data
+                .truncate(origin, state.commit_id.get(), segment, from_ordinal)
+                .map_err(BranchError::from)
+        })?
+    }
+
     /// Validate the head, then undo one frame in memory. Only admission reads
     /// storage; the inverse replay itself performs no storage access.
     pub fn rollback(&self, branch_id: BranchId) -> Result<()> {
@@ -254,6 +332,12 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
     /// retains the sealed result for retry or discard, subject to head validation.
     /// A live branch whose origin lost the race returns Conflict and is consumed.
     /// Unknown or already invalidated/consumed handles return HandleInvalid.
+    /// With physical immutable storage attached, publication appends and syncs
+    /// files, then atomically publishes cells, index,
+    /// keys, ranges and head. A failed transaction is resolved against durable
+    /// metadata before removing unpublished tails. Unresolved outcomes or failed
+    /// recovery block further publication until reopen and recovery. Independent
+    /// readers can still read intact committed prefixes from published snapshots.
     ///
     /// # Panics
     ///
@@ -264,12 +348,38 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
     /// the publication outcome and backend usability depend on that backend. The
     /// manager does not guarantee rollback or safe retry in that case. The recovery
     /// limits on [`Branches`] also apply.
+    /// A panic during file/metadata publication blocks further publication;
+    /// reopen to recover.
     pub fn commit(&self, branch_id: BranchId) -> Result<CommitId> {
         self.with_slot(branch_id, BranchError::Conflict, |slot, origin| {
             let state = slot.as_mut().ok_or(BranchError::HandleInvalid)?;
             let sealed = state.seal(origin, &self.inner.hasher)?;
-            let tx = self.inner.store.begin_write()?;
-            match crate::commit::persist(tx, state.commit_id, &sealed) {
+            let outcome = if let Some(writer) = &self.inner.immutable_writer {
+                let mut writer = writer
+                    .lock()
+                    .map_err(|_| BranchError::Poisoned("immutable writer"))?;
+                // Release the writer lock before propagating panics. File
+                // publication remains blocked until reopen/recovery after a panic.
+                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                    crate::commit::publish(
+                        &mut writer,
+                        &self.inner.store,
+                        state.commit_id,
+                        &sealed,
+                        &state.immutable_data,
+                        &self.inner.immutable_segments,
+                    )
+                }));
+                drop(writer);
+                match outcome {
+                    Ok(result) => result,
+                    Err(panic) => resume_unwind(panic),
+                }
+            } else {
+                // Without immutable files, the store writer serializes commits.
+                crate::commit::persist(self.inner.store.begin_write()?, state.commit_id, &sealed)
+            };
+            match outcome {
                 Ok(commit_id) => {
                     *slot = None;
                     // Publication has succeeded. Registry housekeeping must not
@@ -367,6 +477,10 @@ fn allocate_branch_id(counter: &AtomicU64) -> Result<BranchId> {
         .map(BranchId::new)
         .map_err(|_| BranchError::BranchNumberExhausted)
 }
+
+#[cfg(test)]
+#[path = "tests/immutable.rs"]
+mod immutable_tests;
 
 #[cfg(test)]
 mod tests {

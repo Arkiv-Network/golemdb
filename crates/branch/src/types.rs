@@ -81,6 +81,7 @@ pub struct BranchInfo {
     /// Rollback reduces this count; failed operations restore it. An identical
     /// write to an existing overlay entry adds no undo entry.
     pub version: u64,
-    /// Whether seal has computed and frozen the branch.
+    /// Whether seal has computed and frozen live cell state. Immutable-data
+    /// batches remain editable and are excluded from `version`.
     pub sealed: bool,
 }

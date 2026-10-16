@@ -118,7 +118,7 @@ fn invalid_attribute_failure_keeps_overlay_and_frames_retryable() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
     let before = snapshot(&db);
-    let branches = Branches::new(ReadOnly::new(db.clone()), Keccak256Hasher).unwrap();
+    let branches = Branches::new(ReadOnly::new(db.clone()), Keccak256Hasher, None).unwrap();
     let branch = branches.begin().unwrap();
     branches
         .write(branch, |cells| {
@@ -152,7 +152,7 @@ fn panicking_seal_does_not_freeze_or_poison_the_branch() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
     let fail = Arc::new(AtomicBool::new(true));
-    let branches = Branches::new(ReadOnly::new(db), PanicHasher(fail.clone())).unwrap();
+    let branches = Branches::new(ReadOnly::new(db), PanicHasher(fail.clone()), None).unwrap();
     let branch = branches.begin().unwrap();
     assert!(std::panic::catch_unwind(AssertUnwindSafe(|| branches.seal(branch))).is_err());
     assert!(!branches.branch_info(branch).unwrap().sealed);
@@ -164,10 +164,10 @@ fn panicking_seal_does_not_freeze_or_poison_the_branch() {
 fn stale_sealed_branches_and_commit_number_overflow_are_rejected() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
-    let branches = Branches::new(ReadOnly::new(db.clone()), Keccak256Hasher).unwrap();
+    let branches = Branches::new(ReadOnly::new(db.clone()), Keccak256Hasher, None).unwrap();
     let branch = branches.begin().unwrap();
     let sealed = branches.seal(branch).unwrap();
-    let publisher = Branches::new(db.clone(), Keccak256Hasher).unwrap();
+    let publisher = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
     publisher.commit(publisher.begin().unwrap()).unwrap();
     assert!(matches!(
         branches.seal(branch),
@@ -195,7 +195,7 @@ fn stale_sealed_branches_and_commit_number_overflow_are_rejected() {
 fn wrong_roots_and_duplicate_lag_one_cell_fail_without_freezing() {
     let db = MemoryStore::new();
     seed(&db, &Blake3Hasher, 0, &[]);
-    let branches = Branches::new(ReadOnly::new(db), Keccak256Hasher).unwrap();
+    let branches = Branches::new(ReadOnly::new(db), Keccak256Hasher, None).unwrap();
     let branch = branches.begin().unwrap();
     assert!(matches!(branches.seal(branch), Err(BranchError::Cells(_))));
     assert!(!branches.branch_info(branch).unwrap().sealed);
@@ -207,7 +207,7 @@ fn wrong_roots_and_duplicate_lag_one_cell_fail_without_freezing() {
         0,
         &[(key(2, &0u64.to_be_bytes()), value("already exists", false))],
     );
-    let branches = Branches::new(ReadOnly::new(db), Keccak256Hasher).unwrap();
+    let branches = Branches::new(ReadOnly::new(db), Keccak256Hasher, None).unwrap();
     let branch = branches.begin().unwrap();
     assert!(matches!(
         branches.seal(branch),
@@ -243,7 +243,7 @@ fn explicit_seal_is_not_recomputed_by_commit() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
     let fail = Arc::new(AtomicBool::new(false));
-    let branches = Branches::new(db, SwitchHash(fail.clone())).unwrap();
+    let branches = Branches::new(db, SwitchHash(fail.clone()), None).unwrap();
     let branch = stage(&branches, "Alice");
     branches.seal(branch).unwrap();
     fail.store(true, Ordering::Relaxed);
@@ -255,7 +255,7 @@ fn implicit_seal_failure_keeps_branch_open_and_never_opens_writer() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
     let controlled = ReadOnly::new(db);
-    let branches = Branches::new(controlled, Keccak256Hasher).unwrap();
+    let branches = Branches::new(controlled, Keccak256Hasher, None).unwrap();
     let branch = branches.begin().unwrap();
     branches
         .write(branch, |cells| {
@@ -309,7 +309,7 @@ fn bitmap_roots(db: &impl Store) -> Vec<Hash> {
 fn commits_store_only_trie_rows_reachable_from_committed_roots() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
-    let branches = Branches::new(db, Keccak256Hasher).unwrap();
+    let branches = Branches::new(db, Keccak256Hasher, None).unwrap();
     let genesis = crate::head::read_head_state(&branches.store().begin_read().unwrap()).unwrap();
     let (mut states, mut indexes) = (vec![genesis.state_root], vec![genesis.index_root]);
     let mut bitmaps = bitmap_roots(branches.store());

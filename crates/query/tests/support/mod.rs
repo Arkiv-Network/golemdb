@@ -5,8 +5,8 @@
 #![allow(dead_code)] // Each test crate uses a different subset.
 
 use golemdb_api::{
-    Api, ApiError, CellLimits, CountOp, Database, Filter, Genesis, HashAlgorithm,
-    ImmutableDataConfig, QueryOp, RecordKey, RecordOp, op,
+    Api, ApiError, CellLimits, CountOp, Database, Filter, Genesis, HashAlgorithm, QueryOp,
+    RecordKey, RecordOp, op,
 };
 use std::{cmp::Ordering, ops::Bound};
 
@@ -24,11 +24,7 @@ impl Default for TestDb {
             max_str_len: 4096,
             max_bytes_len: 64,
         };
-        let genesis = Genesis::new(
-            HashAlgorithm::Keccak256,
-            limits,
-            ImmutableDataConfig::new(500_000, vec![]),
-        );
+        let genesis = Genesis::new(HashAlgorithm::Keccak256, limits, None);
         Self {
             db: Database::open_memory(&genesis).expect("genesis"),
         }

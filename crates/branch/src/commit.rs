@@ -1,10 +1,13 @@
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
-use golemdb_storage::WriteTransaction;
+use golemdb_immutable_data::{ImmutableDataStorageError as DataError, metadata};
+use golemdb_storage::{Store, WriteTransaction};
 
 use crate::{
     BranchError, CommitId, Result, SealedCommit,
-    head::{Head, read_head, write_head},
+    head::{Head, read_head, read_head_state, write_head},
+    immutable::{ImmutableSegments, ImmutableStaging},
+    manager::ImmutableWriter,
 };
 
 /// The writer has serialized with other publishers before this guard runs.
@@ -27,7 +30,11 @@ pub(crate) fn persist(
     Ok(sealed.commit_id)
 }
 
-fn stage(tx: &mut impl WriteTransaction, origin: CommitId, sealed: &SealedCommit) -> Result<()> {
+pub(crate) fn stage(
+    tx: &mut impl WriteTransaction,
+    origin: CommitId,
+    sealed: &SealedCommit,
+) -> Result<()> {
     if read_head(tx)? != origin {
         return Err(BranchError::Conflict);
     }
@@ -51,4 +58,120 @@ fn stage(tx: &mut impl WriteTransaction, origin: CommitId, sealed: &SealedCommit
             index_root: sealed.index_root,
         },
     )
+}
+
+/// Called with the immutable writer lock held through outcome resolution
+/// and rollback. Committed readers use their own handles and never take this lock.
+pub(crate) fn publish(
+    writer: &mut ImmutableWriter,
+    store: &impl Store,
+    origin: CommitId,
+    sealed: &SealedCommit,
+    staged: &ImmutableStaging,
+    segments: &ImmutableSegments,
+) -> Result<CommitId> {
+    if writer.recovery_required {
+        return Err(BranchError::RecoveryRequired);
+    }
+    let storage = &mut writer.storage;
+    let mut tx = store.begin_write()?;
+    let before = read_head_state(&tx)?;
+    if before.commit_id != origin {
+        return Err(BranchError::Conflict);
+    }
+    writer.recovery_required = true;
+    let mut attempted_commit = false;
+    let outcome = (|| -> Result<()> {
+        crate::commit::stage(&mut tx, origin, sealed)?;
+        for (id, batch) in staged.batches() {
+            let name = segments.by_id(id).schema.name();
+            if metadata::end_ordinal_at(&tx, id, origin.get())? != batch.first_ordinal
+                || storage.end_ordinal(name)? != batch.first_ordinal
+            {
+                return Err(DataError::Corrupt(
+                    "staged ordinal disagrees with published or physical end",
+                )
+                .into());
+            }
+            for (offset, (key, row)) in batch.rows.iter().enumerate() {
+                let ordinal = storage.append(name, sealed.commit_id.get(), row)?;
+                if ordinal != batch.first_ordinal + offset as u64 {
+                    return Err(
+                        DataError::Corrupt("physical ordinal changed during publication").into(),
+                    );
+                }
+                if let Some(key) = key {
+                    metadata::bind_key(&mut tx, id, *key, ordinal)?;
+                }
+            }
+            metadata::record_commit_range(
+                &mut tx,
+                id,
+                sealed.commit_id.get(),
+                batch.first_ordinal..batch.end()?,
+            )?;
+        }
+        if !staged.is_empty() {
+            storage.sync()?;
+        }
+        attempted_commit = true;
+        tx.commit()?;
+        Ok(())
+    })();
+    match outcome {
+        Ok(()) => {
+            writer.recovery_required = false;
+            Ok(sealed.commit_id)
+        }
+        Err(failure) => {
+            // Dropping/consuming the first transaction released its writer.
+            // Reacquire exclusivity before resolving an uncertain outcome.
+            let resolution = (|| -> Result<bool> {
+                let tx = store.begin_write()?;
+                let actual = read_head_state(&tx)?;
+                let expected = Head {
+                    commit_id: sealed.commit_id,
+                    state_root: sealed.state_root,
+                    index_root: sealed.index_root,
+                };
+                if attempted_commit && actual == expected {
+                    for (id, batch) in staged.batches() {
+                        if metadata::commit_range(&tx, id, sealed.commit_id.get())?
+                            != Some(batch.first_ordinal..batch.end()?)
+                        {
+                            return Err(BranchError::RecoveryRequired);
+                        }
+                        for (offset, (key, _)) in batch.rows.iter().enumerate() {
+                            if let Some(key) = key
+                                && metadata::ordinal_for_key(&tx, id, *key)?
+                                    != Some(batch.first_ordinal + offset as u64)
+                            {
+                                return Err(BranchError::RecoveryRequired);
+                            }
+                        }
+                    }
+                    Ok(true)
+                } else if actual == before {
+                    storage.recover(&tx, before.commit_id.get())?;
+                    Ok(false)
+                } else {
+                    Err(BranchError::RecoveryRequired)
+                }
+            })();
+            match resolution {
+                Ok(committed) => {
+                    writer.recovery_required = false;
+                    if committed {
+                        Ok(sealed.commit_id)
+                    } else {
+                        Err(failure)
+                    }
+                }
+                Err(recovery) => Err(BranchError::PublicationRecovery {
+                    publication: Box::new(failure),
+                    recovery: Box::new(recovery),
+                }),
+            }
+        }
+    }
 }

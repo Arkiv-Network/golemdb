@@ -105,3 +105,40 @@ fn query_errors_map_to_public_errors() {
         ApiError::StoreFull
     ));
 }
+
+#[test]
+fn immutable_failures_keep_input_integrity_and_capacity_distinct() {
+    use golemdb_immutable_data::{ImmutableDataError, ImmutableDataStorageError as DataError};
+    use golemdb_storage::StorageError;
+    let input = ApiError::from(DataError::Input(ImmutableDataError::UnknownColumn {
+        name: "missing".into(),
+    }));
+    assert!(matches!(input, ApiError::InvalidArgument { .. }));
+    assert!(
+        input
+            .source()
+            .unwrap()
+            .downcast_ref::<ImmutableDataError>()
+            .is_some()
+    );
+    let corrupt = ApiError::from(DataError::Input(ImmutableDataError::PayloadArity {
+        expected: 2,
+        actual: 1,
+    }));
+    assert!(matches!(corrupt, ApiError::Internal { .. }));
+    for error in [
+        ApiError::from(DataError::Store(StorageError::Full)),
+        ApiError::from(BranchError::ImmutableData(DataError::Store(
+            StorageError::Full,
+        ))),
+        ApiError::internal(BranchError::ImmutableData(DataError::Store(
+            StorageError::Full,
+        ))),
+    ] {
+        assert!(matches!(error, ApiError::StoreFull));
+    }
+    assert!(matches!(
+        ApiError::from(DataError::Corrupt("missing file")),
+        ApiError::Internal { .. }
+    ));
+}

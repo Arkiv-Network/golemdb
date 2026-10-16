@@ -1,4 +1,4 @@
-//! Reversible cell working state for GolemDB write branches.
+//! Reversible cell working state, immutable-data staging and coordinated publication.
 //!
 //! [`Branches`] opens head-only branches and validates IDs for every read,
 //! write, checkpoint, rollback, seal, commit, discard, and `branch_info` call. Each operation uses one storage
@@ -29,7 +29,7 @@
 //! use golemdb_merkle::Keccak256Hasher;
 //!
 //! fn edit<S: Store>(store: S) -> Result<(), Box<dyn std::error::Error>> {
-//!     let branches = Branches::new(store, Keccak256Hasher)?;
+//!     let branches = Branches::new(store, Keccak256Hasher, None)?;
 //!     let branch = branches.begin()?;
 //!     let key = CellKey::new(64, CellNameRef::parse_user(b"status", 64)?);
 //!     branches.write(branch, |cell_writer| {
@@ -81,7 +81,7 @@
 //! let empty = hash.hash(&[]);
 //! tx.put(Table("Superblock"), b"head", &[0u64.to_be_bytes().as_slice(), &empty, &empty].concat())?;
 //! tx.commit()?;
-//! let branches = Branches::new(store, hash)?;
+//! let branches = Branches::new(store, hash, None)?;
 //! let branch = branches.begin()?;
 //! let sealed = branches.seal(branch)?;
 //! assert_eq!(sealed.commit_id.get(), 1);
@@ -126,10 +126,63 @@
 //! unwinding and successful cleanup. See [`Branches`] for backend panic limits
 //! and [`Branches::commit`] for panics during publication.
 
+//! # Immutable-data staging
+//!
+//! [`Branches::new`] takes optional
+//! [`ImmutableDataStorage`](golemdb_immutable_data::ImmutableDataStorage).
+//! `None` disables immutable data. The caller opens memory or file storage with
+//! declarations and genesis identity matching the initialized store, then transfers
+//! ownership to the manager for staging and publication. The manager is fully
+//! configured before it can be shared or used. Append/truncate only change staging;
+//! they perform no file or KV writes.
+//!
+//! [`Branches::immutable_data_append`] owns a complete typed row and optional key,
+//! returning a provisional segment ordinal. Its first staged ordinal is the ending ordinal from
+//! the latest published commit range at or before the branch origin, resolved
+//! lazily in the same snapshot as the head check. Empty commit gaps need no entries.
+//! Published keys and this branch's pending keys cannot be reused. Separate
+//! competing branches may stage the same key/ordinal; losing branches become stale.
+//!
+//! [`Branches::immutable_data_truncate`] removes a staged suffix and releases its
+//! keys and ordinals. Both operations work before and after seal, leave the sealed
+//! roots unchanged, and never participate in cell checkpoints, rollback, or version
+//! accounting. Errors leave the pending batch unchanged. Discard and stale-handle
+//! invalidation release the batch with the rest of the branch state.
+//!
+//! # Immutable-data publication and recovery
+//!
+//! The constructor recovers the supplied immutable storage against the initialized
+//! store's durable head and commit ranges before returning.
+//! Only this manager and its clones may publish head or immutable metadata while
+//! it owns storage. The caller supplies matching deployment configuration and a
+//! store whose commit outcomes can be resolved from authoritative snapshots.
+//!
+//! Commit serializes file appends, synchronization and KV publication. Keys and
+//! commit ranges publish atomically with cells, index and head, after files are
+//! durable. On an error the publisher resolves the outcome before removing
+//! unpublished tails. A known abort with successful recovery preserves the sealed
+//! branch for retry. An unresolved outcome, failed recovery or publication panic
+//! blocks further publication until reopen and recovery.
+//!
+//! The caller obtains an independent committed reader with
+//! [`storage.reader()`](golemdb_immutable_data::ImmutableDataStorage::reader) before
+//! transferring storage into the manager, and uses it after construction succeeds.
+//! Its `get` and `rows_of` accept a caller-owned published snapshot and the commit number
+//! read from that same snapshot. Reads enforce published bounds and never lock or
+//! flush the writer. Appends may proceed concurrently; destructive file cleanup
+//! waits for read mappings. The reader keeps directory ownership alive when cloned.
+//! The manager owns an optional locked immutable writer alongside the store;
+//! `commit.rs` implements publication. Without immutable storage, commits rely
+//! on the store's own writer serialization.
+//!
+//! The API facade owns a store handle and the independent reader for committed
+//! reads, and delegates branch writes here.
+
 mod buffer;
 mod commit;
 mod error;
 mod head;
+mod immutable;
 mod journal;
 mod manager;
 mod overlay;
