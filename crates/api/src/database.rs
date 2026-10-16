@@ -33,7 +33,7 @@ impl Database {
     pub fn open_memory(genesis: &Genesis) -> OpenResult<Self> {
         Self::from_store(
             golemdb_storage::MemoryStore::new(),
-            &OpenConfig::new(*genesis),
+            &OpenConfig::new(genesis.clone()),
         )
     }
 
@@ -78,7 +78,7 @@ impl Database {
     pub(crate) fn from_opened<S: Store + Clone + Send + Sync + 'static>(
         opened: OpenedStore<S>,
     ) -> OpenResult<Self> {
-        let genesis = *opened.genesis();
+        let genesis = opened.genesis().clone();
         let info = *opened.info();
         let store = opened.into_store();
         let inner: Arc<dyn Api + Send + Sync> = match genesis.hash_function {

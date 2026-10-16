@@ -79,6 +79,7 @@ fn failure_contract(database: impl Store + Clone + Send + Sync + 'static) {
             max_str_len: 64,
             max_bytes_len: 128,
         },
+        golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
     ));
     let db = Database::from_store(
         FailingStore {
@@ -160,6 +161,7 @@ fn full_mdbx_store_preserves_head_tables_and_sealed_branch() {
             max_str_len: 64,
             max_bytes_len: 2 * 1024 * 1024,
         },
+        golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
     );
     let db = Database::from_store(store.clone(), &OpenConfig::new(genesis)).unwrap();
     let before = super::opening::snapshot(&store);

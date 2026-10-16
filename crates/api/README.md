@@ -32,6 +32,7 @@ let config = OpenConfig::new(Genesis::new(
         max_str_len: 64,
         max_bytes_len: 128,
     },
+    golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
 ));
 let db = Database::open("./golemdb-quickstart", &config)?;
 let branch = db.begin()?;
@@ -134,6 +135,7 @@ let config = OpenConfig::new(Genesis::new(
         max_str_len: 64,
         max_bytes_len: 128,
     },
+    golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
 ))
 .with_mode(OpenMode::CreateNew);
 let db = Database::open("./golemdb-empty-records", &config)?;
@@ -191,6 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_str_len: 128,
             max_bytes_len: 1024,
         },
+        golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
     ))
     .with_mode(OpenMode::CreateNew);
     let db = Database::open("./golemdb-catalogue", &config)?;
@@ -344,11 +347,47 @@ cell_limits:
   max_cell_name_len: 32
   max_str_len: 64
   max_bytes_len: 128
+immutable_data:
+  shard_span: 500000
+  segments:
+    - name: headers
+      compression: lz4
+      columns:
+        - {name: block_height, type: u64}
+        - {name: block_body} # bytes by default
 ```
 
-`blake3` is also supported. Missing, duplicate, and unknown fields are rejected.
+`blake3` is also supported. Fields are required except a column's `type`, which
+defaults to `bytes`. Duplicate and unknown fields are rejected. A deployment with
+no immutable segments explicitly declares `segments: []` and a positive shard span.
 Use `Genesis::load(path)` or `Genesis::from_yaml(text)`; the loader
 does not search for files or read environment overrides.
+
+Typed construction uses `Genesis::new(hash, cell_limits, immutable_data)`, with
+`ImmutableDataConfig::new(shard_span, segments)`. These configuration types own
+their declarations and implement `Clone`, not `Copy`.
+
+Segment names match `[a-z][a-z0-9_]{0,63}` and are rejected rather than normalized
+when invalid. Column names use the cell user-name grammar, independently of the
+user-cell length limits. Segment names are unique; column names are unique within
+a segment, and their order is significant. Column types use the existing cell
+types: `bool`, `str`, `bytes`, `bytes4/8/16/20/32`, `u32/64/128/256`,
+`i32/64/128/256`, `dec32/64/128/256`, `f32/64`, `date32`, and `timestamp64`.
+Compression is explicitly `none`, `lz4`, or ordinary `zstd`.
+
+The current format allows up to 64 user segments and 1–64 columns per segment,
+with positive `u64` shard spans. The encoded segment declaration is limited to
+16,383 bytes so its tagged parameter cell fits the 16 KiB engine value budget.
+These are configuration limits; they do not cap immutable row payloads.
+
+Genesis writes `#params.#shardSpan` as a `u64` field and
+`#params.#immutableDataSegments` as a bytes field. Declarations are encoded with
+fixed-width lengths and type/compression IDs, with segments sorted by name and
+columns in declaration order. Zero-based `u32` segment IDs follow that sorted
+order. YAML formatting, segment order and omitted versus explicit `bytes` types
+have identical commitments. Changing a name, column order, type, compression or
+shard span changes genesis identity. Reopening checks the stored parameter cells
+and their trie commitments without rewriting them.
 
 ```rust
 use golemdb_api::{Database, Genesis, OpenConfig};
@@ -387,8 +426,8 @@ directory; opening an existing empty directory can create MDBX environment files
 
 All detection, validation, and initialization occurs under one storage writer.
 Creation writes the fixed reserved-record catalogue from cells, identities and
-bindings, the configured limits, allocator at 64, and a real cell trie. Every
-genesis cell is a field, so the index root is empty. The transaction writes format,
+bindings, the configured limits and immutable declarations, allocator at 64, and a
+real cell trie. Every genesis cell is a field, so the index root is empty. The transaction writes format,
 hash, Roaring, genesis identity, and head metadata before publishing commit 0.
 `#roots` and `#rootIndex` contain their identity cells but no history entries.
 The two metering records have identities and bindings only; metering is deferred.

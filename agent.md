@@ -16,6 +16,7 @@ and adapters.
 | `record` | Record identity, key bindings, allocation, admission checks, and atomic CRUD over branch cell views. |
 | `branch` | Branch registry, overlays, undo frames, guarded reads and writes, sealing, and atomic publication. |
 | `cells` | Cell names, keys, types, canonical values, deployment limits, reserved-record constants, `Cell` storage and its commitment. |
+| `immutable-data` | Typed rows and genesis schemas using cell codecs, NippyJar/memory shards, committed reads and transactional log metadata. |
 | `index` | Ordered terms, bitmap containers, posting updates, index queries, and the two index commitment tiers. |
 | `merkle` | Generic compressed hexary Patricia tries, branch codecs, traversal, immutable branch mutation, and hash providers. |
 | `storage` | Transactional ordered KV traits, cursors, shared scans, and `MemoryStore`. |
@@ -57,7 +58,7 @@ with zeroes. Every listed record has its own `#key` and a binding in `#recordKey
 
 | ID | Record | Contents and role |
 | --- | --- | --- |
-| 0 | `#params` | `u32` fields `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`. |
+| 0 | `#params` | `u32` fields `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`; `u64` `#shardSpan`; bytes `#immutableDataSegments`. |
 | 1 | `#alloc` | `u64` field `#nextRecordID`, initially 64. |
 | 2 | `#roots` | Previous-commit roots, addressed by raw big-endian commit IDs. |
 | 3 | `#recordKeys` | Public-key-to-record-ID bindings. |
@@ -304,8 +305,9 @@ available through `Error::source()`.
 `from_store(store, &OpenConfig)` accepts a supplied store. `OpenConfig` contains
 `Genesis` and `OpenMode::{CreateIfMissing, ExistingOnly, CreateNew}`.
 
-`Genesis` contains the hash algorithm and cell limits. YAML loading uses an explicit
-path and rejects missing, duplicate, or unknown fields. Backend capacity and paths
+`Genesis` contains the hash algorithm, cell limits and immutable-data declarations.
+YAML loading uses an explicit path and rejects missing, duplicate, or unknown fields
+except an omitted immutable column type, which resolves to bytes. Backend capacity and paths
 are separate from genesis identity. The opener checks physical key/value ceilings,
 including index keys and a 16 KiB engine-value requirement.
 
@@ -362,19 +364,72 @@ parsing belongs to CLI, HTTP, and TCP adapters rather than record logic.
 
 ### Immutable data
 
-Immutable data is organized into named segments of rows, with each row represented
-by one opaque byte array per column. Every row has a dense segment-local ordinal;
-an optional 32-byte `ImmutableDataKey` adds segment-local unique addressing.
-Record keys and immutable-data keys are distinct types.
+The `immutable-data` crate defines validated named schemas with ordered, typed
+columns (default `bytes`), owned `CellValue` rows, `u64` ordinals and optional
+32-byte keys. It reuses cell payload codecs directly, normalizes values to fields,
+and omits cell tags from storage payloads. Cell size limits do not apply. Projections
+reject empty, duplicate or unknown selections and decode in caller order. Read rows
+share owned layout metadata: `get::<T>(name)` checks exact logical types,
+`value(name)` borrows a cell value, and `iter()` yields named values in projection
+order. Unknown and unselected columns are distinct errors. Append rows remain
+unnamed ordered values; named access on them returns an error.
 
-`immutable_data_append` targets a sealed branch and returns a provisional ordinal.
-The publication contract makes row data and key bindings visible together at commit;
-discarded or losing branches publish neither. Duplicate keys are errors.
-`immutable_data_get` addresses a committed row by ordinal or key.
-`immutable_data_range_of` and `immutable_data_rows_of` identify a commit's appended
-range and rows. The `Database` entry points return `ApiError::NotImplemented`
-without validation, I/O, or state changes. Segment declarations, column arity,
-persistence, pruning, and rewind must preserve ordinal/key consistency.
+Genesis requires `ImmutableDataConfig` (positive u64 shard span, segment declarations).
+Segments sort by name for stable zero-based u32 IDs; column order stays significant.
+Segment names match `[a-z][a-z0-9_]{0,63}` and are validated without normalization
+in schema construction and genesis configuration before file access. Column names
+use the cell user-name grammar, independent of deployment cell limits.
+The current format supports at most 64 user segments, 1–64 columns each, and a
+16,383-byte encoded schema payload. Compression is explicitly none, LZ4 or Zstd.
+`#params.#shardSpan` and `#params.#immutableDataSegments` commit this configuration;
+the opener compares their exact values and verifies their trie paths on reopen.
+Formatting, segment order and omitted versus explicit bytes types do not change
+identity. Genesis/OpenConfig now own declarations and are Clone, not Copy.
+
+The concrete `ImmutableDataStorage` exposes `in_memory(config, genesis_id)` and
+`open(config, genesis_id, directory)`. It provides physical append, ordinal get,
+end_ordinal, truncate and sync. Commit numbers supplied to append only route files;
+there is no branch state, database head, system segment, shard group or stage_commit.
+Memory/NippyJar dispatch is private. NippyJar remains pinned to Reth v2.1.0 commit
+`d58c6e3d0723a28f655e89da83c3738e47dcc364`.
+
+`shard_span` counts commits. Segments independently create files on their first
+append in each nonempty span; ordinals remain contiguous across those files.
+Filenames are `segment-{name}-{start_commit}-{end_commit}.jar`, with unpadded decimal
+commit numbers sorted numerically during discovery, an
+exclusive end, `.conf`/`.off` companions and no active/closed rename. Custom headers
+store format, genesis identity, segment ID, first commit and first ordinal.
+NippyJar supplies row count, arity and compression. Active writers are retained
+across appends; explicit sync makes their changes durable. Physical reads may
+flush a selected writer. Historical reads inspect configurations newest-first;
+no historical reader/configuration cache is retained.
+
+Caller-owned transaction helpers bind keys, get by key, record commit ranges and
+read rows_of(commit). `ImmutableDataKeys` stores forward key-to-ordinal and reverse
+ordinal-to-key entries, without commit IDs. `ImmutableDataCommitRanges` maps
+`segment:u32 || commit:u64` to `first_ordinal:u64 || end_ordinal:u64`; integer
+components are big endian. Only nonempty batches produce range entries. Metadata
+is outside the commitment and publishes only when the caller commits its writer.
+The caller checks whether a commit exists/is visible; the file layer validates
+range bounds within its span, not exact per-commit provenance.
+
+Physical truncate removes files/rows from a supplied global ordinal onward and
+reuses those ordinals; it never changes metadata. The later coordinator must
+exclude readers during append/sync/MDBX publication or rollback, remember original
+ends, bind keys and ranges in its transaction, and explicitly truncate on a
+definitely unsuccessful publication. Physical reads do not enforce committed
+visibility. A failed rollback blocks further publication. Crash recovery is still
+pending; no caller may treat physical row counts as durable publication markers.
+Directory ownership uses an OS lock, and file validation precedes NippyJar's
+self-healing writer. Reads check basic file layout but do not scan interior column
+offsets separately; malformed interior offsets may panic inside NippyJar.
+See `crates/immutable-data/README.md` for details.
+
+The `Database` immutable-data facade methods still return NotImplemented and
+retain placeholder signatures. Iterations 4–6 will integrate independent branch
+batches, publication/recovery and the facade, including staged-tail truncate and
+projected get/rows_of. Existing cell checkpoints/rollback never affect immutable
+batches. Retention/pruning, key expiry and digests remain deferred.
 
 ### History, proofs, and storage evolution
 

@@ -17,6 +17,14 @@ fn config() -> OpenConfig {
             max_str_len: 64,
             max_bytes_len: 128,
         },
+        golemdb_api::ImmutableDataConfig::new(
+            500_000,
+            vec![golemdb_api::ImmutableDataSegment {
+                name: "events".into(),
+                columns: vec![golemdb_api::ImmutableDataColumn::new("payload")],
+                compression: golemdb_api::ImmutableDataCompression::Lz4,
+            }],
+        ),
     ))
 }
 
@@ -231,4 +239,30 @@ fn physical_limits_cover_full_index_keys_fixed_values_and_size_overflow() {
     bounded.max_key = 98;
     bounded.max_value = 16384;
     assert!(Database::from_store(bounded, &config()).is_ok());
+}
+
+#[test]
+fn invalid_typed_immutable_configuration_is_rejected_before_mutation() {
+    for change in 0..5 {
+        let mut cfg = config();
+        match change {
+            0 => cfg.genesis.immutable_data.shard_span = 0,
+            1 => cfg.genesis.immutable_data.segments[0].columns.clear(),
+            2 => cfg.genesis.immutable_data.segments[0].name = "#system".into(),
+            3 => {
+                let segment = cfg.genesis.immutable_data.segments[0].clone();
+                cfg.genesis.immutable_data.segments.push(segment);
+            }
+            _ => cfg.genesis.immutable_data.segments[0].columns[0].name = "x".repeat(16 * 1024),
+        }
+        let store = MemoryStore::new();
+        let controlled = Controlled::new(store.clone(), Fault::None);
+        let mutations = controlled.mutations.clone();
+        assert!(matches!(
+            Database::from_store(controlled, &cfg),
+            Err(OpenError::InvalidConfig(_))
+        ));
+        assert_eq!(mutations.load(Ordering::SeqCst), 0);
+        assert!(store.begin_write().unwrap().is_empty().unwrap());
+    }
 }

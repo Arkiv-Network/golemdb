@@ -85,7 +85,7 @@ pub(crate) fn open_store<S: Store>(store: S, config: &OpenConfig) -> OpenResult<
     }
     Ok(OpenedStore {
         store,
-        genesis: config.genesis,
+        genesis: config.genesis.clone(),
         info,
     })
 }
