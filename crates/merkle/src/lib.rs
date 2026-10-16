@@ -12,7 +12,7 @@
 //! preimage includes the full path; production owners supply their own codecs.
 //!
 //! ```
-//! use golemdb_merkle::{Keccak256Hasher, HashProvider, LeafRef, RootRef, Trie};
+//! use golemdb_merkle::{Keccak256Hasher, HashProvider, RootRef, Trie};
 //! use golemdb_storage::{Store, MemoryStore, Table, WriteTransaction};
 //!
 //! const EXAMPLE_LEAF_DOMAIN: u8 = 0x04;
@@ -24,8 +24,8 @@
 //! let mut tx = store.begin_write()?;
 //! let mut root = RootRef::Empty;
 //! for path in [[0; 6], [1; 6]] {
-//!     let leaf = LeafRef { path, hash: hash.hash_parts(&[&[EXAMPLE_LEAF_DOMAIN], &path, b"payload"]) };
-//!     root = trie.insert(&mut tx, root, leaf)?;
+//!     let leaf = hash.hash_parts(&[&[EXAMPLE_LEAF_DOMAIN], &path, b"payload"]);
+//!     root = trie.insert(&mut tx, 1, root, &path, leaf)?;
 //! }
 //! tx.commit()?;
 //! let read = store.begin_read()?;
@@ -45,7 +45,7 @@ pub use config::{ConfigError, HashConfig};
 pub use error::{MerkleError, Result};
 pub use hash::{Blake3Hasher, Hash, HashAlgorithm, HashProvider, Keccak256Hasher};
 pub use node::BranchNodeCompact;
-pub use trie::{LeafRef, RootRef, Trie, Walk};
+pub use trie::{BranchRef, LeafRef, RootRef, Trie, Walk, leaf_key, node_key};
 
 #[cfg(test)]
 mod tests;

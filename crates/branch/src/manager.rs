@@ -74,8 +74,9 @@ struct Inner<S, H> {
 /// This increment does not initialize genesis, validate format/hash settings,
 /// authenticate entire tries, maintain history, or rewind the store. The supplied hash
 /// provider must match the deployment and is shared by all branch seals. External writers
-/// must publish cells and a strictly increasing head atomically; changing cells
-/// under an unchanged head or rewinding it violates this manager's contract.
+/// must publish cells, the head's `Roots` row (optional for an empty head) and a strictly
+/// increasing head atomically;
+/// changing cells under an unchanged head or rewinding it violates this manager's contract.
 ///
 /// # Callback panics
 ///
@@ -269,7 +270,7 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
             let state = slot.as_mut().ok_or(BranchError::HandleInvalid)?;
             let sealed = state.seal(origin, &self.inner.hasher)?;
             let tx = self.inner.store.begin_write()?;
-            match crate::commit::persist(tx, state.commit_id, &sealed) {
+            match crate::commit::persist(tx, state.commit_id, &sealed, &self.inner.hasher) {
                 Ok(commit_id) => {
                     *slot = None;
                     // Publication has succeeded. Registry housekeeping must not

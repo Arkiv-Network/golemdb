@@ -18,11 +18,12 @@ fn cell_batch_keeps_last_operation_and_reports_changes_in_key_order() {
     };
     let delete = |id| CellChange::Delete { key: key(id) };
     let initial = cells
-        .apply(&mut tx, RootRef::Empty, [put(2, 0), put(3, 1)])
+        .apply(&mut tx, 0, RootRef::Empty, [put(2, 0), put(3, 1)])
         .unwrap();
     let update = cells
         .apply(
             &mut tx,
+            0,
             initial.root,
             [
                 put(3, 0),
@@ -66,7 +67,7 @@ fn cell_batch_keeps_last_operation_and_reports_changes_in_key_order() {
     let fresh_db = MemoryStore::new();
     let mut fresh_tx = fresh_db.begin_write().unwrap();
     let fresh = cells
-        .apply(&mut fresh_tx, RootRef::Empty, [put(1, 0), put(2, 0)])
+        .apply(&mut fresh_tx, 0, RootRef::Empty, [put(1, 0), put(2, 0)])
         .unwrap();
     assert_eq!(update.root, fresh.root);
 }
