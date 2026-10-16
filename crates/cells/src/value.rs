@@ -199,7 +199,7 @@ impl CellValue {
     // Typed constructors produce fields; with_kind selects indexing separately.
     // Only typed constructors call this with payloads already known to satisfy
     // the codec. Untrusted storage bytes must still go through parse/new.
-    fn field_from_typed(ty: CellType, value: &[u8]) -> Self {
+    pub(crate) fn field_from_typed(ty: CellType, value: &[u8]) -> Self {
         CellValueRef {
             ty,
             value,

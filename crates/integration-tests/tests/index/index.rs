@@ -6,7 +6,7 @@ use std::{
     ops::Bound,
 };
 
-use golemdb_cells::{CellNameRef, CellType, CellValue};
+use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
 use golemdb_index::{
     BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, TermRange,
     tables,
@@ -27,6 +27,7 @@ fn tag_range(lower: Bound<u8>, upper: Bound<u8>) -> Option<TermRange> {
     let (lower, upper) = (lower.map(value), upper.map(value));
     TermRange::between(
         CellNameRef::raw(b"tag"),
+        CellType::Str,
         lower.as_ref().map(CellValue::as_view),
         upper.as_ref().map(CellValue::as_view),
     )
@@ -392,6 +393,7 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
         );
         TermRange::between(
             CellNameRef::raw(b"a"),
+            CellType::Uint(Width::W4),
             lower.as_ref().map(CellValue::as_view),
             upper.as_ref().map(CellValue::as_view),
         )
