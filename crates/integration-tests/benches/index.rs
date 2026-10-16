@@ -160,8 +160,14 @@ fn backend(
     assert!(!bitmap.treemap().contains(128));
     assert_eq!(bitmap.treemap().len(), chunks * 32);
     let mut group = c.benchmark_group(format!("index/{algorithm}/{name}/chunks={chunks}"));
+    // An index remembers the branches it authenticated; each measured
+    // operation uses a fresh instance so it reads and hashes them.
     group.bench_function("materialize", |b| {
-        b.iter(|| index.bitmap(&read, black_box(&selected)).unwrap())
+        b.iter(|| {
+            Index::new(hasher)
+                .bitmap(&read, black_box(&selected))
+                .unwrap()
+        })
     });
     let prefix = IndexTerm::prefix("tag", CellType::Str).unwrap();
     group.bench_function("scan_four_terms", |b| {
@@ -188,7 +194,7 @@ fn backend(
                 || (db.begin_write().unwrap(), changes.clone()),
                 |(tx, changes)| {
                     black_box(
-                        index
+                        Index::new(hasher)
                             .apply(tx, black_box(root), std::mem::take(changes))
                             .unwrap(),
                     )
@@ -201,7 +207,6 @@ fn backend(
 }
 
 fn durable_commit(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider) {
-    let index = Index::new(hasher);
     c.bench_function(
         &format!("index/{algorithm}/mdbx/transaction_begin_apply_durable_commit"),
         |b| {
@@ -216,7 +221,7 @@ fn durable_commit(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider
                 },
                 |(db, _, root, changes)| {
                     let mut tx = db.begin_write().unwrap();
-                    let update = index
+                    let update = Index::new(hasher)
                         .apply(&mut tx, black_box(*root), std::mem::take(changes))
                         .unwrap();
                     tx.commit().unwrap();
