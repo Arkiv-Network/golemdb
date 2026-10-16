@@ -1,0 +1,28 @@
+commit_log = "results/cycles.csv"
+name = "steady-mixed-1000"
+description = "20k records in the active writer pool; 65 unmeasured churn commits, then 60 measured commits of 1000 operations"
+seed = 5
+preload = 0
+
+[database]
+hash = "keccak-256"
+limits = { max_cell_name_len = 32, max_str_len = 64, max_bytes_len = 1024 }
+
+[shape]
+attributes = [
+    { name = "project", type = "str", cardinality = 50, distribution = "zipf", len = 16 },
+    { name = "entityType", type = "str", cardinality = 10, len = 12 },
+    { name = "id", type = "str", distribution = "unique", len = 36 },
+    { name = "created", type = "u64", distribution = "unique" },
+    { name = "status", type = "str", cardinality = 4, len = 8 },
+    { name = "ref", type = "str", cardinality = 10000, distribution = "zipf", len = 64 },
+]
+fields = [{ name = "payload", type = "bytes", len = 1024 }]
+
+[workload]
+kind = "blocks"
+blocks = [
+    { ops = 1000, repeat = 20, warmup = true },
+    { ops = 1000, repeat = 65, warmup = true, mix = { create = 35, patch = 30, delete = 35 } },
+    { ops = 1000, repeat = 60, mix = { create = 35, patch = 30, delete = 35 } },
+]

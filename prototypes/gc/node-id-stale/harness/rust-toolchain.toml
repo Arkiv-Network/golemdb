@@ -1,0 +1,4 @@
+# Matches golem-db's pinned toolchain so measured code is compiled identically.
+[toolchain]
+channel = "1.97"
+components = ["rustfmt", "clippy"]
