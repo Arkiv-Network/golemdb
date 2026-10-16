@@ -9,7 +9,7 @@ use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransacti
 
 const SUPERBLOCK: Table = Table("Superblock");
 const KEY: RecordKey = RecordKey([0x42; 32]);
-const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\nimmutable_data: {shard_span: 500000, segments: []}\n";
+const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\n";
 
 fn config() -> OpenConfig {
     OpenConfig::new(Genesis::from_yaml(YAML).unwrap())
@@ -39,7 +39,7 @@ pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
 #[test]
 fn yaml_is_explicit_strict_and_has_canonical_identity() {
     let first = Genesis::from_yaml(YAML).unwrap();
-    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nhash_function: keccak-256\nimmutable_data: {segments: [], shard_span: 500000}\n").unwrap();
+    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nhash_function: keccak-256\nimmutable_data: null\n").unwrap();
     assert_eq!(first, reordered);
     assert_eq!(
         Database::open_memory(&first).unwrap().info(),
@@ -282,8 +282,6 @@ fn missing_or_malformed_metadata_and_reserved_cells_fail_without_repair() {
     }
     for key in [
         CellKey::new(system::PARAMS.id, reserved::MAX_STR_LEN),
-        CellKey::new(system::PARAMS.id, reserved::SHARD_SPAN),
-        CellKey::new(system::PARAMS.id, reserved::IMMUTABLE_DATA_SEGMENTS),
         CellKey::new(system::ALLOC.id, reserved::NEXT_RECORD_ID),
         CellKey::new(system::PARAMS.id, reserved::KEY),
         CellKey::new(

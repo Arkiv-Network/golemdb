@@ -1,7 +1,7 @@
 #[path = "immutable_storage/contract.rs"]
 mod contract;
 
-use golemdb_branch::{BranchError, Branches, CommitId, Head, ImmutableDataOptions, write_head};
+use golemdb_branch::{BranchError, Branches, CommitId, Head, write_head};
 use golemdb_cells::{CellType, CellValue, Width};
 use golemdb_immutable_data::{metadata, *};
 use golemdb_merkle::{HashProvider, Keccak256Hasher};
@@ -179,16 +179,9 @@ fn builder_recovers_tail_and_staging_uses_published_mdbx_ranges() {
     files.append("events", 4, &row(99)).unwrap();
     files.sync().unwrap();
     drop(files);
-    let branches = Branches::new(
-        store,
-        Keccak256Hasher,
-        Some(ImmutableDataOptions::files(
-            config(),
-            [9; 32],
-            dir.path().join("files"),
-        )),
-    )
-    .unwrap();
+    let files = ImmutableDataStorage::open(config(), [9; 32], dir.path().join("files")).unwrap();
+    let reader = files.reader();
+    let branches = Branches::new(store.clone(), Keccak256Hasher, Some(files)).unwrap();
     let id = branches.begin().unwrap();
     assert!(matches!(
         branches.immutable_data_append(id, "events", Some(ImmutableDataKey([1; 32])), row(11)),
@@ -210,8 +203,8 @@ fn builder_recovers_tail_and_staging_uses_published_mdbx_ranges() {
         2
     );
     assert!(matches!(
-        branches.immutable_data().unwrap().get(
-            &branches.store().begin_read().unwrap(),
+        reader.get(
+            &store.begin_read().unwrap(),
             3,
             "events",
             golemdb_immutable_data::ImmutableDataAddress::Ordinal(1),
@@ -221,7 +214,7 @@ fn builder_recovers_tail_and_staging_uses_published_mdbx_ranges() {
     ));
     branches.immutable_data_truncate(id, "events", 1).unwrap();
     branches.discard(id).unwrap();
-    let tx = branches.store().begin_read().unwrap();
+    let tx = store.begin_read().unwrap();
     assert_eq!(metadata::end_ordinal_at(&tx, 0, 3).unwrap(), 1);
     assert_eq!(
         metadata::ordinal_for_key(&tx, 0, ImmutableDataKey([2; 32])).unwrap(),
@@ -230,6 +223,7 @@ fn builder_recovers_tail_and_staging_uses_published_mdbx_ranges() {
     assert_eq!(branches.head().unwrap().get(), 3);
     drop(tx);
     drop(branches);
+    drop(reader);
     let files = ImmutableDataStorage::open(config(), [9; 32], dir.path().join("files")).unwrap();
     assert_eq!(files.end_ordinal("events").unwrap(), 1);
 }

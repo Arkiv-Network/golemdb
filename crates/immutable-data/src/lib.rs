@@ -14,7 +14,7 @@
 //! separate key/range helpers using caller-owned KV transactions. Branch staging
 //! and publication coordination live in `golemdb-branch`. Physical recovery uses
 //! caller-supplied durable commit ranges without reading or writing database head.
-//! The API facade still has its operation stubs.
+//! The API facade exposes typed rows and committed reads through these types.
 //! These types do not depend on API or branch types.
 //!
 //! ```

@@ -192,5 +192,8 @@ payload corruption audit. Retention will need to preserve recovery boundaries.
 
 The directory has a single owner enforced by an OS lock shared by the writer and
 reader handles. Mappings do not escape individual calls. Independent branch staging is implemented in `golemdb-branch`.
-Publication coordination and startup recovery live in `golemdb-branch`; only
-facade integration remains iteration 6. Retention/key expiry and digests remain deferred.
+Publication coordination and startup recovery live in `golemdb-branch`. The
+`golemdb-api` facade opens storage once, retains its independent reader and a
+shared store handle, and transfers storage to the branch manager. Committed reads
+use the API's store snapshot directly. The facade exposes typed rows and projections.
+Retention/key expiry and digests remain deferred.

@@ -1,6 +1,4 @@
-use golemdb_branch::{
-    BranchError, Branches, CommitId, Head, ImmutableDataOptions, read_head, write_head,
-};
+use golemdb_branch::{BranchError, Branches, CommitId, Head, read_head, write_head};
 use golemdb_cells::{CellKey, CellNameRef, CellType, CellValue, Width, tables};
 use golemdb_immutable_data::{metadata, *};
 use golemdb_merkle::{HashProvider, Keccak256Hasher};
@@ -55,35 +53,30 @@ fn seed(store: &impl Store) {
     .unwrap();
     tx.commit().unwrap();
 }
-fn read<S: Store>(
-    b: &Branches<S, Keccak256Hasher>,
+fn read(
+    store: &impl Store,
+    reader: &ImmutableDataReader,
     segment: &str,
     address: ImmutableDataAddress,
     options: &ImmutableDataReadOptions,
 ) -> golemdb_branch::Result<ImmutableDataRow> {
-    let tx = b.store().begin_read()?;
-    Ok(b.immutable_data()
-        .unwrap()
-        .get(&tx, read_head(&tx)?.get(), segment, address, options)?)
+    let tx = store.begin_read()?;
+    Ok(reader.get(&tx, read_head(&tx)?.get(), segment, address, options)?)
 }
-fn rows_of<S: Store>(
-    b: &Branches<S, Keccak256Hasher>,
+fn rows_of(
+    store: &impl Store,
+    reader: &ImmutableDataReader,
     segment: &str,
     commit: CommitId,
     options: &ImmutableDataReadOptions,
 ) -> golemdb_branch::Result<Vec<ImmutableDataRow>> {
-    let tx = b.store().begin_read()?;
-    Ok(b.immutable_data().unwrap().rows_of(
-        &tx,
-        read_head(&tx)?.get(),
-        segment,
-        commit.get(),
-        options,
-    )?)
+    let tx = store.begin_read()?;
+    Ok(reader.rows_of(&tx, read_head(&tx)?.get(), segment, commit.get(), options)?)
 }
-fn number<S: Store>(b: &Branches<S, Keccak256Hasher>, n: u64) -> u64 {
+fn number(store: &impl Store, reader: &ImmutableDataReader, n: u64) -> u64 {
     read(
-        b,
+        store,
+        reader,
         "events",
         ImmutableDataAddress::Ordinal(n),
         &ImmutableDataReadOptions::columns(["number"]),
@@ -101,11 +94,12 @@ fn commit_row<S: Store>(b: &Branches<S, Keccak256Hasher>, n: u8) -> CommitId {
 
 fn successful_publication(store: impl Store + Clone, path: Option<&Path>) {
     seed(&store);
-    let options = match path {
-        Some(path) => ImmutableDataOptions::files(config(), [7; 32], path),
-        None => ImmutableDataOptions::memory(config(), [7; 32]),
+    let storage = match path {
+        Some(path) => ImmutableDataStorage::open(config(), [7; 32], path).unwrap(),
+        None => ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap(),
     };
-    let b = Branches::new(store.clone(), Keccak256Hasher, Some(options)).unwrap();
+    let reader = storage.reader();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
     let old = store.begin_read().unwrap();
     let winner = b.begin().unwrap();
     let loser = b.begin().unwrap();
@@ -135,7 +129,8 @@ fn successful_publication(store: impl Store + Clone, path: Option<&Path>) {
         .unwrap();
     assert!(matches!(
         read(
-            &b,
+            &store,
+            &reader,
             "events",
             ImmutableDataAddress::Ordinal(0),
             &ImmutableDataReadOptions::all()
@@ -146,10 +141,11 @@ fn successful_publication(store: impl Store + Clone, path: Option<&Path>) {
     ));
     assert_eq!(b.commit(winner).unwrap(), seal.commit_id);
     assert!(matches!(b.commit(loser), Err(BranchError::Conflict)));
-    assert_eq!(number(&b, 0), 10);
-    assert_eq!(number(&b, 1), 11);
+    assert_eq!(number(&store, &reader, 0), 10);
+    assert_eq!(number(&store, &reader, 1), 11);
     let projected = read(
-        &b,
+        &store,
+        &reader,
         "events",
         ImmutableDataAddress::Key(key(1)),
         &ImmutableDataReadOptions::columns(["data", "number"]),
@@ -158,7 +154,8 @@ fn successful_publication(store: impl Store + Clone, path: Option<&Path>) {
     assert_eq!(projected.get::<Vec<u8>>("data").unwrap(), b"body");
     assert_eq!(
         rows_of(
-            &b,
+            &store,
+            &reader,
             "events",
             CommitId::new(1),
             &ImmutableDataReadOptions::all()
@@ -169,7 +166,8 @@ fn successful_publication(store: impl Store + Clone, path: Option<&Path>) {
     );
     assert!(
         rows_of(
-            &b,
+            &store,
+            &reader,
             "events",
             CommitId::GENESIS,
             &ImmutableDataReadOptions::all()
@@ -179,7 +177,8 @@ fn successful_publication(store: impl Store + Clone, path: Option<&Path>) {
     );
     assert!(matches!(
         rows_of(
-            &b,
+            &store,
+            &reader,
             "events",
             CommitId::new(2),
             &ImmutableDataReadOptions::all()
@@ -201,7 +200,8 @@ fn successful_publication(store: impl Store + Clone, path: Option<&Path>) {
     b.commit(empty).unwrap();
     assert!(
         rows_of(
-            &b,
+            &store,
+            &reader,
             "events",
             CommitId::new(2),
             &ImmutableDataReadOptions::all()
@@ -210,7 +210,7 @@ fn successful_publication(store: impl Store + Clone, path: Option<&Path>) {
         .is_empty()
     );
     assert_eq!(commit_row(&b, 3), CommitId::new(3));
-    assert_eq!(number(&b, 2), 3);
+    assert_eq!(number(&store, &reader, 2), 3);
 }
 
 #[test]
@@ -224,15 +224,13 @@ fn mdbx_and_files_publish_and_reopen() {
     let kv = dir.path().join("kv");
     let path = dir.path().join("files");
     successful_publication(MdbxStore::open(&kv).unwrap(), Some(&path));
-    let b = Branches::new(
-        MdbxStore::open(&kv).unwrap(),
-        Keccak256Hasher,
-        Some(ImmutableDataOptions::files(config(), [7; 32], &path)),
-    )
-    .unwrap();
+    let store = MdbxStore::open(&kv).unwrap();
+    let storage = ImmutableDataStorage::open(config(), [7; 32], &path).unwrap();
+    let reader = storage.reader();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
     assert_eq!(b.head().unwrap(), CommitId::new(3));
-    assert_eq!(number(&b, 0), 10);
-    assert_eq!(number(&b, 2), 3);
+    assert_eq!(number(&store, &reader, 0), 10);
+    assert_eq!(number(&store, &reader, 2), 3);
     assert_eq!(commit_row(&b, 4), CommitId::new(4));
 }
 
@@ -365,12 +363,9 @@ fn fault_store<S>(inner: S) -> FaultStore<S> {
 fn failures(store: impl Store + Clone + 'static, path: &Path) {
     seed(&store);
     let store = fault_store(store);
-    let b = Branches::new(
-        store.clone(),
-        Keccak256Hasher,
-        Some(ImmutableDataOptions::files(config(), [7; 32], path)),
-    )
-    .unwrap();
+    let storage = ImmutableDataStorage::open(config(), [7; 32], path).unwrap();
+    let reader = storage.reader();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
     commit_row(&b, 1);
     let id = b.begin().unwrap();
     b.immutable_data_append(id, "events", Some(key(2)), row(2))
@@ -399,11 +394,11 @@ fn failures(store: impl Store + Clone + 'static, path: &Path) {
     assert!(b.commit(id).is_err());
     assert!(!path.join("segment-events-2-4.jar").exists());
     assert!(!path.join("segment-receipts-2-4.jar").exists());
-    assert_eq!(number(&b, 0), 1);
+    assert_eq!(number(&store, &reader, 0), 1);
     // A reported commit error with a published result is success, not rollback.
     store.faults.mode.store(2, Ordering::SeqCst);
     assert_eq!(b.commit(id).unwrap().get(), 2);
-    assert_eq!(number(&b, 1), 2);
+    assert_eq!(number(&store, &reader, 1), 2);
     assert!(matches!(b.branch_info(id), Err(BranchError::HandleInvalid)));
 }
 #[test]
@@ -428,12 +423,9 @@ fn failed_publication_in_active_file_preserves_prefix_and_can_retry() {
     let dir = tempfile::tempdir().unwrap();
     let store = fault_store(MemoryStore::new());
     seed(&store);
-    let b = Branches::new(
-        store.clone(),
-        Keccak256Hasher,
-        Some(ImmutableDataOptions::files(config(), [7; 32], dir.path())),
-    )
-    .unwrap();
+    let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
+    let reader = storage.reader();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
     commit_row(&b, 1);
     commit_row(&b, 2);
     let id = b.begin().unwrap();
@@ -441,10 +433,11 @@ fn failed_publication_in_active_file_preserves_prefix_and_can_retry() {
         .unwrap();
     store.faults.mode.store(1, Ordering::SeqCst);
     assert!(b.commit(id).is_err());
-    assert_eq!(number(&b, 1), 2);
+    assert_eq!(number(&store, &reader, 1), 2);
     assert!(matches!(
         read(
-            &b,
+            &store,
+            &reader,
             "events",
             ImmutableDataAddress::Ordinal(2),
             &ImmutableDataReadOptions::all()
@@ -454,7 +447,7 @@ fn failed_publication_in_active_file_preserves_prefix_and_can_retry() {
         ))
     ));
     assert_eq!(b.commit(id).unwrap().get(), 3);
-    assert_eq!(number(&b, 2), 3);
+    assert_eq!(number(&store, &reader, 2), 3);
 }
 
 #[test]
@@ -465,12 +458,9 @@ fn unresolved_commit_and_panics_block_publication_but_keep_committed_reads() {
         let db = MemoryStore::new();
         seed(&db);
         let store = fault_store(db.clone());
-        let b = Branches::new(
-            store.clone(),
-            Keccak256Hasher,
-            Some(ImmutableDataOptions::files(config(), [7; 32], dir.path())),
-        )
-        .unwrap();
+        let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
+        let reader = storage.reader();
+        let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
         commit_row(&b, 1);
         let id = b.begin().unwrap();
         b.immutable_data_append(id, "events", Some(key(2)), row(2))
@@ -485,22 +475,21 @@ fn unresolved_commit_and_panics_block_publication_but_keep_committed_reads() {
         } else {
             assert!(result.is_err());
         }
-        assert_eq!(number(&b, 0), 1);
+        assert_eq!(number(&store, &reader, 0), 1);
         // A fresh branch is also prevented from publishing until recovery.
         assert!(matches!(
             b.commit(b.begin().unwrap()),
             Err(BranchError::RecoveryRequired)
         ));
         drop(b);
-        let b = Branches::new(
-            db,
-            Keccak256Hasher,
-            Some(ImmutableDataOptions::files(config(), [7; 32], dir.path())),
-        )
-        .unwrap();
-        assert_eq!(number(&b, 0), 1);
+        drop(reader);
+        let store = db;
+        let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
+        let reader = storage.reader();
+        let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+        assert_eq!(number(&store, &reader, 0), 1);
         if mode == 5 {
-            assert_eq!(number(&b, 1), 2);
+            assert_eq!(number(&store, &reader, 1), 2);
             assert_eq!(b.head().unwrap().get(), 2);
         } else {
             assert_eq!(b.head().unwrap().get(), 1);
@@ -516,12 +505,9 @@ fn failed_rollback_blocks_publication_and_retains_files_for_recovery() {
     let db = MemoryStore::new();
     seed(&db);
     let store = fault_store(db.clone());
-    let b = Branches::new(
-        store.clone(),
-        Keccak256Hasher,
-        Some(ImmutableDataOptions::files(config(), [7; 32], dir.path())),
-    )
-    .unwrap();
+    let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
+    let reader = storage.reader();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
     commit_row(&b, 1);
     let offsets = dir.path().join("segment-events-0-2.off");
     let saved = std::fs::read(&offsets).unwrap();
@@ -539,14 +525,14 @@ fn failed_rollback_blocks_publication_and_retains_files_for_recovery() {
     assert!(matches!(b.commit(id), Err(BranchError::RecoveryRequired)));
     assert!(dir.path().join("segment-events-2-4.jar").exists());
     drop(b);
+    drop(reader);
     std::fs::write(offsets, saved).unwrap();
-    let b = Branches::new(
-        db,
-        Keccak256Hasher,
-        Some(ImmutableDataOptions::files(config(), [7; 32], dir.path())),
-    )
-    .unwrap();
-    assert_eq!(number(&b, 0), 1);
+    let store = db;
+    let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
+    let reader = storage.reader();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    assert_eq!(b.head().unwrap().get(), 1);
+    assert_eq!(number(&store, &reader, 0), 1);
     assert!(!dir.path().join("segment-events-2-4.jar").exists());
 }
 
@@ -558,18 +544,18 @@ fn concurrent_visibility(
 ) {
     let store = fault_store(db);
     seed(&store);
-    let options = if let Some(directory) = directory {
-        ImmutableDataOptions::files(config(), [7; 32], directory)
+    let storage = if let Some(directory) = directory {
+        ImmutableDataStorage::open(config(), [7; 32], directory).unwrap()
     } else {
-        ImmutableDataOptions::memory(config(), [7; 32])
+        ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()
     };
-    let b = Branches::new(store.clone(), Keccak256Hasher, Some(options)).unwrap();
+    let reader = storage.reader();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
     for n in 1..=baseline {
         commit_row(&b, n);
     }
     let old = store.begin_read().unwrap();
     let old_commit = read_head(&old).unwrap().get();
-    let reader = b.immutable_data().unwrap().clone();
     let id = b.begin().unwrap();
     b.immutable_data_append(id, "events", Some(key(baseline + 1)), row(7))
         .unwrap();
@@ -586,12 +572,14 @@ fn concurrent_visibility(
     // is released from its paused consuming transaction commit.
     let (done, result) = mpsc::channel();
     let reading = {
-        let b = b.clone();
+        let store = store.clone();
+        let reader = reader.clone();
         std::thread::spawn(move || {
-            assert_eq!(number(&b, 0), 1);
+            assert_eq!(number(&store, &reader, 0), 1);
             assert!(matches!(
                 read(
-                    &b,
+                    &store,
+                    &reader,
                     "events",
                     ImmutableDataAddress::Ordinal(u64::from(baseline)),
                     &ImmutableDataReadOptions::all()
@@ -602,7 +590,8 @@ fn concurrent_visibility(
             ));
             assert!(matches!(
                 read(
-                    &b,
+                    &store,
+                    &reader,
                     "events",
                     ImmutableDataAddress::Key(key(baseline + 1)),
                     &ImmutableDataReadOptions::all()
@@ -618,7 +607,7 @@ fn concurrent_visibility(
     release.send(()).unwrap();
     assert_eq!(writer.join().unwrap().is_err(), abort);
     reading.join().unwrap();
-    assert_eq!(number(&b, 0), 1);
+    assert_eq!(number(&store, &reader, 0), 1);
     assert!(matches!(
         reader.get(
             &old,
@@ -640,7 +629,7 @@ fn concurrent_visibility(
         Err(ImmutableDataStorageError::NotFound)
     ));
     if !abort {
-        assert_eq!(number(&b, baseline.into()), 7);
+        assert_eq!(number(&store, &reader, baseline.into()), 7);
     }
 }
 #[test]
@@ -669,16 +658,8 @@ fn crash_publication_child() {
         .unwrap();
     let root = Path::new(&root);
     let store = fault_store(MdbxStore::open(root.join("kv")).unwrap());
-    let b = Branches::new(
-        store.clone(),
-        Keccak256Hasher,
-        Some(ImmutableDataOptions::files(
-            config(),
-            [7; 32],
-            root.join("files"),
-        )),
-    )
-    .unwrap();
+    let storage = ImmutableDataStorage::open(config(), [7; 32], root.join("files")).unwrap();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
     let next = b.head().unwrap().get() as u8 + 1;
     let id = b.begin().unwrap();
     b.immutable_data_append(id, "events", Some(key(next)), row(next.into()))
@@ -696,16 +677,9 @@ fn process_restart_recovers_aborted_tail_and_keeps_published_tail() {
         {
             let store = MdbxStore::open(dir.path().join("kv")).unwrap();
             seed(&store);
-            let b = Branches::new(
-                store,
-                Keccak256Hasher,
-                Some(ImmutableDataOptions::files(
-                    config(),
-                    [7; 32],
-                    dir.path().join("files"),
-                )),
-            )
-            .unwrap();
+            let storage =
+                ImmutableDataStorage::open(config(), [7; 32], dir.path().join("files")).unwrap();
+            let b = Branches::new(store, Keccak256Hasher, Some(storage)).unwrap();
             for n in 1..=baseline {
                 commit_row(&b, n);
             }
@@ -722,22 +696,17 @@ fn process_restart_recovers_aborted_tail_and_keeps_published_tail() {
             "{}",
             String::from_utf8_lossy(&child.stderr)
         );
-        let b = Branches::new(
-            MdbxStore::open(dir.path().join("kv")).unwrap(),
-            Keccak256Hasher,
-            Some(ImmutableDataOptions::files(
-                config(),
-                [7; 32],
-                dir.path().join("files"),
-            )),
-        )
-        .unwrap();
+        let store = MdbxStore::open(dir.path().join("kv")).unwrap();
+        let storage =
+            ImmutableDataStorage::open(config(), [7; 32], dir.path().join("files")).unwrap();
+        let reader = storage.reader();
+        let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
         for n in 1..=baseline {
-            assert_eq!(number(&b, u64::from(n - 1)), u64::from(n));
+            assert_eq!(number(&store, &reader, u64::from(n - 1)), u64::from(n));
         }
         let next = u64::from(baseline + 1);
         if mode == 7 {
-            assert_eq!(number(&b, baseline.into()), next);
+            assert_eq!(number(&store, &reader, baseline.into()), next);
             assert_eq!(b.head().unwrap().get(), next);
         } else {
             assert_eq!(b.head().unwrap().get(), u64::from(baseline));
@@ -747,16 +716,18 @@ fn process_restart_recovers_aborted_tail_and_keeps_published_tail() {
 }
 
 #[test]
-fn constructor_rejects_missing_head_before_file_access() {
+fn constructor_rejects_missing_head_before_recovery() {
+    let _files = FILE_TESTS.read().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let unopened = dir.path().join("unopened");
+    let mut storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
+    storage.append("events", 1, &row(1)).unwrap();
+    storage.sync().unwrap();
     assert!(matches!(
-        Branches::new(
-            MemoryStore::new(),
-            Keccak256Hasher,
-            Some(ImmutableDataOptions::files(config(), [7; 32], &unopened)),
-        ),
+        Branches::new(MemoryStore::new(), Keccak256Hasher, Some(storage)),
         Err(BranchError::MissingHead)
     ));
-    assert!(!unopened.exists());
+    // Failure releases ownership without interpreting missing head as genesis
+    // and discarding the existing physical rows during recovery.
+    let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
+    assert_eq!(storage.end_ordinal("events").unwrap(), 1);
 }

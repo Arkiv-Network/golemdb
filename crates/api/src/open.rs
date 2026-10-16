@@ -53,8 +53,11 @@ impl<S> OpenedStore<S> {
 impl<S: Store + Clone + Send + Sync + 'static> OpenedStore<S> {
     /// Construct one engine using the validated hash selection. The returned
     /// facade's clones share its branch registry and storage lifetime.
-    pub fn into_database(self) -> OpenResult<crate::Database> {
-        crate::Database::from_opened(self)
+    pub fn into_database(
+        self,
+        immutable_data_directory: Option<std::path::PathBuf>,
+    ) -> OpenResult<crate::Database> {
+        crate::Database::from_opened(self, immutable_data_directory)
     }
 }
 

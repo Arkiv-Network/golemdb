@@ -1,7 +1,7 @@
 use super::*;
 use golemdb_cells::{CellKey, CellNameRef, CellType, CellValue, Width};
 use golemdb_immutable_data::{
-    ImmutableDataColumn, ImmutableDataCompression, ImmutableDataSegment,
+    ImmutableDataColumn, ImmutableDataCompression, ImmutableDataConfig, ImmutableDataSegment,
     ImmutableDataStorageError as DataError, metadata,
 };
 use golemdb_merkle::Keccak256Hasher;
@@ -92,12 +92,9 @@ fn synthetic_metadata_branches(db: MemoryStore) -> Branches<MemoryStore, Keccak2
 #[test]
 fn staging_is_independent_of_cell_frames_and_remains_editable_after_seal() {
     let db = store(0);
-    let branches = Branches::new(
-        db.clone(),
-        Keccak256Hasher,
-        Some(ImmutableDataOptions::memory(config(), [7; 32])),
-    )
-    .unwrap();
+    let storage = ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap();
+    let reader = storage.reader();
+    let branches = Branches::new(db.clone(), Keccak256Hasher, Some(storage)).unwrap();
     let id = branches.begin().unwrap();
     let cell = CellKey::new(64, CellNameRef::raw(b"value"));
     branches
@@ -142,11 +139,9 @@ fn staging_is_independent_of_cell_frames_and_remains_editable_after_seal() {
 
     let held = entry(&branches, id);
     assert_eq!(branches.commit(id).unwrap(), sealed.commit_id);
-    let tx = branches.store().begin_read().unwrap();
+    let tx = db.begin_read().unwrap();
     assert_eq!(
-        branches
-            .immutable_data()
-            .unwrap()
+        reader
             .rows_of(
                 &tx,
                 sealed.commit_id.get(),
@@ -171,7 +166,7 @@ fn branch_local_reservations_and_lifecycle_release() {
     let branches = Branches::new(
         db,
         Keccak256Hasher,
-        Some(ImmutableDataOptions::memory(config(), [7; 32])),
+        Some(ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()),
     )
     .unwrap();
     let a = branches.begin().unwrap();
@@ -317,7 +312,7 @@ fn staging_and_seal_do_not_open_a_writer() {
     let branches = Branches::new(
         ReadOnly(store(0), read_only.clone()),
         Keccak256Hasher,
-        Some(ImmutableDataOptions::memory(config(), [7; 32])),
+        Some(ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()),
     )
     .unwrap();
     read_only.store(true, Ordering::Relaxed);
@@ -391,7 +386,7 @@ fn head_key_and_first_ordinal_use_the_same_snapshot() {
             advance: advance.clone(),
         },
         Keccak256Hasher,
-        Some(ImmutableDataOptions::memory(config(), [7; 32])),
+        Some(ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()),
     )
     .unwrap();
     let id = branches.begin().unwrap();
@@ -411,7 +406,7 @@ fn concurrent_appends_share_reservations_and_allocate_distinct_ordinals() {
     let branches = Branches::new(
         store(0),
         Keccak256Hasher,
-        Some(ImmutableDataOptions::memory(config(), [7; 32])),
+        Some(ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()),
     )
     .unwrap();
     let id = branches.begin().unwrap();
@@ -506,7 +501,7 @@ fn metadata_read_errors_leave_rows_keys_and_ordinals_retryable() {
             fail: fail.clone(),
         },
         Keccak256Hasher,
-        Some(ImmutableDataOptions::memory(config(), [7; 32])),
+        Some(ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()),
     )
     .unwrap();
     let id = branches.begin().unwrap();

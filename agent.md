@@ -58,7 +58,7 @@ with zeroes. Every listed record has its own `#key` and a binding in `#recordKey
 
 | ID | Record | Contents and role |
 | --- | --- | --- |
-| 0 | `#params` | `u32` fields `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`; `u64` `#shardSpan`; bytes `#immutableDataSegments`. |
+| 0 | `#params` | `u32` fields `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`; `u64` `#shardSpan` and bytes `#immutableDataSegments` only when immutable data is enabled. |
 | 1 | `#alloc` | `u64` field `#nextRecordID`, initially 64. |
 | 2 | `#roots` | Previous-commit roots, addressed by raw big-endian commit IDs. |
 | 3 | `#recordKeys` | Public-key-to-record-ID bindings. |
@@ -269,7 +269,7 @@ operations and can bypass record invariants.
 ### Public API and opening
 
 One synchronous, dyn-compatible `Api` trait covers CRUD, branch lifecycle, and
-immutable-data signatures. Consumers can use `&dyn Api` or
+typed immutable-data operations. Consumers can use `&dyn Api` or
 `Arc<dyn Api + Send + Sync>`. `Database` clones share the engine and branch registry.
 Results own their data and expose no storage transactions or cell writers.
 
@@ -305,9 +305,11 @@ available through `Error::source()`.
 `from_store(store, &OpenConfig)` accepts a supplied store. `OpenConfig` contains
 `Genesis` and `OpenMode::{CreateIfMissing, ExistingOnly, CreateNew}`.
 
-`Genesis` contains the hash algorithm, cell limits and immutable-data declarations.
-YAML loading uses an explicit path and rejects missing, duplicate, or unknown fields
-except an omitted immutable column type, which resolves to bytes. Backend capacity and paths
+`Genesis` contains the hash algorithm, cell limits and optional immutable-data
+configuration. `None`, omitted YAML or `immutable_data: null` disables the feature.
+An enabled configuration requires a positive shard span and at least one segment.
+YAML loading uses an explicit path and rejects missing required, duplicate or
+unknown fields; an omitted immutable column type resolves to bytes. Backend capacity and paths
 are separate from genesis identity. The opener checks physical key/value ceilings,
 including index keys and a 16 KiB engine-value requirement.
 
@@ -374,15 +376,18 @@ share owned layout metadata: `get::<T>(name)` checks exact logical types,
 order. Unknown and unselected columns are distinct errors. Append rows remain
 unnamed ordered values; named access on them returns an error.
 
-Genesis requires `ImmutableDataConfig` (positive u64 shard span, segment declarations).
+Genesis accepts `Option<ImmutableDataConfig>`: `None` disables immutable data;
+`Some` requires a positive u64 shard span and nonempty segment declarations.
 Segments sort by name for stable zero-based u32 IDs; column order stays significant.
 Segment names match `[a-z][a-z0-9_]{0,63}` and are validated without normalization
 in schema construction and genesis configuration before file access. Column names
 use the cell user-name grammar, independent of deployment cell limits.
 The current format supports at most 64 user segments, 1–64 columns each, and a
 16,383-byte encoded schema payload. Compression is explicitly none, LZ4 or Zstd.
-`#params.#shardSpan` and `#params.#immutableDataSegments` commit this configuration;
-the opener compares their exact values and verifies their trie paths on reopen.
+When enabled, `#params.#shardSpan` and `#params.#immutableDataSegments` commit this
+configuration; the opener compares their exact values and verifies their trie
+paths on reopen. Both cells are absent when disabled, and enabling/disabling
+changes genesis identity.
 Formatting, segment order and omitted versus explicit bytes types do not change
 identity. Genesis/OpenConfig now own declarations and are Clone, not Copy.
 
@@ -427,10 +432,11 @@ offsets separately; malformed interior offsets may panic inside NippyJar.
 See `crates/immutable-data/README.md` for details.
 
 `Branches::new(store, hasher, None)` disables immutable data. Pass
-`Some(ImmutableDataOptions::files(config, genesis_id, directory))` to open files
-or `Some(ImmutableDataOptions::memory(config, genesis_id))` to use memory storage.
-The constructor enables staging, publication and committed reads before the manager
-can be shared or used. Missing or invalid head metadata is rejected before file I/O.
+`Some(storage)` to transfer ownership of an opened `ImmutableDataStorage` and
+use its configuration for staging. The caller obtains `storage.reader()` before
+transferring ownership and uses it only after construction succeeds. Missing or
+invalid head metadata is rejected before recovery. The API validates the database
+before opening immutable storage.
 Append accepts an owned typed row and optional key; truncate
 removes only the branch's pending suffix. Both work before/after seal, leave sealed
 roots unchanged, and do not affect cell checkpoints, rollback or branch version.
@@ -440,8 +446,8 @@ Key uniqueness covers committed bindings and that branch's own batch; competing
 branches may reserve the same key/ordinal. Discard/stale invalidation release rows
 and keys. Errors leave staging unchanged. No files or KV metadata are written.
 
-The constructor uses the supplied genesis declarations for staging and physical storage,
-owns storage and recovers under a store writer before use.
+The constructor owns the supplied storage and recovers under a store writer
+before use.
 Only this manager and its clones may publish head or immutable metadata. A shared
 lock covers file mutation, synchronization, KV publication and rollback. Cells,
 index, keys, commit ranges and head publish in one transaction after syncing files.
@@ -452,8 +458,9 @@ publication until reopen and recovery. The manager owns an optional locked immut
 writer alongside the store, and `commit.rs` implements the procedure; there is no
 separate coordinator layer. Without immutable storage, commits rely on the store's
 own writer serialization.
-`Branches::immutable_data()` exposes an independent `ImmutableDataReader`. Its
-projected `get` and `rows_of` take one caller-owned published snapshot and the
+The API owns an independent `ImmutableDataReader` and a shared store handle;
+branches own only the immutable writer. The reader's projected `get` and `rows_of`
+take one caller-owned published snapshot and the
 commit number from that snapshot, enforcing key/range/ordinal visibility without
 locking or flushing the writer. Discovery excludes spans newer than the segment's
 last published batch. NippyJar's cursor uses EOF for its last column, so committed
@@ -462,9 +469,18 @@ unpublished bytes. Only destructive cleanup waits for read mappings. Reader clon
 retain directory ownership; close them before reopening files. Future commits are
 rejected. Store commits must be durable and outcome snapshots
 authoritative. There is no staging-only constructor.
-The `Database` immutable-data facade still returns NotImplemented and retains
-placeholder signatures. Iteration 6 will integrate the facade. Retention/pruning,
-key expiry and digests remain deferred.
+The `Database` facade exposes schema discovery, branch append/staged truncate,
+projected get by ordinal/key and projected rows_of(commit), re-exporting the typed
+immutable-data rows, schemas, options and native value trait. The API opens immutable
+storage once, keeps its reader and transfers storage into the branch manager.
+Reads use the API's store handle directly and the head from that same snapshot. Existing empty
+commits return no rows; future commits are unavailable. Input errors, duplicate
+keys and absent rows map to public domain errors; corrupt payloads remain internal.
+`Database::open` defaults immutable files to `<database>/immutable-data`, overridable
+through `OpenConfig::with_immutable_data_directory`. `open_memory` uses memory.
+`from_store` requires an explicit directory when segments are declared. Paths are
+local settings outside genesis identity. `None` disables immutable storage. Close all database clones before reopening the immutable directory.
+Retention/pruning, key expiry and digests remain deferred.
 
 ### History, proofs, and storage evolution
 

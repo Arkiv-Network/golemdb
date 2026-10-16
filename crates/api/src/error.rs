@@ -2,6 +2,7 @@ use std::error::Error;
 
 use golemdb_branch::BranchError;
 use golemdb_cells::{CellNameError, CellValueParseError};
+use golemdb_immutable_data::{ImmutableDataError, ImmutableDataStorageError};
 use golemdb_query::QueryError;
 use golemdb_record::RecordError;
 
@@ -16,9 +17,9 @@ pub enum ApiError {
     StoreFull,
     #[error("operation {operation} is not implemented")]
     NotImplemented { operation: &'static str },
-    #[error("record not found")]
+    #[error("requested record, immutable segment or row not found")]
     NotFound,
-    #[error("record key already exists")]
+    #[error("key already exists")]
     AlreadyExists,
     #[error("reserved records cannot be modified through CRUD")]
     Reserved,
@@ -39,7 +40,7 @@ pub enum ApiError {
     Sealed,
     #[error("no frame remains to roll back")]
     NoFrameToRollback,
-    #[error("commit {requested} unavailable: only current head {head} is supported")]
+    #[error("commit {requested} is unavailable for this operation; current head is {head}")]
     CommitUnavailable { requested: CommitId, head: CommitId },
     #[error("internal database error")]
     Internal {
@@ -126,6 +127,32 @@ impl From<BranchError> for ApiError {
             BranchError::Conflict => Self::Conflict,
             BranchError::Sealed => Self::Sealed,
             BranchError::NoFrameToRollback => Self::NoFrameToRollback,
+            BranchError::ImmutableData(error) => error.into(),
+            error => Self::internal(error),
+        }
+    }
+}
+
+impl From<ImmutableDataStorageError> for ApiError {
+    fn from(error: ImmutableDataStorageError) -> Self {
+        match error {
+            ImmutableDataStorageError::NotFound => Self::NotFound,
+            ImmutableDataStorageError::AlreadyExists => Self::AlreadyExists,
+            ImmutableDataStorageError::CommitUnavailable {
+                requested,
+                published,
+            } => Self::CommitUnavailable {
+                requested: CommitId::new(requested),
+                head: CommitId::new(published),
+            },
+            // Decoding stored payloads is an internal integrity failure, not bad input.
+            ImmutableDataStorageError::Input(
+                error @ (ImmutableDataError::InvalidPayload { .. }
+                | ImmutableDataError::PayloadArity { .. }),
+            ) => Self::internal(error),
+            ImmutableDataStorageError::Input(error) => {
+                Self::invalid_input(&error.to_string(), error)
+            }
             error => Self::internal(error),
         }
     }
@@ -159,8 +186,13 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
                 BranchError::Storage(e) => Some(e),
                 BranchError::Cells(e) => Some(e),
                 BranchError::Index(e) => Some(e),
+                BranchError::ImmutableData(e) => Some(e),
                 _ => None,
             }
+        } else if let Some(ImmutableDataStorageError::Store(error)) =
+            error.downcast_ref::<ImmutableDataStorageError>()
+        {
+            Some(error)
         } else if let Some(error) = error.downcast_ref::<CellError>() {
             match error {
                 CellError::Storage(e) => Some(e),

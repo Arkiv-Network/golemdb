@@ -19,14 +19,14 @@
 //! ```
 //! use golemdb_api::{
 //!     Api, CellLimits, CellNameRef, CellValue, Database, Filter, Genesis, HashAlgorithm,
-//!     ImmutableDataConfig, QueryOp, ReadTarget, RecordKey, RecordOp,
+//!     QueryOp, ReadTarget, RecordKey, RecordOp,
 //! };
 //!
 //! let limits = CellLimits { max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 64 };
 //! let db = Database::open_memory(&Genesis::new(
 //!     HashAlgorithm::Keccak256,
 //!     limits,
-//!     ImmutableDataConfig::new(500_000, vec![]),
+//!     None,
 //! ))?;
 //!
 //! let key = RecordKey([1; 32]);

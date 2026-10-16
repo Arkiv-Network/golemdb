@@ -1,17 +1,13 @@
 use std::{
     collections::BTreeMap,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
-    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-use golemdb_immutable_data::{
-    ImmutableDataConfig, ImmutableDataKey, ImmutableDataReader, ImmutableDataRow,
-    ImmutableDataStorage,
-};
+use golemdb_immutable_data::{ImmutableDataKey, ImmutableDataRow, ImmutableDataStorage};
 use golemdb_merkle::HashProvider;
 use golemdb_storage::{ReadTransaction, Store};
 
@@ -59,40 +55,6 @@ impl BranchState {
 
 type Entry = Arc<Mutex<Option<BranchState>>>;
 
-/// Immutable-data configuration supplied when creating a branch manager.
-/// Construct with [`Self::files`] for persistent files or [`Self::memory`] for
-/// in-memory storage. Storage is opened and recovered by [`Branches::new`].
-#[derive(Clone, Debug)]
-pub struct ImmutableDataOptions {
-    config: ImmutableDataConfig,
-    genesis_id: [u8; 32],
-    directory: Option<PathBuf>,
-}
-
-impl ImmutableDataOptions {
-    /// Store immutable rows in `directory`, using the supplied genesis schema and identity.
-    pub fn files(
-        config: ImmutableDataConfig,
-        genesis_id: [u8; 32],
-        directory: impl AsRef<Path>,
-    ) -> Self {
-        Self {
-            config,
-            genesis_id,
-            directory: Some(directory.as_ref().to_path_buf()),
-        }
-    }
-
-    /// Store immutable rows in memory, using the supplied genesis schema and identity.
-    pub fn memory(config: ImmutableDataConfig, genesis_id: [u8; 32]) -> Self {
-        Self {
-            config,
-            genesis_id,
-            directory: None,
-        }
-    }
-}
-
 /// Persistent immutable storage, locked through commit and any file recovery.
 pub(crate) struct ImmutableWriter {
     pub storage: ImmutableDataStorage,
@@ -106,7 +68,6 @@ struct Inner<S, H> {
     branches: Mutex<BTreeMap<BranchId, Entry>>,
     immutable_segments: ImmutableSegments,
     immutable_writer: Option<Mutex<ImmutableWriter>>,
-    immutable_reader: Option<ImmutableDataReader>,
 }
 
 /// Head-only lifecycle with guarded cell state and independent immutable batches.
@@ -162,13 +123,15 @@ impl<S, H> Clone for Branches<S, H> {
 
 impl<S: Store, H: HashProvider> Branches<S, H> {
     /// Open a manager over an initialized head. `None` disables immutable data.
-    /// With options, opens immutable storage and recovers it to the durable head
-    /// before returning. Supply matching genesis declarations and identity.
+    /// Takes ownership of supplied immutable storage and recovers it to the durable
+    /// head before returning. Its genesis declarations and identity must match the store.
+    /// Obtain any independent reader with `storage.reader()` before transferring
+    /// ownership, and use it only after this constructor succeeds.
     /// Only this manager and its clones may publish head or immutable metadata
     /// while it owns immutable storage. The store must provide durable commit
     /// and authoritative snapshots after commit errors.
-    /// A missing, malformed or unreadable head is rejected before file access.
-    pub fn new(store: S, hasher: H, immutable_data: Option<ImmutableDataOptions>) -> Result<Self> {
+    /// A missing, malformed or unreadable head is rejected before recovery.
+    pub fn new(store: S, hasher: H, immutable_data: Option<ImmutableDataStorage>) -> Result<Self> {
         {
             let tx = store.begin_read()?;
             read_head(&tx)?;
@@ -179,21 +142,13 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
             branches: Mutex::new(BTreeMap::new()),
             immutable_segments: ImmutableSegments::default(),
             immutable_writer: None,
-            immutable_reader: None,
         };
-        if let Some(options) = immutable_data {
-            let mut storage = match options.directory {
-                Some(directory) => {
-                    ImmutableDataStorage::open(options.config, options.genesis_id, directory)?
-                }
-                None => ImmutableDataStorage::in_memory(options.config, options.genesis_id)?,
-            };
+        if let Some(mut storage) = immutable_data {
             let segments = ImmutableSegments::new(storage.config().clone())?;
             // Exclude publishers while recovering against an authoritative snapshot.
             let tx = inner.store.begin_write()?;
             storage.recover(&tx, read_head(&tx)?.get())?;
             drop(tx);
-            inner.immutable_reader = Some(storage.reader());
             inner.immutable_segments = segments;
             inner.immutable_writer = Some(Mutex::new(ImmutableWriter {
                 storage,
@@ -343,13 +298,6 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
                 .truncate(origin, state.commit_id.get(), segment, from_ordinal)
                 .map_err(BranchError::from)
         })?
-    }
-
-    /// Independent committed reader, or None when immutable data is disabled.
-    /// Calls on this handle never acquire the immutable writer lock. The caller supplies
-    /// one published store snapshot and the commit number read from that snapshot.
-    pub fn immutable_data(&self) -> Option<&ImmutableDataReader> {
-        self.inner.immutable_reader.as_ref()
     }
 
     /// Validate the head, then undo one frame in memory. Only admission reads

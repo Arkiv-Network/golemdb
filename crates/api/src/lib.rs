@@ -9,8 +9,8 @@
 //! These contracts are unmetered: no receipt, debug flag, or record version. Queries
 //! take a budget, which is not enforced yet.
 //! Current record storage supports branch reads and committed-head reads only.
-//! Immutable-data types and methods are exposed, but every such Database call
-//! returns [`ApiError::NotImplemented`] immediately without I/O or state changes.
+//! Immutable rows are staged on branches and read from committed storage, with
+//! named column projections and native typed access.
 //!
 //! ```
 //! use golemdb_api::{Api, CellLimits, CellValue, Genesis, Database,
@@ -19,7 +19,7 @@
 //! let config = OpenConfig::new(Genesis::new(HashAlgorithm::Keccak256, CellLimits {
 //!         max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 128,
 //! },
-//!     golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
+//!     None,
 //! ));
 //! let db = Database::open_memory(&config.genesis)?;
 //! let branch = db.begin()?;
@@ -39,7 +39,6 @@ mod config;
 mod database;
 mod error;
 mod genesis;
-mod immutable_data;
 mod open;
 mod open_error;
 mod record_op;
@@ -50,14 +49,13 @@ pub use database::Database;
 pub use error::{ApiError, Result};
 pub use golemdb_cells::CellLimits;
 pub use golemdb_immutable_data::{
-    ImmutableDataColumn, ImmutableDataCompression, ImmutableDataConfig, ImmutableDataConfigError,
+    FromImmutableDataValue, ImmutableDataAddress, ImmutableDataColumn, ImmutableDataCompression,
+    ImmutableDataConfig, ImmutableDataConfigError, ImmutableDataError, ImmutableDataKey,
+    ImmutableDataOrdinal, ImmutableDataReadOptions, ImmutableDataRow, ImmutableDataSchema,
     ImmutableDataSegment,
 };
 pub use golemdb_merkle::HashAlgorithm;
 pub use golemdb_storage_mdbx::MdbxOptions;
-pub use immutable_data::{
-    ImmutableDataAddress, ImmutableDataKey, ImmutableDataOrdinal, ImmutableDataRow,
-};
 pub use open::OpenInfo;
 pub use open_error::{OpenError, OpenResult};
 pub use record_op::{RecordOp, op};
@@ -107,7 +105,8 @@ pub trait Api {
     /// Undo one frame. Repeated rollback moves to preceding frames.
     fn rollback(&self, branch: BranchId) -> Result<()>;
 
-    /// Freeze without publishing. Sealed branches allow reads but reject writes, checkpoints, and rollback.
+    /// Freeze live state without publishing. Sealed branches allow reads and immutable
+    /// appends/truncation, but reject live-state writes, checkpoints, and rollback.
     /// The `#roots` cell added by sealing is visible only after commit.
     fn seal(&self, branch: BranchId) -> Result<SealInfo>;
 
@@ -116,10 +115,13 @@ pub trait Api {
     fn commit(&self, branch: BranchId) -> Result<CommitId>;
     fn discard(&self, branch: BranchId) -> Result<()>;
 
-    /// Future contract: stage a row on a sealed branch with an optional unique
-    /// segment-local key; return a provisional ordinal. Duplicate keys never
-    /// overwrite rows. Row and key binding become visible together at commit.
-    /// Currently returns NotImplemented immediately, without validating arguments.
+    /// Discover a segment's ordered column names and logical types from genesis.
+    /// Unknown segments return NotFound, including when no segments are configured.
+    fn immutable_data_schema(&self, segment: &str) -> Result<ImmutableDataSchema>;
+
+    /// Stage a complete typed row before or after seal, returning a provisional
+    /// segment ordinal. An optional key must be unique within committed bindings
+    /// and this branch's staged rows. Rows and keys become visible together at commit.
     fn immutable_data_append(
         &self,
         branch: BranchId,
@@ -128,28 +130,33 @@ pub trait Api {
         row: ImmutableDataRow,
     ) -> Result<ImmutableDataOrdinal>;
 
-    /// Future contract: read a committed row by ordinal or caller-provided key.
-    /// Currently returns NotImplemented without storage access.
+    /// Remove this branch's staged suffix beginning at `from_ordinal`, releasing
+    /// its keys and ordinals. Cannot truncate committed rows. Works after seal and
+    /// remains independent of live-state checkpoints and rollback.
+    fn immutable_data_truncate(
+        &self,
+        branch: BranchId,
+        segment: &str,
+        from_ordinal: ImmutableDataOrdinal,
+    ) -> Result<()>;
+
+    /// Read a committed row by ordinal or key using one current published snapshot.
+    /// Projections preserve caller order and reject empty, duplicate or unknown columns.
     fn immutable_data_get(
         &self,
         segment: &str,
         address: ImmutableDataAddress,
+        options: &ImmutableDataReadOptions,
     ) -> Result<ImmutableDataRow>;
 
-    /// Future contract: the half-open ordinal range appended by this commit.
-    /// Currently returns NotImplemented without storage access.
-    fn immutable_data_range_of(
-        &self,
-        segment: &str,
-        commit: CommitId,
-    ) -> Result<std::ops::Range<ImmutableDataOrdinal>>;
-
-    /// Future contract: this commit's rows in append order.
-    /// Currently returns NotImplemented without storage access.
+    /// Read this commit's rows in append order using one published snapshot.
+    /// Existing commits with no rows (including genesis) return an empty vector;
+    /// future commits return CommitUnavailable. Projection follows the get rules.
     fn immutable_data_rows_of(
         &self,
         segment: &str,
         commit: CommitId,
+        options: &ImmutableDataReadOptions,
     ) -> Result<Vec<ImmutableDataRow>>;
 }
 

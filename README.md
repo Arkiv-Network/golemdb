@@ -26,7 +26,7 @@ The unpublished integration-test package is a workspace member only.
   seal buffers cell/index updates and roots; commit atomically persists them and
   advances head; independent immutable-data staging supports append/truncate
   before and after seal, with coordinated file/KV publication and crash recovery;
-  API wiring and live-state history remain deferred
+  live-state history remains deferred
 - `crates/record` (package `golemdb-record`) — caller-keyed record CRUD, allocation,
   identity and bindings; branch work-in-progress and committed-head reads
 - `crates/api` (package `golemdb-api`) — one public `Api` trait implemented by the

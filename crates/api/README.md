@@ -32,7 +32,7 @@ let config = OpenConfig::new(Genesis::new(
         max_str_len: 64,
         max_bytes_len: 128,
     },
-    golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
+    None,
 ));
 let db = Database::open("./golemdb-quickstart", &config)?;
 let branch = db.begin()?;
@@ -135,7 +135,7 @@ let config = OpenConfig::new(Genesis::new(
         max_str_len: 64,
         max_bytes_len: 128,
     },
-    golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
+    None,
 ))
 .with_mode(OpenMode::CreateNew);
 let db = Database::open("./golemdb-empty-records", &config)?;
@@ -193,7 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_str_len: 128,
             max_bytes_len: 1024,
         },
-        golemdb_api::ImmutableDataConfig::new(500_000, vec![]),
+        None,
     ))
     .with_mode(OpenMode::CreateNew);
     let db = Database::open("./golemdb-catalogue", &config)?;
@@ -357,15 +357,17 @@ immutable_data:
         - {name: block_body} # bytes by default
 ```
 
-`blake3` is also supported. Fields are required except a column's `type`, which
-defaults to `bytes`. Duplicate and unknown fields are rejected. A deployment with
-no immutable segments explicitly declares `segments: []` and a positive shard span.
+`blake3` is also supported. Omit `immutable_data` or set it to `null` to disable
+immutable storage. An enabled configuration requires at least one segment and a
+positive shard span. Other fields are required except a column's `type`, which
+defaults to `bytes`. Duplicate and unknown fields are rejected.
 Use `Genesis::load(path)` or `Genesis::from_yaml(text)`; the loader
 does not search for files or read environment overrides.
 
-Typed construction uses `Genesis::new(hash, cell_limits, immutable_data)`, with
-`ImmutableDataConfig::new(shard_span, segments)`. These configuration types own
-their declarations and implement `Clone`, not `Copy`.
+Typed construction uses `Genesis::new(hash, cell_limits, None)` to disable
+immutable data, or `Genesis::new(hash, cell_limits,
+Some(ImmutableDataConfig::new(shard_span, segments)))` to enable it. These
+configuration types own their declarations and implement `Clone`, not `Copy`.
 
 Segment names match `[a-z][a-z0-9_]{0,63}` and are rejected rather than normalized
 when invalid. Column names use the cell user-name grammar, independently of the
@@ -380,13 +382,14 @@ with positive `u64` shard spans. The encoded segment declaration is limited to
 16,383 bytes so its tagged parameter cell fits the 16 KiB engine value budget.
 These are configuration limits; they do not cap immutable row payloads.
 
-Genesis writes `#params.#shardSpan` as a `u64` field and
-`#params.#immutableDataSegments` as a bytes field. Declarations are encoded with
+When enabled, genesis writes `#params.#shardSpan` as a `u64` field and
+`#params.#immutableDataSegments` as a bytes field. Both cells are absent when
+disabled; no placeholder span or empty schema is persisted. Declarations are encoded with
 fixed-width lengths and type/compression IDs, with segments sorted by name and
 columns in declaration order. Zero-based `u32` segment IDs follow that sorted
 order. YAML formatting, segment order and omitted versus explicit `bytes` types
 have identical commitments. Changing a name, column order, type, compression or
-shard span changes genesis identity. Reopening checks the stored parameter cells
+shard span, or enabling/disabling immutable data, changes genesis identity. Reopening checks the stored parameter cells
 and their trie commitments without rewriting them.
 
 ```rust
@@ -448,40 +451,75 @@ changed deployment settings return `GenesisMismatch`.
 failures. `Database::info()` describes the opening snapshot; call `head()` for the
 live head, or `get(ReadTarget::Head, ...)` for a consistent current record read.
 
+## Immutable data
+
+Genesis declares each segment's ordered, named, typed columns and compression.
+The API re-exports the immutable-data types and cell codecs:
+
+| Method | Behavior |
+| --- | --- |
+| `immutable_data_schema(segment)` | Return the declared column names and types. |
+| `immutable_data_append(branch, segment, key, row)` | Stage a complete typed row and return its provisional `u64` ordinal. |
+| `immutable_data_truncate(branch, segment, from_ordinal)` | Remove only the branch's staged suffix, releasing its keys and ordinals. |
+| `immutable_data_get(segment, address, &options)` | Read a committed row by ordinal or optional 32-byte key. |
+| `immutable_data_rows_of(segment, commit, &options)` | Read that commit's rows in append order; an existing empty commit returns no rows. |
+
+Append and truncate work before and after seal, independently of live-state
+checkpoints and rollback. Files are appended and synced during commit; MDBX then
+publishes live state, key bindings, commit ranges and head atomically. Losing and
+discarded branches publish no rows. Keys are unique per segment; duplicate keys
+return `AlreadyExists`. Cell size limits do not constrain immutable payloads.
+
+Reads use one published snapshot. `ImmutableDataReadOptions::all()` selects every
+column; `columns(["hash", "height"])` selects named columns in caller order.
+Explicitly empty, duplicate or unknown projections return `InvalidArgument`.
+Unknown segments and absent rows return `NotFound`; future commits return
+`CommitUnavailable`. Read rows own their values and layout metadata. Use
+`row.get::<T>("column")` for checked native conversion, `value` for borrowed cell
+access, or `iter` for named values. Schema types remain exact when projecting.
+
+For a segment declared as `height: u64`, `hash: bytes32`:
+
+```rust
+use golemdb_api::{Api, CellValue, ImmutableDataAddress, ImmutableDataKey,
+    ImmutableDataReadOptions, ImmutableDataRow};
+
+let branch = db.begin()?;
+let ordinal = db.immutable_data_append(
+    branch,
+    "headers",
+    Some(ImmutableDataKey([7; 32])),
+    ImmutableDataRow::new(vec![CellValue::from_u64(42), CellValue::from_bytes32([9; 32])]),
+)?;
+let commit = db.commit(branch)?;
+let projection = ImmutableDataReadOptions::columns(["hash"]);
+let row = db.immutable_data_get("headers", ImmutableDataAddress::Ordinal(ordinal), &projection)?;
+let hash: [u8; 32] = row.get("hash")?;
+let rows = db.immutable_data_rows_of("headers", commit, &projection)?;
+```
+
+`Database::open` defaults to `<database>/immutable-data`; override with
+`OpenConfig::with_immutable_data_directory(path)`. `open_memory` uses memory for
+both live state and immutable rows. `from_store` requires an explicit immutable
+directory when segments are declared; it cannot infer the supplied store's
+persistence. The directory is local configuration and does not change genesis
+identity. `Genesis::immutable_data: None` disables immutable storage and creates no files.
+Close all database clones before reopening the same immutable directory.
+Startup recovers unpublished tails against durable commit metadata.
+
+Retention/pruning, key expiry and digests remain deferred.
+
 ## Current scope
 
-Immutable data has an interface only. `Api` exposes:
-
-- `immutable_data_append(branch, segment, key, row) -> ordinal`, where `key` is
-  `Option<ImmutableDataKey>` and `row` is `Vec<Vec<u8>>` (one byte array per column).
-- `immutable_data_get(segment, address) -> row`, with
-  `ImmutableDataAddress::Ordinal(u64)` or `ImmutableDataAddress::Key(key)`.
-- `immutable_data_range_of(segment, commit) -> Range<u64>`.
-- `immutable_data_rows_of(segment, commit) -> Vec<ImmutableDataRow>`.
-
-`ImmutableDataKey` contains 32 caller-provided bytes and is distinct from a record
-key. The intended contract makes keys unique within a segment, with rows and key
-bindings published together from a sealed branch at commit. Keys are optional;
-all rows retain ordinal addressing. Duplicate keys will never overwrite rows.
-
-**Every immutable-data call currently returns `ApiError::NotImplemented { operation }`
-immediately**, including calls with invalid handles or unknown segments. Nothing
-is validated, staged, allocated, read, or written. Segment configuration, files,
-key indexes, and commit integration are deferred. The
-[immutable-data specification](../../docs/golem-db-api.md#immutable-data) describes
-the future behavior, including pruning and rewind of key bindings.
-
-All four iterations are implemented: typed cells, the facade contract and builders,
-atomic opening/genesis, and a cloneable `Database` with shared branch state.
+Typed cells, record CRUD, branch lifecycle, atomic opening/genesis, and typed
+immutable data are implemented behind a cloneable `Database` with shared state.
 Queries support `Eq`, `In` and `Range` filters with full or projected records, and `count`.
 Queries read committed state only: `None` reads the head, and an explicit commit
 other than the head returns `ApiError::CommitUnavailable`. Sort, limit and offset
 return `ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost
 receipts, generated keys, OCC, and transport serialization are deferred.
 
-The [consumer test](src/tests/consumer.rs) demonstrates a single facade mock and
-commit failure injection behind `Arc<dyn Api + Send + Sync>`. Use scripted mocks
-for consumer error paths. For tests, replace the storage opening with
+Use scripted mocks for consumer error paths behind `Arc<dyn Api + Send + Sync>`. For tests, replace the storage opening with
 `Database::open_memory(&config.genesis)?` to get a fresh in-memory database. Arkiv can
 pass `Arc::new(Database::open_memory(&config.genesis)?)`
 as `Arc<dyn Api + Send + Sync>` to run behavioral tests with real database semantics.
