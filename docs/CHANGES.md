@@ -68,6 +68,7 @@ Status **wai** means "waiting on additional input".
 | D17 | wai | P3 | E | Typed columns in segments? (full argument carried in design.md Open Questions, from the §11 Open box) | §11 open | Decision-log entry | decisions_for_architect.md #18 (recommends untyped) |
 | D19 | wai | P2 | H | Per-commit log digest (SE-1): definition, and whether the host or the engine commits it | requirements SE-1, open question 8; surfaced by P05 | Digest vectors; `#logDigests` cell proof | decisions_for_architect.md #19 (recommends engine commits lag-one in `#logDigests`, id 5) |
 | D20 | triaged | P2 | Q | Arkiv lookups by hash: Arkiv keeps no store of its own. **Largely answered (2026-10-10):** design §11 *Row keys* gives segments an optional per-segment key with an uncommitted index (newest wins, uniqueness the host's job), which serves block-by-hash, transaction-by-hash and receipt-by-transaction. Still open: log filtering, and which records and attributes Arkiv uses | Reconciliation 2026-09-30 (A4 sign-off) | Record/attribute layout per lookup, with its commitment and history cost | design.md §11 The Model; Row keys; What This Assumes of the Schema |
+| D21 | proposed | P3 | E | Content addressing for large values: store a large `bytes` or `str` value once under its hash, the cell holding its length and hash; repeated values stored once, record scans can skip payloads | Read metering discussion 2026-10-16 | Measured share of large repeated values; cost of the extra row, reference counting and proof changes | design.md Open Questions |
 
 ### Product decisions
 
@@ -95,7 +96,7 @@ Kind K3.
 | S09 | triaged | P2 | Host-surface box at head of branch and segment chapters | F-C11, F-Hermes | One screen |  |
 | S10 | triaged | P2 | Per-operation semantics table: create/patch/delete/rewind × every structure | R10, A-Tomas | Table exists; agrees with D07 |  |
 | S11 | triaged | P3 | One running example dataset with valid IDs; one end-to-end fixture | R7, A-R14 | Same records in every worked example |  |
-| S13 | triaged | P2 | Testing and conformance strategy document | R27, Epic 6 | Document exists; Epic 6 links it |  |
+| S13 | triaged | P2 | Testing and conformance strategy document. **Added 2026-10-16:** the shared vector file format, also for the metering vectors, whose content metering D6 *Conformance Vectors* fixes; precedent: Ethereum's test suites (YAML or code fillers, generated JSON fixtures) | R27, Epic 6 | Document exists; Epic 6 links it |  |
 | S14 | triaged | P2 | Information model in one home; mechanism docs reference, not repeat | R6 | No normative duplication |  |
 | S15 | triaged | P2 | Product-decisions list in the short document | F-C13 | List exists |  |
 

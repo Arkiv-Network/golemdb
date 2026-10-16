@@ -4,7 +4,7 @@ Status: draft for discussion, 2026-10-09. How Arkiv turns these costs into fees 
 
 ## Contents
 
-- **Context:** [Why](#why) · [Principle](#principle) · [Scope](#scope) · [Review Findings](#todo-review-findings) · [Goals](#goals) · [Requirements](#requirements) · [Record Model](#record-model)
+- **Context:** [Why](#why) · [Principle](#principle) · [Scope](#scope) · [Review Findings](#todo-review-findings) · [Goals](#goals) · [Requirements](#requirements) · [Record Model](#record-model) · [The Index](#the-index)
 - **Foundation:** [D1. Where Metering Happens](#d1-where-metering-happens)
 - **Cell store**
   - Writes: [D2. Write Cost Model](#d2-write-cost-model) · [D3. Modeled Trie Depth](#d3-write-metering-and-modeled-trie-depth) · [D4. Storage and Size Counting](#d4-storage-and-size-counting) · [D5. Record Shape and Deletion Bound](#d5-record-shape-and-deletion-bound)
@@ -162,12 +162,26 @@ Sizes follow D4. GolemDB's own pricing does not use the byte counters. Maintaini
 the cell, alone or with the full record, and is metered as a read (D6). The database-wide counters that set the modeled trie depth are
 separate (D3).
 
+### The Index
+
+Attribute cells are indexed; fields are not. The index is an inverted index, as in information
+retrieval:
+
+- A **term** is one cell name, type and value, such as `status = "active"`.
+- A **posting** is one record ID filed under a term.
+- A term's **posting list** is all record IDs under it. It is stored as a bitmap split into
+  **bitmap containers**, each holding the 16-bit offsets of up to 2¹⁶ record IDs that share their
+  upper 48 bits, kept together by a bitmap trie ([design glossary](golemdb-design.md#glossary)).
+
+Writes join and leave terms (D2); queries look terms up, step through ranges of terms, and load and
+combine posting lists (D6).
+
 ## D1. Where Metering Happens
 
 Meets R1, R5.
 
 Cost is computed over GolemDB's logical schema.
-The logical schema includes cell rows, index terms, posting-list containers, trie paths. It does not consider lower level items such as concrete MDBX pages. Physical page-level work depends on each node's current physical history: open read transactions, compaction and configuration change which pages a write touches. Two honest instances might well disagree on those.
+The logical schema includes cell rows, index terms, bitmap containers, trie paths. It does not consider lower level items such as concrete MDBX pages. Physical page-level work depends on each node's current physical history: open read transactions, compaction and configuration change which pages a write touches. Two honest instances might well disagree on those.
 
 Consequences:
 
@@ -323,7 +337,7 @@ Bytes written are made live and charged (D4). Bytes deleted leave live state but
 | record leaves, whether or not it is the last member | leave | `w_idx_read + w_idx[leave]` |
 | value or type changes | leave the old term, join the new one | both |
 
-- `w_idx[join]` and `w_idx[leave]` cover the membership change, the posting-list container and the posting-list path; the index-trie path is the depth term.
+- `w_idx[join]` and `w_idx[leave]` cover the membership change, the bitmap container and the posting-list path; the index-trie path is the depth term.
 - `w_idx_term_create` covers both creating a term and its later removal: the term row and the leaf insert and removal. It has no depth term, because the join that follows and the eventual leave already pay for the leaf's path. Removing a term emptied by its last member costs nothing at that point, so every leave costs the same and deletion stays predictable.
 - A join writes the term's bytes (D4); a leave deletes them.
 
@@ -449,16 +463,65 @@ the execution rules of the [query proposal](query-proposal.md#execution-rules-no
   admission validates the whole request without reading state, charged as admission (D2). Then
   one storage snapshot is opened, and the target commit is checked against its head; every state
   read uses that snapshot.
+- **Admission** has D2's three-part shape, with weights of its own that start at D2's values:
+  `query_admission_base` once per query or count, `query_admission_entry` per entry (each filter
+  node, `In` value, `Range` bound, projected name and sort key) and `query_admission_byte` per byte
+  of names and values inspected. It is charged incrementally, each part checked before its work,
+  so an oversized filter stops early with `OutOfBudget`. `In` values must be given in strictly
+  ascending order and are checked in one pass, so admission stays linear in their number.
 - **Logical steps only.** The counted descent is the reference one, whether or not an
   implementation short-circuits it (D1, R5).
-- **Leaves.** An equality lookup is one term read, also when the term is absent. An `In` reads
-  each distinct term once, in term key order. A range scan charges every index term stepped
-  over, so ranges over attributes with many distinct values pay for their width.
+- **Leaves.** An `Eq` is one term lookup (`index_seek`), present or absent. An `In` is one term
+  lookup per distinct value, in term key order. Every term found then pays for its posting list:
+  one `bitmap_container_read` per bitmap container loaded, and one `set_container` per container
+  merged into the running result.
+- **Range scans.** Positioning the cursor at the lower bound reads the first index entry and is
+  one `index_seek`; every further entry read is one `index_scan_step`, including the entry that
+  ends the scan: past the upper bound, past the end of the name and type run, or at the end of the
+  table. A scan over `k` terms therefore costs `index_seek + k × index_scan_step` plus their
+  containers, and a range with no term in it costs one `index_seek`, like an absent `Eq`. An
+  `Excluded` lower bound that matches an existing term costs one more step, for the entry read
+  and skipped. Bounds that admit no value read nothing ([query proposal](query-proposal.md#range-bounds)).
+  So ranges over attributes with many distinct values pay for their width.
+- **Containers are charged as they are loaded.** Each bitmap container's charge is checked before
+  the container is loaded, whether by loading containers one at a time or by knowing their count
+  from the posting root. Today's `bitmap_at` loads all containers at once and needs one of the two.
+  The merge is charged per incoming container, so the running result is not charged again on
+  every merge.
 - **Early exit.** An `And` whose running set becomes empty skips its remaining children, which
   are not charged.
 - **Combining sets** is charged by the size of the sets combined, so the work of one step stays
   bounded by its charge (R4).
-- **Materialization** charges a point read per record and its cells, for the returned page only.
+- **Materialization** reads the returned page's records only, in page order. Per record: `#key`,
+  one cell point read; then, with a projection, one cell point read per projected name, present
+  or absent; without one, `#meta` first, one cell point read, which gives the exact number of user
+  cells and their bytes before the cells are scanned. `get` resolves the key first.
+- **Branch reads cost what committed reads cost.** A `get` on a branch looks each cell up in the
+  branch's in-memory overlay first and falls back to the branch's base snapshot; a full-record read
+  merges both. Where a cell comes from is a physical detail, like a warm or cold cache (R5), so a
+  branch read is charged the same steps and weights as the committed read, calibrated for an
+  overlay miss followed by a base read (R4). Its `#meta` reflects the branch's own writes, and its
+  cost schedule is the one captured at the branch's base commit (R12). Queries read committed
+  state only, so `get` is the only branch read.
+- **Paging has no charge of its own.** `offset`, `limit` and `max_bytes` work on the match set
+  already built, and paid for, in the same call; only the page's records are materialized, each
+  charged as above. A page ends at `limit` records or at `max_bytes`, whichever comes first, with
+  at least one record ([query proposal](query-proposal.md#execution-rules-normative), rule 9). A
+  full record that would not fit is detected from its `#meta` before its cells are read. Calls are
+  stateless, so every page builds and pays for the whole match set again, and with `sort` the
+  whole sort: a deep `offset` is not cheap, which the cursor (D11) is to address.
+- **Bytes are charged after the read and before the copy.** A cell point read is a flat charge,
+  calibrated for a value of the maximum size (`#maxStrLen`, `#maxBytesLen`), as D2's fixed per-cell
+  charges are. It yields the value's length; the value's bytes are then charged as a step of their
+  own, on the D4 basis, before the value is decoded and copied into the result. All types but
+  `str` and `bytes` have a fixed width, so only those two vary. A full-record read charges all its
+  cells and bytes at once, from `#meta`.
+- **Cell reads need a metering-aware method.** Reading a cell must expose its length before
+  decoding or copying it, so that a large `bytes` value that would exceed the budget is detected
+  without copying any of its bytes. MDBX supports this directly: a read returns a reference into
+  the memory-mapped file with its length, and the value's overflow pages are only loaded when its
+  bytes are touched. Today's `CellReader::get` decodes into an owned value at once and needs this
+  amended method.
 - **Sort comparisons** are the exception to counting: modeled as `⌈N log₂ N⌉ × S` from the match
   count N and S sort terms, so the choice of sort algorithm stays out of the receipt.
 - **Historical reads.** Resolving an item at a past commit is a flat surcharge, independent of how
@@ -468,10 +531,96 @@ the execution rules of the [query proposal](query-proposal.md#execution-rules-no
   `id_of` is one key resolution (`key_resolve`), `key_of` one cell read (`cell_read`).
 - Bulk deletion, such as a host's expiry purge, uses ordinary reads: Arkiv's purge queries one
   equality term of its expiry attribute in record-ID order and deletes record by record under its
-  own budget ([tokenomics](arkiv-tokenomics.md#purge-budget)). No special scan is provided.
+  own budget ([tokenomics](arkiv-tokenomics.md#purge-budget)). It reads the parent block's
+  committed state once per expiry block, since queries do not see a branch's deletes. No special
+  scan is provided.
 
-To be specified (finding F1): the read weights and their exact counting rules, the unit for
-combining sets, the integer evaluation of the sort model, and conformance vectors.
+### Read Steps
+
+Every read is a sequence of these steps, each with its own weight. The weights are separate even
+where two steps do similar work; such pairs start with the same value, and measurements may set
+them apart later.
+
+| Step | When | Weight |
+| --- | --- | --- |
+| Call base | once per read call: open the snapshot, read the head | `read_base` |
+| Admission | once per query, per entry and per byte inspected | `query_admission_base`, `query_admission_entry`, `query_admission_byte` |
+| Key resolution | `get`: look up the key's binding, present or absent | `key_resolve` |
+| Cell point read | `#key`, each projected cell, present or absent | `cell_read` |
+| Cell scan step | full-record read: per cell row | `cell_scan_step` |
+| Bytes read | per byte of each cell value returned | `bytes_read` |
+| Term lookup | `Eq`, each `In` value: look up the term, present or absent | `index_seek` |
+| Term stepped | `Range`, `Prefix`, `Exists`: per term stepped over | `index_scan_step` |
+| Bitmap container loaded | per bitmap container when a term's posting list is loaded | `bitmap_container_read` |
+| Set combination | per bitmap container processed by `And`, `Or` and `Not` | `set_container` |
+| Sort comparison | modeled, `⌈N log₂ N⌉ × S` | `sort_compare` (deferred) |
+| Historical read | per item resolved at a past commit | flat surcharge (deferred) |
+
+- **Bitmap containers are the unit for posting lists** ([The Index](#the-index)). They are part of
+  the logical schema (D1), deterministic and independent of storage pages, and they are the real unit of work
+  when posting lists are loaded and combined. Charging per bitmap container makes a popular term
+  pay for its size: one term lookup on a value with millions of postings loads, and pays for, many
+  bitmap containers (R4).
+- **Reads touch flat tables, not trie paths.** A term lookup and a cell read are single lookups,
+  with no depth term as in D2. The posting trie walk is covered by the bitmap container charge, at the
+  constant posting-trie depth (D3).
+- **Equal starting values:** key resolution and term lookup are both single lookups in a flat
+  table; a cell point read and a cell scan step both read one cell row.
+
+### Conformance Vectors
+
+R13's vectors pin results, costs and stopping points. Each vector contains:
+
+| Part | Content |
+| --- | --- |
+| `id`, `description`, `covers` | a stable name, one line of intent, the rules it checks |
+| `genesis` | the deployment parameters it depends on: length limits, per-record caps, query caps |
+| `schedule` | a complete weight set, and the trie counters the modeled depth comes from |
+| `setup` | ordered calls that build the state, so record IDs and index contents follow from the spec, not from one engine's storage |
+| `call` | the call under test: kind, target, operation and budget |
+| `expect` | `ok` with the result, cost, `priced_at` and `evaluated_at`, or `error` with the kind, the cost spent and `required` if any |
+| `steps` | the expected count of each step, as the receipt's diagnostic ledger reports them (D2) |
+
+- **Step counts say where two engines disagree;** the cost alone says only that they do. They also
+  make a vector reusable under other weights.
+- **A test schedule with distinct weights** makes a wrong count visible in the total cost, and
+  keeps two counting errors from cancelling out.
+- **The stopping point** of an `OutOfBudget` vector is given by its `steps`: only the steps
+  performed. A pair of vectors pins it, one with exactly enough budget and one with one unit less.
+
+The file format is shared with the encoding vectors (design D09) and decided with the conformance
+strategy (CHANGES S13); a common choice, as in Ethereum's test suites, is hand-written YAML or code
+generating JSON fixtures. The files live in `conformance/vectors/metering/`.
+
+### Read Cost Items
+
+Every moving part of the read cost model, decided or not, ordered by relevance: the foundations
+(1–2), what Arkiv needs first (3–11), the rest of the query MVP (12–18), and what is deferred
+(19–20). A working list towards resolving finding F1: once every item is settled, the counting
+rules above carry its content and the list is removed.
+
+| # | Item | Status | Current view |
+| --- | --- | --- | --- |
+| 1 | Charge checked before each step; the call stops at the first that does not fit | decided | R7; no partial results |
+| 2 | Order of checks | decided | `NotImplemented` first, then admission, then snapshot and commit check, then reads |
+| 3 | Read steps and their weights | proposed | [Read Steps](#read-steps); separate weights, similar steps start equal |
+| 4 | Unit for combining sets | decided | per bitmap container, a logical unit (D1) |
+| 5 | Equality lookup, including an absent term | proposed | one `index_seek`, present or absent, plus the containers of a term found |
+| 6 | `In` | decided | one term read per distinct term, in key order |
+| 7 | `Range` scan | proposed | `index_seek` plus one `index_scan_step` per further entry read, including the one ending the scan; an empty range costs one `index_seek` |
+| 8 | Materialization | proposed | `#key` plus projected cells, or `#meta` then a full scan; bytes charged after the read and before the copy |
+| 9 | Admission for queries | proposed | D2's three-part shape, own weights starting at D2's values; `In` values strictly ascending, checked linearly |
+| 10 | `get` | proposed | one key resolution, then one cell read per cell |
+| 11 | Purge read: equality, record-ID order, limit | decided shape | charges follow from items 5 and 8 |
+| 12 | `And` early exit | decided | remaining children skipped and not charged |
+| 13 | `Or`, `Not` inside `And` | decided | per the query proposal; standalone `Not` waits for P08 |
+| 14 | `count` | decided | the filter rules only, no materialization |
+| 15 | `limit`, `offset`, `max_bytes` | proposed | no charge of their own; page ends at `limit` or `max_bytes`, at least one record; caps as defaults |
+| 16 | Branch reads | proposed | the same steps and weights as a committed read, calibrated for an overlay miss (R4, R5) |
+| 17 | Conformance vector format | proposed | [Conformance Vectors](#conformance-vectors): content fixed here, file format shared with the encoding vectors (S13) |
+| 18 | Caps: query depth, page size | decided | genesis parameters, per the query proposal, values open |
+| 19 | Sort | deferred | `⌈N log₂ N⌉ × S`; integer evaluation, including `N = 0` |
+| 20 | Historical reads | deferred | flat surcharge |
 
 ## D7. Immutable-Log Metering
 
@@ -700,7 +849,7 @@ the host allows it is its admin policy.
 | `w_idx_term_create` | Creating a new term, including its later removal (D2) | new index row and index-trie leaf, plus their removal |
 | `w_index_trie_update` | Index-trie path, per node × `index_trie_depth` (D2, D3) | `indextrie_path_rewrite` |
 | `w_idx_write_byte` | Index storage: bytes written (D2, D4) | byte term (new term keys) |
-| Read weights (`key_resolve`, `cell_read`, `index_seek`, `index_scan_step`, `sort_compare`, `bytes_read`, …) | Reads, including scans (D6) | read op classes |
+| Read weights (`read_base`, `query_admission_base`, `query_admission_entry`, `query_admission_byte`, `key_resolve`, `cell_read`, `cell_scan_step`, `bytes_read`, `index_seek`, `index_scan_step`, `bitmap_container_read`, `set_container`, `sort_compare`) | Read steps (D6) | read op classes |
 | `w_append_base`, `w_append_byte` | Immutable-log append: fixed staging work, row bytes written and their shard residency (D7) | `immutable_data_append` plus the byte term |
 | `w_imm_read_base` | Immutable-log row read (D7); bytes read use the `bytes_read` read weight (D6) | `immutable_data_read` |
 | `host.*` (host-declared) | The host's own prices and limits; never used by GolemDB (D9) | the host's calibration and capacity planning |
