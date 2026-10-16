@@ -1,6 +1,6 @@
 use std::ops::Bound;
 
-use golemdb_cells::{CellNameRef, CellType, CellValueRef};
+use golemdb_cells::{CellNameRef, CellType, CellValue, CellValueRef};
 
 use crate::{IndexTerm, TermError, term::name_str};
 
@@ -79,15 +79,15 @@ impl TermRange {
         Ok((!empty).then_some(Self { lower, upper }))
     }
 
-    /// The terms of `name` whose value starts with `prefix`'s bytes, in the
-    /// run of `prefix`'s type: for a `str`, the strings that start with it.
-    /// The empty string is the least `str`, so it starts the whole run.
+    /// The `str` terms of `name` whose value starts with `prefix`, byte by
+    /// byte in UTF-8. The empty string is the least `str`, so it starts the
+    /// whole run.
     ///
-    /// The name and the type are checked as [`IndexTerm::from_cell_name`]
-    /// checks them. Every such range holds at least the prefix's own term, so
-    /// it is never empty.
-    pub fn with_prefix(name: CellNameRef<'_>, prefix: CellValueRef<'_>) -> Result<Self, TermError> {
-        let start = IndexTerm::from_cell_name(name, prefix)?.into_bytes();
+    /// The name is checked as [`IndexTerm::from_cell_name`] checks it. Every
+    /// such range holds at least the prefix's own term, so it is never empty.
+    pub fn with_prefix(name: CellNameRef<'_>, prefix: &str) -> Result<Self, TermError> {
+        let prefix = CellValue::from_str(prefix);
+        let start = IndexTerm::from_cell_name(name, prefix.as_view())?.into_bytes();
         Ok(Self {
             upper: past(start.clone()),
             lower: Bound::Included(start),
@@ -135,7 +135,7 @@ mod tests {
         RangeBounds,
     };
 
-    use golemdb_cells::{CellValue, Width};
+    use golemdb_cells::Width;
 
     use super::*;
 
@@ -368,8 +368,8 @@ mod tests {
     }
 
     /// Raw, so tests can also pass names the grammar rejects.
-    fn with_prefix(name: &[u8], prefix: &CellValue) -> Result<TermRange, TermError> {
-        TermRange::with_prefix(CellNameRef::raw(name), prefix.as_view())
+    fn with_prefix(name: &[u8], prefix: &str) -> Result<TermRange, TermError> {
+        TermRange::with_prefix(CellNameRef::raw(name), prefix)
     }
 
     fn str(value: &str) -> CellValue {
@@ -386,13 +386,13 @@ mod tests {
 
     #[test]
     fn a_prefix_starts_at_its_term_and_ends_past_it() {
-        let range = with_prefix(b"a", &str("ab")).expect("valid prefix");
+        let range = with_prefix(b"a", "ab").expect("valid prefix");
         assert_eq!(range.bounds(), (Included(AB), Excluded(AC)));
     }
 
     #[test]
     fn the_empty_prefix_is_the_whole_run() {
-        let range = with_prefix(b"a", &str("")).expect("valid prefix");
+        let range = with_prefix(b"a", "").expect("valid prefix");
         assert_eq!(
             range.bounds(),
             (Included(STR_RUN_START), Excluded(STR_RUN_END))
@@ -403,7 +403,7 @@ mod tests {
     fn a_prefix_ending_in_the_greatest_char_ends_past_its_last_byte() {
         // U+10FFFF is F4 8F BF BF. UTF-8 has no 0xff byte, so the last byte
         // is always incremented.
-        let range = with_prefix(b"a", &str("\u{10FFFF}")).expect("valid prefix");
+        let range = with_prefix(b"a", "\u{10FFFF}").expect("valid prefix");
         let start: &[u8] = &[b'a', 0, 0x82, 0xf4, 0x8f, 0xbf, 0xbf];
         let end: &[u8] = &[b'a', 0, 0x82, 0xf4, 0x8f, 0xbf, 0xc0];
         assert_eq!(range.bounds(), (Included(start), Excluded(end)));
@@ -440,7 +440,7 @@ mod tests {
         let run = strings.map(|value| term("a", &str(value)));
         let all = [&run[..], &neighbours].concat();
         for prefix in ["", "a", "ab", "abd", "é", "e", "\u{10FFFF}"] {
-            let range = with_prefix(b"a", &str(prefix)).expect("valid prefix");
+            let range = with_prefix(b"a", prefix).expect("valid prefix");
             let mut expected: Vec<_> = strings
                 .iter()
                 .filter(|value| value.starts_with(prefix))
@@ -453,19 +453,13 @@ mod tests {
 
     #[test]
     fn a_prefix_name_that_is_not_utf8_is_invalid() {
-        let result = with_prefix(&[0xff], &str("a"));
+        let result = with_prefix(&[0xff], "a");
         assert_eq!(result, Err(TermError::InvalidName));
     }
 
     #[test]
     fn a_prefix_name_outside_the_grammar_is_invalid() {
-        let result = with_prefix(b"1a", &str("a"));
+        let result = with_prefix(b"1a", "a");
         assert_eq!(result, Err(TermError::InvalidName));
-    }
-
-    #[test]
-    fn a_bytes_prefix_has_no_run() {
-        let result = with_prefix(b"a", &CellValue::from_bytes(b"x"));
-        assert_eq!(result, Err(TermError::UnsupportedType(CellType::Bytes)));
     }
 }

@@ -1,13 +1,12 @@
 //! Filter semantics against a real database: which records a `Prefix` leaf
-//! matches, and which `Prefix` leaves admission rejects. Only `str` prefixes
-//! are built so far.
+//! matches, and which `Prefix` leaves admission rejects.
 
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use golemdb_api::{ApiError, RecordKey};
-use golemdb_cells::{CellType, CellValue};
+use golemdb_cells::CellValue;
 use golemdb_index::TermError;
 use proptest::prelude::*;
 use support::{TestDb, key, prefix, record, small_value};
@@ -73,7 +72,7 @@ fn prefixes_match_the_strings_that_start_with_them() {
             .filter(|(_, value)| value.starts_with(start))
             .map(|(n, _)| key(n as u64))
             .collect();
-        let filter = prefix("f", str(start));
+        let filter = prefix("f", start);
         assert_eq!(test.keys(filter.clone()).unwrap(), expected, "{start:?}");
         assert_eq!(test.count(filter).unwrap(), expected.len() as u64);
     }
@@ -88,81 +87,21 @@ fn the_empty_prefix_matches_every_str_cell_of_its_field() {
         record(key(3), &[("f", str("x"))]),
         record(key(4), &[("g", str("x"))]),
     ]);
-    assert_eq!(test.keys(prefix("f", str(""))).unwrap(), [key(1), key(3)]);
+    assert_eq!(test.keys(prefix("f", "")).unwrap(), [key(1), key(3)]);
 }
 
 #[test]
-fn bytes_n_prefixes_are_not_implemented_yet() {
+fn an_invalid_field_is_an_error_not_an_empty_result() {
     let test = TestDb::default();
-    test.create([record(key(1), &[("f", CellValue::from_bytes4([1; 4]))])]);
-    for value in [
-        CellValue::from_bytes4([1; 4]),
-        CellValue::from_bytes8([1; 8]),
-        CellValue::from_bytes16([1; 16]),
-        CellValue::from_bytes20([1; 20]),
-        CellValue::from_bytes32([1; 32]),
-    ] {
-        let filter = prefix("f", value);
-        for result in [
-            test.keys(filter.clone()).map(|_| ()),
-            test.count(filter.clone()).map(|_| ()),
-        ] {
-            assert!(
-                matches!(
-                    result,
-                    Err(ApiError::NotImplemented {
-                        operation: "query: Prefix on bytesN"
-                    })
-                ),
-                "{filter:?}: {result:?}"
-            );
-        }
-    }
-}
-
-#[test]
-fn other_types_have_no_prefix() {
-    let test = TestDb::default();
-    test.create([record(key(1), &[("f", CellValue::from_u32(1))])]);
-    for value in [
-        CellValue::from_bool(true),
-        CellValue::from_u32(1),
-        CellValue::from_i64(-1),
-        CellValue::from_dec128_unscaled(1),
-        CellValue::from_f64(1.5).expect("not NaN"),
-        CellValue::from_timestamp64(1),
-    ] {
-        let filter = prefix("f", value);
-        for result in [
-            test.keys(filter.clone()).map(|_| ()),
-            test.count(filter.clone()).map(|_| ()),
-        ] {
-            assert!(
-                matches!(result, Err(ApiError::InvalidQuery { .. })),
-                "{filter:?}: {result:?}"
-            );
-        }
-    }
-}
-
-#[test]
-fn invalid_arguments_are_errors_not_empty_results() {
-    let test = TestDb::default();
-    let cause = |result: Result<Vec<RecordKey>, ApiError>| match result {
+    let result = test.keys(prefix("not valid", "a"));
+    let cause = match &result {
         Err(ApiError::InvalidArgument {
             source: Some(source),
             ..
         }) => source.downcast_ref::<TermError>().copied(),
         _ => None,
     };
-    assert_eq!(
-        cause(test.keys(prefix("not valid", str("a")))),
-        Some(TermError::InvalidName)
-    );
-    assert_eq!(
-        cause(test.keys(prefix("f", CellValue::from_bytes(b"x")))),
-        Some(TermError::UnsupportedType(CellType::Bytes))
-    );
+    assert_eq!(cause, Some(TermError::InvalidName), "{result:?}");
 }
 
 const FIELDS: [&str; 3] = ["a", "ab", "b"];
@@ -217,7 +156,7 @@ proptest! {
                 })
                 .map(|(n, _)| key(n as u64))
                 .collect();
-            let filter = prefix(field, str(&start));
+            let filter = prefix(field, &start);
             prop_assert_eq!(test.count(filter.clone()).unwrap(), expected.len() as u64);
             prop_assert_eq!(test.keys(filter).unwrap(), expected);
         }

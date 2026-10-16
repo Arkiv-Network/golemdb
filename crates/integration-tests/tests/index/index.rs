@@ -453,11 +453,7 @@ fn prefix_scans_hold_the_strings_that_start_with_the_prefix() {
         .map(|(n, t)| add(t, n as u64));
     index.apply(&mut tx, RootRef::Empty, changes).unwrap();
     let scan = |prefix: &str| {
-        let range = TermRange::with_prefix(
-            CellNameRef::raw(b"a"),
-            CellValue::from_str(prefix).as_view(),
-        )
-        .unwrap();
+        let range = TermRange::with_prefix(CellNameRef::raw(b"a"), prefix).unwrap();
         index
             .terms(&tx, range)
             .unwrap()

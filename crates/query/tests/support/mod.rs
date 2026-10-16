@@ -101,10 +101,10 @@ pub fn range(field: &str, lower: Bound<CellValue>, upper: Bound<CellValue>) -> F
 }
 
 /// Raw, so tests can also build names the grammar rejects.
-pub fn prefix(field: &str, prefix: CellValue) -> Filter {
+pub fn prefix(field: &str, prefix: &str) -> Filter {
     Filter::Prefix {
         field: CellNameRef::raw(field.as_bytes()).into(),
-        prefix,
+        prefix: prefix.to_owned(),
     }
 }
 

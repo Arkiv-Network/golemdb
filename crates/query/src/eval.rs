@@ -201,10 +201,10 @@ mod tests {
         }
     }
 
-    fn prefix(field: &str, prefix: CellValue) -> Filter {
+    fn prefix(field: &str, prefix: &str) -> Filter {
         Filter::Prefix {
             field: name(field.as_bytes()),
-            prefix,
+            prefix: prefix.to_owned(),
         }
     }
 
@@ -447,13 +447,13 @@ mod tests {
             .with("s", CellValue::from_bytes4(*b"abcd"), [7])
             .with("sa", str("a"), [8]);
         for (filter, expected) in [
-            (prefix("s", str("")), &[1, 2, 3, 4, 5, 6, 40][..]),
-            (prefix("s", str("a")), &[2, 3, 4, 40]),
-            (prefix("s", str("ab")), &[3, 4, 40]),
-            (prefix("s", str("abc")), &[4, 40]),
-            (prefix("s", str("abcd")), &[]),
-            (prefix("s", str("e")), &[]),
-            (prefix("s", str("é")), &[6]),
+            (prefix("s", ""), &[1, 2, 3, 4, 5, 6, 40][..]),
+            (prefix("s", "a"), &[2, 3, 4, 40]),
+            (prefix("s", "ab"), &[3, 4, 40]),
+            (prefix("s", "abc"), &[4, 40]),
+            (prefix("s", "abcd"), &[]),
+            (prefix("s", "e"), &[]),
+            (prefix("s", "é"), &[6]),
         ] {
             assert_eq!(ids(&source, filter.clone()), expected, "{filter:?}");
         }
@@ -474,30 +474,12 @@ mod tests {
             inner,
             reads: RefCell::default(),
         };
-        let matches = evaluate(&source, &prefix("s", str("a"))).expect("filter evaluates");
+        let matches = evaluate(&source, &prefix("s", "a")).expect("filter evaluates");
         assert_eq!(matches.treemap().iter().collect::<Vec<_>>(), [1, 2, 3, 4]);
         let term = |value| IndexTerm::from_str_name("s", str(value).as_view()).expect("term");
         assert_eq!(
             *source.reads.borrow(),
             [term("a"), term("aa"), term("ab"), term("a\u{10FFFF}")]
-        );
-    }
-
-    #[test]
-    fn unsupported_prefixes_are_rejected_before_reading() {
-        // FailingSource would surface as QueryError::Internal if it were consulted.
-        let result = evaluate(
-            &FailingSource,
-            &prefix("s", CellValue::from_bytes20([0; 20])),
-        );
-        assert!(
-            matches!(result, Err(QueryError::NotImplemented { .. })),
-            "{result:?}"
-        );
-        let result = evaluate(&FailingSource, &prefix("s", CellValue::from_u32(1)));
-        assert!(
-            matches!(result, Err(QueryError::InvalidQuery { .. })),
-            "{result:?}"
         );
     }
 
@@ -620,16 +602,7 @@ mod tests {
                 name(b"b"),
                 TermError::UnsupportedType(CellType::Bytes),
             ),
-            (
-                prefix("1bad", str("a")),
-                name(b"1bad"),
-                TermError::InvalidName,
-            ),
-            (
-                prefix("b", CellValue::from_bytes(b"x")),
-                name(b"b"),
-                TermError::UnsupportedType(CellType::Bytes),
-            ),
+            (prefix("1bad", "a"), name(b"1bad"), TermError::InvalidName),
         ] {
             match evaluate(&FailingSource, &filter) {
                 Err(QueryError::InvalidArgument { field: got, source }) => {
@@ -651,7 +624,7 @@ mod tests {
                 Bound::Included(CellValue::from_i32(1)),
                 Bound::Unbounded,
             ),
-            prefix("a", str("")),
+            prefix("a", ""),
         ] {
             let result = evaluate(&FailingSource, &filter);
             assert!(is_injected_failure(&result), "{filter:?}: {result:?}");

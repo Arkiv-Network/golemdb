@@ -29,10 +29,10 @@ pub enum Filter {
         lower: Bound<CellValue>,
         upper: Bound<CellValue>,
     },
-    /// The cell's value starts with `prefix`, with its type: for a `str`,
-    /// byte by byte in UTF-8, which is also char by char. The empty string
-    /// matches every `str` cell.
-    Prefix { field: CellName, prefix: CellValue },
+    /// The cell holds a `str` that starts with `prefix`: byte by byte in
+    /// UTF-8, which is also char by char. A cell of another type never
+    /// matches. The empty string matches every `str` cell.
+    Prefix { field: CellName, prefix: String },
     // Exists { field: CellName, ty: CellType },
     // And(Vec<Filter>),
     // Or(Vec<Filter>),
