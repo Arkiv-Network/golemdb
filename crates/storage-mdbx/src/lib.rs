@@ -174,7 +174,8 @@ impl Store for MdbxStore {
     }
     /// Bytes written are estimated from MDBX's page counters, so they include
     /// pages that never reach disk: those of aborted transactions, and pages a
-    /// transaction copies and then frees, as when a table empties.
+    /// transaction copies and then frees, as when a table empties. A session
+    /// lasts while any process has the environment open.
     fn stats(&self) -> Result<Option<StoreStats>> {
         // SAFETY: `MDBX_envinfo` holds only integers, so all zeros is valid; the
         // environment remains open and `info` is writable for its full size.
@@ -188,17 +189,17 @@ impl Store for MdbxStore {
             );
             (code, info)
         };
-        if code != 0 {
+        if code != mdbx_sys::MDBX_SUCCESS {
             return Err(backend(libmdbx::Error::from_err_code(code)));
         }
         let page = u64::from(info.mi_dxb_pagesize);
         let ops = info.mi_pgop_stat;
         Ok(Some(StoreStats {
-            size: (info.mi_last_pgno + 1) * page,
+            db_size: (info.mi_last_pgno + 1) * page,
             // Pages created or copied, plus pages flushed early and changed
             // again, less merged pages.
-            bytes_written: (ops.newly + ops.cow + ops.unspill - ops.merge) * page,
-            syncs: ops.fsync + ops.msync,
+            session_bytes_written: (ops.newly + ops.cow + ops.unspill - ops.merge) * page,
+            session_syncs: ops.fsync + ops.msync,
         }))
     }
 

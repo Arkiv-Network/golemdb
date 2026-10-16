@@ -92,11 +92,11 @@ fn commit_writes_pages_grows_size_and_syncs() {
     stats(&db); // Readable while the writer is active.
     tx.commit().unwrap();
     let after = stats(&db);
-    let written = after.bytes_written - before.bytes_written;
+    let written = after.session_bytes_written - before.session_bytes_written;
     assert!(written > 0);
     assert_eq!(written % DEFAULT_PAGE_SIZE as u64, 0);
-    assert!(after.size > before.size);
-    assert!(after.syncs > before.syncs);
+    assert!(after.db_size > before.db_size);
+    assert!(after.session_syncs > before.session_syncs);
 }
 
 #[test]
@@ -173,8 +173,8 @@ fn bytes_written_match_changed_pages() {
         // MDBX stamps each page it writes with the transaction ID, so every
         // written page changes, including one meta page per commit.
         let changed = changed_pages(&old, &std::fs::read(&file).unwrap(), DEFAULT_PAGE_SIZE);
-        let estimated =
-            (stats(&db).bytes_written - before.bytes_written) / DEFAULT_PAGE_SIZE as u64;
+        let estimated = (stats(&db).session_bytes_written - before.session_bytes_written)
+            / DEFAULT_PAGE_SIZE as u64;
         assert!(
             changed.abs_diff(estimated) <= 1,
             "batch {batch}: {changed} pages changed, {estimated} estimated"
@@ -203,5 +203,8 @@ fn pages_flushed_early_and_changed_again_count_twice() {
     tx.commit().unwrap();
     let after = stats(&db);
     // Otherwise a new database writes about as many bytes as it grows.
-    assert!(after.bytes_written - before.bytes_written > 2 * (after.size - before.size));
+    assert!(
+        after.session_bytes_written - before.session_bytes_written
+            > 2 * (after.db_size - before.db_size)
+    );
 }
