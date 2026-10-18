@@ -471,14 +471,19 @@ the execution rules of the [query proposal](query-proposal.md#execution-rules-no
   ascending order and are checked in one pass, so admission stays linear in their number.
 - **Logical steps only.** The counted descent is the reference one, whether or not an
   implementation short-circuits it (D1, R5).
+- **Charges bound the work; algorithms are free.** Every read charge is defined in logical
+  quantities: steps, terms, bitmap containers, bytes. Each is an upper bound on the work of any
+  reasonable implementation. How an implementation performs a step (which set it walks, how it
+  searches, whether it merges several sets at once) is its own choice and never changes the
+  charge; weights are calibrated from the reference implementation (D10).
 - **Leaves.** An `Eq` is one term lookup (`read.term`), present or absent. An `In` is one term
-  lookup per distinct value, in term key order. Every term found then pays for its posting list:
-  one `read.container` per bitmap container loaded, and one `read.set_container` per container
-  merged into the running result.
+  lookup per distinct value, in the strictly ascending order the request gives. Every term found
+  then pays for its posting list, one `read.container` per bitmap container loaded, and its
+  containers enter the leaf's union (combining sets, below).
 - **Range scans.** Positioning the cursor at the lower bound reads the first index entry and is
   one `read.term`; every further entry read is one `read.term_step`, including the entry that
   ends the scan: past the upper bound, past the end of the name and type run, or at the end of the
-  table. A scan over `k` terms therefore costs `index_seek + k × index_scan_step` plus their
+  table. A scan over `k` terms therefore costs `read.term + k × read.term_step` plus their
   containers, and a range with no term in it costs one `read.term`, like an absent `Eq`. An
   `Excluded` lower bound that matches an existing term costs one more step, for the entry read
   and skipped. Bounds that admit no value read nothing ([query proposal](query-proposal.md#range-bounds)).
@@ -486,12 +491,30 @@ the execution rules of the [query proposal](query-proposal.md#execution-rules-no
 - **Containers are charged as they are loaded.** Each bitmap container's charge is checked before
   the container is loaded, whether by loading containers one at a time or by knowing their count
   from the posting root. Today's `bitmap_at` loads all containers at once and needs one of the two.
-  The merge is charged per incoming container, so the running result is not charged again on
-  every merge.
-- **Early exit.** An `And` whose running set becomes empty skips its remaining children, which
-  are not charged.
-- **Combining sets** is charged by the size of the sets combined, so the work of one step stays
-  bounded by its charge (R4).
+- **Combining sets** is charged one `read.set_container` per bitmap container of every set it
+  takes as input, the same rule for all three combinations:
+  - **union:** an `Or`, an `In` and a `Range` each combine their inputs in **one** union, charged
+    per container of every input; its order and algorithm are free;
+  - **intersection:** each further positive child of an `And` is intersected with the running set,
+    charged per container of both;
+  - **difference:** each `Not` child of an `And` is subtracted from the running set, charged per
+    container of both.
+
+  Any merge of sets by container visits at most the containers of its inputs, so this bounds the
+  work of every roaring implementation (R4). The inputs' containers were already loaded and
+  charged, so a combination costs at most about as much again. Record IDs are dense, so the
+  number of distinct containers, and with it every search among them, is bounded by the size of
+  the database.
+- **`And` runs in the written order.** The running set starts with the first positive child; each
+  further child is evaluated and charged only when its turn comes, a positive child intersected,
+  a `Not` child subtracted. As soon as the running set is empty, the remaining children are
+  neither evaluated nor charged. An implementation must not reorder the children, for example by
+  size, nor load them in advance.
+- **`Or`** evaluates every child, in the written order, with no early exit, and unions them.
+- **`Not`** is allowed only inside an `And`, after a positive child. A standalone `Not` needs the
+  set of all live records (P08) and returns `NotImplemented` until then.
+- **`count`** runs admission, the leaves and the combinations only: it materializes nothing, and the
+  size of the match set is free.
 - **Materialization** reads the returned page's records only, in page order. Per record: `#key`,
   one cell point read; then, with a projection, one cell point read per projected name, present
   or absent; without one, `#meta` first, one cell point read, which gives the exact number of user
@@ -534,6 +557,31 @@ the execution rules of the [query proposal](query-proposal.md#execution-rules-no
   own budget ([tokenomics](arkiv-tokenomics.md#purge-budget)). It reads the parent block's
   committed state once per expiry block, since queries do not see a branch's deletes. No special
   scan is provided.
+
+**Example.** `And[ Eq status="open", Range price [10, 20), Not Eq flagged=true ]`, where
+`status="open"` has 3 containers, the price range covers two terms with 2 and 1 containers, and
+`flagged=true` has 1:
+
+| Step, in written order | Charges |
+| --- | --- |
+| `Eq status="open"`: lookup, load | 1 `read.term`, 3 `read.container`; running set: 3 containers |
+| `Range price`: seek, two terms and the entry ending the scan, load | 1 `read.term`, 2 `read.term_step`, 3 `read.container` |
+| union of the range's two lists, 2 + 1 containers | 3 `read.set_container`; range result: say 2 containers |
+| intersect the running set (3) with the range result (2) | 5 `read.set_container`; running set: say 1 container |
+| `Not Eq flagged=true`: lookup, load | 1 `read.term`, 1 `read.container` |
+| difference: running set (1) minus child (1) | 2 `read.set_container` |
+
+Had the intersection left the running set empty, the last two rows would not happen: the `Not`
+child would be neither loaded nor charged.
+
+**Implementation notes** (not normative). Loading a container today recomputes its hash and
+re-encodes it canonically to compare, on every read, and query sets are rebuilt as a
+`RoaringTreemap` record ID by record ID. Hash and canonical checks matter where bytes enter the
+node (sync, import) or before they are hashed; rows a node wrote itself are canonical by
+construction, so committed reads can skip both, with corruption covered by an audit. Keeping query
+sets as a sorted list of containers, combined container by container with the library's
+per-container operations, avoids the rebuild and makes the charging rules a literal description of
+the work. Loading containers one at a time is needed for the charge-before-step rule anyway.
 
 ### Read Steps
 
@@ -612,13 +660,14 @@ rules above carry its content and the list is removed.
 | 9 | Admission for queries | proposed | D2's three-part shape, own weights starting at D2's values; `In` values strictly ascending, checked linearly |
 | 10 | `get` | proposed | one key resolution, then one cell read per cell |
 | 11 | Purge read: equality, record-ID order, limit | decided shape | charges follow from items 5 and 8 |
-| 12 | `And` early exit | decided | remaining children skipped and not charged |
-| 13 | `Or`, `Not` inside `And` | decided | per the query proposal; standalone `Not` waits for P08 |
-| 14 | `count` | decided | the filter rules only, no materialization |
+| 12 | `And` | decided | written order; early exit when the running set is empty, remaining children not charged; intersection and difference per container of both sets |
+| 13 | `Or`, `Not` inside `And` | decided | `Or` evaluates every child, one union charged per container of every input; standalone `Not` waits for P08 |
+| 14 | `count` | decided | admission, leaves and combinations only; no materialization |
 | 15 | `limit`, `offset`, `max_bytes` | proposed | no charge of their own; page ends at `limit` or `max_bytes`, at least one record; caps as defaults |
 | 16 | Branch reads | proposed | the same steps and weights as a committed read, calibrated for an overlay miss (R4, R5) |
 | 17 | Conformance vector format | proposed | [Conformance Vectors](#conformance-vectors): content fixed here, file format shared with the encoding vectors (S13) |
-| 18 | Caps: query depth, page size | decided | genesis parameters, per the query proposal, values open |
+| 18 | Caps | proposed | depth 16 (ceiling 64), records per page 1,000 (10,000), bytes per page 160 MiB (320 MiB), sort keys 4 (16); `#maxQueryBytes` at least the largest record; [query proposal](query-proposal.md#caps) |
+| 21 | Container size | open | a container holds 1 to 65,536 record IDs, as an array or an 8 KiB bitmap; a flat per-container weight overcharges sparse posting lists. Measure loading and combining sparse against dense containers; if the gap is large, add a charge per record ID or per byte |
 | 19 | Sort | deferred | `⌈N log₂ N⌉ × S`; integer evaluation, including `N = 0` |
 | 20 | Historical reads | deferred | flat surcharge |
 

@@ -239,15 +239,37 @@ node (QR4, QR7).
 
 Four genesis parameters in `#params`, each `u32`, fixed per deployment and readable with `get`:
 
-| Cap | Bounds | Why the budget does not |
-| --- | --- | --- |
-| `#maxQueryDepth` | nesting depth of the filter tree | a deeper tree overflows the evaluator's stack, which aborts the process before or regardless of any charge |
-| `#maxQueryLimit` | records per page | the size of one response and the memory to materialize it, also under `Unlimited` |
-| `#maxQueryBytes` | bytes per page, on metering's byte basis | the same, for pages of large records; a host derives its request's `max_bytes` from its transport's response cap |
-| `#maxSortKeys` | sort keys per query | the memory and work of one sort, also under `Unlimited` |
+| Cap | Bounds | Proposed value | Code ceiling | Why the budget does not |
+| --- | --- | --- | --- | --- |
+| `#maxQueryDepth` | nesting depth of the filter tree | 16 | 64 | a deeper tree overflows the evaluator's stack, which aborts the process before or regardless of any charge |
+| `#maxQueryLimit` | records per page | 1,000 | 10,000 | the size of one response and the memory to materialize it, also under `Unlimited` |
+| `#maxQueryBytes` | bytes per page, on metering's byte basis | 160 MiB | 320 MiB | the same, for pages of large records |
+| `#maxSortKeys` | sort keys per query | 4 | 16 | the memory and work of one sort, also under `Unlimited` |
+
+Why these values:
+
+- **`#maxQueryDepth`:** real filters are shallow; Arkiv's query language yields trees of 2–4
+  levels, and an `Or` of `And` groups is two. Each level costs a few hundred bytes of stack, so
+  even the ceiling is far below a default thread stack.
+- **`#maxQueryLimit`:** common default page sizes are 100–1,000 records, hard maxima around 10,000
+  (Elasticsearch's result window, typical `eth_getLogs` result caps). `#maxQueryBytes` bounds the
+  response size; this cap bounds per-record work and memory for small records. Arkiv's purge reads
+  at most `#maxQueryLimit` entities of one expiry block per block, so the cap must be at least the
+  number of cheapest deletions that fit in its purge budget.
+- **`#maxQueryBytes`:** a page may fill a whole JSON-RPC response of a default node. Arkiv nodes run
+  on reth, whose response limit is 160 MiB by default; with bytes hex-encoded on the wire, a
+  logical page of about 80 MiB already reaches it. The ceiling is twice that, since Arkiv nodes
+  serve data rather than general-purpose traffic. A request's `max_bytes` asks for smaller pages.
+  **TODO (verify):** reth's current default for `--rpc.max-response-size`. Genesis validation
+  checks that `#maxQueryBytes` is at least the largest possible record on the same byte basis
+  (`#maxRecordCells` × the largest cell), so every record fits a page.
+- **`#maxSortKeys`:** queries sort by one or two keys, rarely three; a sort holds `N × S` values.
+  Sort is not built yet.
 
 They are genesis parameters, not node settings, because they decide whether a query is accepted,
-and Arkiv runs queries during block execution (its expiry purge), so every node must agree.
+and Arkiv runs queries during block execution (its expiry purge), so every node must agree. They
+are fixed per chain: unlike the protocol limits a host keeps in the cost schedule, they cannot be
+changed after genesis.
 
 **Policy within physics.** What depth is safe depends on the implementation, so the code defines a
 hard ceiling for each cap, versioned with the format, and genesis validation rejects a cap above

@@ -42,6 +42,7 @@ their heading.
 | 17 | [D16](#17--d16--refuse-a-second-consecutive-rollback) | done in the API spec (2026-10-10): A, multi-frame rollback, `NoFrameToRollback` once every frame is undone; register row to close | Refuse a second consecutive `rollback()`? | `rollback()` on an empty open frame is an error and pops nothing; multi-frame undo dropped | D07 | — | yes | P3 |
 | 18 | [D17](#18--d17--typed-segment-columns) | waiting, needs more thinking | Typed segment columns? | No — raw bytes; typing would pin every host format at genesis | P05 (decided: adopted) | — | — | P3 |
 | 19 | [D19](#19--d19--per-commit-log-digest-what-it-is-and-where-it-is-committed) | waiting | SE-1 requires a per-commit digest of appended log rows: what is it and who commits it? | Domain-separated digest over row hashes with the start ordinal bound in, returned by `seal`; **engine commits it lag-one** in a new `#logDigests` system record, so `AppHash` stays one root | P05, D09 | §11 final | yes — `seal`/`commit` outputs | P2 |
+| 20 | [D22](#20--d22--range-completeness-and-the-committed-index) | proposed | Should query results be provably complete, also for ranges, and what must the committed index look like for that? | **Indexed Merkle tree:** keep the hash-keyed `IndexTrie`, add a successor link to every term leaf; or take the index out of the commitment if completeness is not needed | product question below; D06 | D09 (leaf encoding), D01 | — | P1 |
 
 Cross-cutting `[API]` changes accumulated so far, to land as one `[API]` PR once the decisions above
 are taken: strike "nesting" from `LimitExceeded`; require ≥ 1 positive literal per group and ≥ 1
@@ -1769,6 +1770,96 @@ rows appended at a different starting ordinal yield a different `d₁`.
 `CommitId` outputs gain `logDigests`. `CHANGES.md`: D19 added.
 
 **Outcome:** _(19.1 confirm; 19.2 A/B)_
+
+---
+
+## 20 · D22 — Range completeness and the committed index
+
+**Status:** proposed. **Register:** `CHANGES.md` D22 (new), P1, track H. **Source:** read
+metering discussion 2026-10-17. **Depends on:** a product answer (below); D06 (proof scope).
+**Blocks:** D09 (the `IndexTrie` leaf encoding is fixed at genesis), D01.
+
+### Question
+
+The index is part of the committed state: `IndexRoot` is half of `GlobalRoot` (§8), and every
+term is a leaf of the `IndexTrie`, keyed by `trieKey = Hash(term)`, with preimage
+`0x02 ‖ trieKey ‖ bitmapHash` (§8 *Domain Separation*). Committing it costs a Merkle trie per
+posting list, hashing on every write, canonical encodings (D09) and consensus risk: an index bug
+becomes a root mismatch, not a wrong result. What does it buy?
+
+- **Without the committed index**, a client can already verify, from cells and `#meta`, that a
+  returned record exists, that its returned cells are correct and, for a full record, that no cell
+  is missing.
+- **With it**, a client can verify that an `Eq` or `In` result is **complete**: the proven posting
+  list of the term holds every matching record, so nothing was censored or added. A combination of
+  such leaves can be checked by recomputing it from the proven lists.
+- **Not even with it:** completeness of a `Range`. The `IndexTrie` is ordered by hash, so no proof
+  shows that no term lies between two values. §8 and D06 call range completeness a non-goal.
+
+**Product question:** does Arkiv need provable completeness of query results in v1, and for which
+queries: none, equality only, or equality and ranges?
+
+### Alternatives
+
+| | A — **as today** | B — **value-keyed trie** | C — **indexed Merkle tree** | D — **index outside the commitment** |
+| --- | --- | --- | --- | --- |
+| Shape | `IndexTrie` keyed by `Hash(term)` | `IndexTrie` keyed by the term's bytes, so in value order | `IndexTrie` keyed by `Hash(term)` as today; each term leaf also commits to the **next term** in value order | every node derives the index from committed cells; no `IndexTrie`, no `BitmapTrie` hashing; `GlobalRoot` = `StateRoot` |
+| Completeness proofs | `Eq`, `In` | `Eq`, `In`, `Range` | `Eq`, `In`, `Range`, and absence of a value | none for result sets; per-record proofs only |
+| Trie depth | balanced, ≈ log₁₆ terms | **attackable**: crafted values sharing long prefixes build a comb, depth up to about twice the key length, against a modeled depth of at most 7 (metering D3): an undercharge attack, or a charge by key length that overcharges every normal key | balanced, as today: the links do not change positions | — |
+| Extra write work | — | — | creating or removing a term also updates its predecessor's link: one more leaf; the predecessor is one cursor step away in the ordered `Index` table | none; less than today |
+| Consensus risk | index bugs split roots | as A | as A, plus the link maintenance | index bugs give wrong results, not split roots |
+| Arkiv purge | selects from the committed index | as A | as A | needs a small committed structure of its own for expiries |
+
+**C in more detail.** This is the *indexed Merkle tree* construction, used for example for
+non-membership proofs in Aztec's nullifier tree: a sorted linked list committed inside a
+hash-positioned tree.
+
+- **Leaf:** `0x02 ‖ trieKey ‖ bitmapHash ‖ nextTrieKey`, where `nextTrieKey` is the `trieKey` of
+  the next term in term-key order. A sentinel leaf before the first term and a sentinel value after
+  the last make the list total.
+- **Range proof** for `[a, b)`: the leaf of the last term below `a`, every term in the range, and
+  the first term at or after `b`, each with its membership proof and its term bytes. Each link
+  proves nothing lies between two consecutive terms. `k` terms need `k + 2` membership proofs.
+- **Absence of a value** `v`: the two consecutive leaves whose terms bracket `v`.
+- **Metering:** the predecessor update is part of maintaining the structure, so it belongs in the
+  flat charge for creating and later removing a term (`write.index_term_create`, metering D2),
+  which already covers both; no read is made only for pricing (R3).
+- **Encoding:** the leaf gains one 32-byte field, which D09 pins.
+
+### Recommendation
+
+Decide by the product answer:
+
+- **Completeness needed for ranges, or wanted later: C.** It is the only option that gives range
+  completeness without opening the trie to depth attacks, at the cost of one extra leaf update per
+  term created or removed. Adding it after genesis changes every index leaf, so it is a now-or-never
+  choice.
+- **Completeness not needed: D.** It removes the `IndexTrie`, `BitmapTrie` hashing and their
+  consensus risk; queries and their metering are unchanged, since metering does not depend on how
+  the index is stored.
+- **A** pays nearly all of C's cost for equality completeness only. **B** is not recommended:
+  depth attacks.
+
+### What would change the recommendation
+
+A requirement that light clients verify query results without trusting a node (favours C); a
+measurement showing index hashing is a large share of write cost (favours D, or C only if
+completeness is required).
+
+### Fixture
+
+C: a range proof over three terms with both boundary leaves; a proof of absence between two
+consecutive terms; inserting a term between two others updates exactly the new leaf and its
+predecessor; a write that creates a term charges `write.index_term_create` once. D: the same
+queries return the same results and costs with and without the committed index.
+
+### Text to change
+
+§5, §6 and §8 (index leaf, domain table, *Which Tables Are Under Commitment*); D06 (proof scope);
+D09 (leaf encoding); metering D2 (what `write.index_term_create` covers); for D, the purge's
+committed expiry structure in the Arkiv tokenomics. `CHANGES.md`: D22 added.
+
+**Outcome:** _(product answer; then A / B / C / D)_
 
 ---
 
