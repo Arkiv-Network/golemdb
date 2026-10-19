@@ -34,7 +34,7 @@ use super::values::{ValuesError, into_field, of_indexable_type};
 ///
 /// Bounds of two types do not compile:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0308
 /// use std::ops::Bound::{Excluded, Included};
 ///
 /// use golemdb_cells::marker::U32;
@@ -45,7 +45,7 @@ use super::values::{ValuesError, into_field, of_indexable_type};
 ///
 /// Nor do bounds of variable-length `bytes`:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use std::ops::Bound::{Included, Unbounded};
 ///
 /// use golemdb_cells::marker::Bytes;
@@ -61,13 +61,12 @@ pub struct Bounds {
 }
 
 impl Bounds {
-    /// Bounds of the cell type `ty` names: one marker for both sides.
+    /// Bounds of the cell type the marker names: one marker for both sides.
     pub fn new<'a, T: Indexable>(
-        ty: T,
+        _: T,
         lower: Bound<T::Value<'a>>,
         upper: Bound<T::Value<'a>>,
     ) -> Self {
-        let _ = ty; // A value only to name `T` without a turbofish.
         Self {
             ty: T::CELL_TYPE,
             lower: lower.map(T::cell),

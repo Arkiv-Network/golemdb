@@ -91,10 +91,10 @@ A query's filter is an **abstract syntax tree**: `And`, `Or` and `Not` nodes ove
 ```rust
 #[non_exhaustive]
 pub enum Filter {
-    Eq     { field: CellName, value: Value },
-    In     { field: CellName, values: Vec<Value> },      // one type
-    Range  { field: CellName, lower: Bound<Value>, upper: Bound<Value> },
-    Prefix { field: CellName, prefix: Value },           // str, bytesN
+    Eq     { field: CellName, value: EqValue },          // one indexable value
+    In     { field: CellName, values: InValues },        // one indexable type
+    Range  { field: CellName, bounds: Bounds },          // one indexable type
+    Prefix { field: CellName, prefix: String },          // str only
     Exists { field: CellName, ty: CellType },
     And(Vec<Filter>),
     Or(Vec<Filter>),
@@ -102,8 +102,16 @@ pub enum Filter {
 }
 ```
 
-- **Leaves are typed,** as in `golemdb-query`: `Value` carries the type, and a cell of another
+- **Leaves are typed,** as in `golemdb-query`: a value carries its type, and a cell of another
   type under the same name is absent. `bytes` cannot be queried, being field-only.
+- **Operands are valid by construction.** `EqValue`, `InValues` and `Bounds` are built from a
+  cell-type marker (`EqValue::of(marker::Str, "blue")`, `Bounds::new(marker::I64, ..)`), so mixed
+  types and `bytes` do not compile. Their runtime constructors (`try_from` / `Bounds::try_new`)
+  check `CellValue`s and fail with `ValuesError` before a query exists. A `Range` keeps its type
+  even with two unbounded sides, which match every cell of that type.
+- **`Prefix` is `str` only.** It matches the strings that start with the prefix, byte by byte in
+  UTF-8. A prefix over `bytesN` is left out for now; it can be added as a separate leaf if a
+  use case appears.
 - **`Ne`, `!=` and "not in" are `Not(...)`.** Absent and other-typed cells match a `Not`
   (MongoDB-style, D01 1.5).
 - **`Exists` needs no extra index:** it is a scan over all terms of one `(field, type)` run.
@@ -149,9 +157,10 @@ The written order of the tree is the execution order. Cost and stopping point ar
 `(state, query)`; the result set never depends on the order.
 
 1. **Validate everything first** (admission, no state reads; QR5). Admission is charged per node
-   and per byte inspected (metering D2). It checks names, types and NaN; that `And` and `Or` are
-   not empty, an `In` has values of one type, and range bounds share a type with lower ≤ upper;
-   and the [caps](#caps).
+   and per byte inspected (metering D2). It checks names and NaN; that `And` and `Or` are not
+   empty; and the [caps](#caps). An operand's type is fixed when its `EqValue`, `InValues` or
+   `Bounds` is built, before any query exists. Bounds that admit no value (inverted, or equal
+   with a side excluded) are valid and match nothing.
 2. **Evaluate depth-first, children left to right.**
 3. **`And`:** the running set starts with the first positive child; each further positive child
    intersects it, each `Not` child subtracts from it. When the running set becomes empty, the
@@ -201,7 +210,7 @@ request-size limit of metering's admission procedure.
 | Error | Raised when | Cost |
 | --- | --- | --- |
 | `InvalidArgument` | a builder step is invalid (cell name, NaN), or the budget is missing | admission work done |
-| `InvalidQuery` | the target is a branch; the tree is malformed (empty `And` / `Or`, mixed types in an `In`, mismatched or inverted range bounds); a cursor does not match its query | 0 for a branch target, else admission work done |
+| `InvalidQuery` | the target is a branch; the tree is malformed (empty `And` / `Or`); a cursor does not match its query. Mixed or `bytes` operands cannot reach a query: they do not compile, or fail as `ValuesError` (`InvalidArgument`) when the operand is built | 0 for a branch target, else admission work done |
 | `LimitExceeded` | a cap is exceeded | admission work done |
 | `NotImplemented { operation }` | a supported-later part is used, such as `"query: sort"` | admission work done |
 | `OutOfBudget { required: None }` | a charge does not fit (QR7) | the work done before it |

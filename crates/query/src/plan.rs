@@ -29,13 +29,13 @@ pub(crate) enum Plan {
 impl TryFrom<&Filter> for Plan {
     type Error = QueryError;
 
-    /// Admission: fails with [`QueryError::InvalidArgument`] on a leaf with no
-    /// valid index term (a bad field name, or an `Eq` on `bytes`). A leaf
-    /// that admits no value is [`Plan::Empty`]. `In` values and `Range`
-    /// bounds are of one indexable type by construction.
+    /// Admission: fails with [`QueryError::InvalidArgument`] on a leaf with a
+    /// bad field name. A leaf that admits no value is [`Plan::Empty`]. `Eq`
+    /// values, `In` values and `Range` bounds are of one indexable type by
+    /// construction.
     fn try_from(filter: &Filter) -> Result<Self> {
         match filter {
-            Filter::Eq { field, value } => Ok(Self::TermRead(term(field, value)?)),
+            Filter::Eq { field, value } => Ok(Self::TermRead(term(field, value.as_cell())?)),
             Filter::In { field, values } => {
                 Ok(terms(field, values)?.map_or(Self::Empty, Self::TermReads))
             }
@@ -53,8 +53,8 @@ impl TryFrom<&Filter> for Plan {
 /// [`TermRange::between`] builds them: a bad field name fails as an `Eq`
 /// leaf's would. Two unbounded sides are the whole run. `None` when the
 /// bounds admit no value. The bounds are of one indexable type by
-/// construction, so a type mismatch or a type with no term cannot occur
-/// here.
+/// construction, so a type with no term cannot occur here, and a type
+/// mismatch is a broken invariant, not the caller's error.
 fn range(field: &CellName, bounds: &Bounds) -> Result<Option<TermRange>> {
     TermRange::between(
         field.as_view(),
@@ -64,9 +64,7 @@ fn range(field: &CellName, bounds: &Bounds) -> Result<Option<TermRange>> {
     )
     .map_err(|error| match error {
         RangeError::Term(source) => invalid_argument(field, source),
-        RangeError::TypeMismatch { .. } => QueryError::InvalidQuery {
-            reason: "`Range` bounds must have the range's type",
-        },
+        error @ RangeError::TypeMismatch { .. } => QueryError::Internal(Box::new(error)),
     })
 }
 
@@ -308,11 +306,17 @@ mod tests {
 
     #[test]
     fn a_range_field_is_checked_as_an_eq_field() {
-        let bounds: Bounds = Bounds::new(I64, Bound::Included(1), Unbounded);
-        for field in [&b"1bad"[..], &[0xff]] {
+        let bounded = Bounds::new(I64, Bound::Included(1), Unbounded);
+        let whole_run = Bounds::new(I64, Unbounded, Unbounded);
+        for (field, bounds) in [
+            (&b"1bad"[..], &bounded),
+            (&[0xff], &bounded),
+            (b"1bad", &whole_run),
+            (&[0xff], &whole_run),
+        ] {
             assert!(
                 matches!(
-                    range_plan(field, &bounds),
+                    range_plan(field, bounds),
                     Err(QueryError::InvalidArgument {
                         source: TermError::InvalidName,
                         ..

@@ -1,10 +1,12 @@
-//! What the runtime constructors of [`InValues`](super::InValues) and
-//! [`Bounds`](super::Bounds) check: values of one indexable type.
+//! What the runtime constructors of [`EqValue`](super::EqValue),
+//! [`InValues`](super::InValues) and [`Bounds`](super::Bounds) check: values
+//! of one indexable type.
 
 use golemdb_cells::{CellKind, CellType, CellValue};
 
-/// Why `CellValue`s cannot be one leaf's values: an `In`'s values, or a
-/// `Range`'s bounds. The typed constructors cannot produce either case.
+/// Why `CellValue`s cannot be one leaf's values: an `Eq`'s value, an `In`'s
+/// values, or a `Range`'s bounds. The typed constructors cannot produce
+/// either case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ValuesError {
     /// Values of two types: a leaf reads the terms of one type.
@@ -28,7 +30,7 @@ pub(super) fn of_indexable_type<'a>(
     {
         return Err(ValuesError::MixedTypes { expected, found });
     }
-    if expected.is_indexable() {
+    if expected.can_be_attribute() {
         Ok(())
     } else {
         Err(ValuesError::NotIndexable)

@@ -65,7 +65,7 @@ impl CellValue {
     /// Change only the kind, retaining the type and encoded payload. Variable-
     /// length bytes cannot become an attribute. Deployment limits are unchanged.
     pub fn with_kind(mut self, kind: CellKind) -> Result<Self, CellValueParseError> {
-        if kind == CellKind::Attribute && self.ty == CellType::Bytes {
+        if kind == CellKind::Attribute && !self.ty.can_be_attribute() {
             return Err(CellValueParseError::NotIndexable);
         }
         self.bytes[0] = self.ty.id()
@@ -375,7 +375,7 @@ impl<'a> CellValueRef<'a> {
         value: &'a [u8],
         indexable: bool,
     ) -> Result<Self, CellValueParseError> {
-        if indexable && ty == CellType::Bytes {
+        if indexable && !ty.can_be_attribute() {
             return Err(CellValueParseError::NotIndexable);
         }
         ty.validate(value)?;

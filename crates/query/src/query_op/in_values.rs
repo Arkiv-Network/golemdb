@@ -33,18 +33,18 @@ use golemdb_cells::marker::Indexable;
 /// # let _ = prices;
 /// ```
 ///
-/// A second type does not compile:
+/// Values of another type than the marker's do not compile:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0271
 /// use golemdb_cells::marker::U32;
 /// use golemdb_query::InValues;
 ///
-/// InValues::of(U32, [1_u32, 2_u64]);
+/// InValues::of(U32, [1_u64]);
 /// ```
 ///
 /// Nor does variable-length `bytes`, whose marker is not `Indexable`:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use golemdb_cells::marker::Bytes;
 /// use golemdb_query::InValues;
 ///
@@ -57,10 +57,9 @@ pub struct InValues {
 }
 
 impl InValues {
-    /// `values`, as cells of the type `ty` names, each built as that type's
-    /// `CellValue::from_*` constructor builds it.
-    pub fn of<'a, T: Indexable>(ty: T, values: impl IntoIterator<Item = T::Value<'a>>) -> Self {
-        let _ = ty; // A value only to name `T` without a turbofish.
+    /// `values`, as cells of the type the marker names, each built as that
+    /// type's `CellValue::from_*` constructor builds it.
+    pub fn of<'a, T: Indexable>(_: T, values: impl IntoIterator<Item = T::Value<'a>>) -> Self {
         Self::canonical(values.into_iter().map(T::cell).collect())
     }
 
@@ -200,7 +199,7 @@ mod tests {
                 CellType::Int(Width::W4),
                 CellType::Decimal(Width::W4),
             ),
-            // Two types are reported before `bytes`, as admission does today.
+            // Two types are reported before `bytes`: `ValuesError`'s order.
             (
                 vec![CellValue::from_str("x"), CellValue::from_bytes(b"x")],
                 CellType::Str,

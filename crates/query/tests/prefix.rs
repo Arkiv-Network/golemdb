@@ -5,7 +5,7 @@ mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use golemdb_api::{ApiError, RecordKey};
+use golemdb_api::{ApiError, RecordKey, RecordOp};
 use golemdb_cells::CellValue;
 use golemdb_index::TermError;
 use proptest::prelude::*;
@@ -74,7 +74,11 @@ fn prefixes_match_the_strings_that_start_with_them() {
             .collect();
         let filter = prefix("f", start);
         assert_eq!(test.keys(filter.clone()).unwrap(), expected, "{start:?}");
-        assert_eq!(test.count(filter).unwrap(), expected.len() as u64);
+        assert_eq!(
+            test.count(filter).unwrap(),
+            expected.len() as u64,
+            "{start:?}"
+        );
     }
 }
 
@@ -88,20 +92,43 @@ fn the_empty_prefix_matches_every_str_cell_of_its_field() {
         record(key(4), &[("g", str("x"))]),
     ]);
     assert_eq!(test.keys(prefix("f", "")).unwrap(), [key(1), key(3)]);
+    assert_eq!(test.count(prefix("f", "")).unwrap(), 2);
+}
+
+#[test]
+fn only_attributes_match_a_prefix() {
+    let test = TestDb::default();
+    test.create([
+        record(key(1), &[("f", str("abc"))]),
+        RecordOp::create(key(2))
+            .field("f", str("abc"))
+            .expect("valid field"),
+    ]);
+    for start in ["", "a", "abc"] {
+        assert_eq!(
+            test.keys(prefix("f", start)).unwrap(),
+            [key(1)],
+            "{start:?}"
+        );
+        assert_eq!(test.count(prefix("f", start)).unwrap(), 1, "{start:?}");
+    }
 }
 
 #[test]
 fn an_invalid_field_is_an_error_not_an_empty_result() {
     let test = TestDb::default();
     let result = test.keys(prefix("not valid", "a"));
-    let cause = match &result {
-        Err(ApiError::InvalidArgument {
-            source: Some(source),
-            ..
-        }) => source.downcast_ref::<TermError>().copied(),
-        _ => None,
+    let Err(ApiError::InvalidArgument {
+        source: Some(source),
+        ..
+    }) = &result
+    else {
+        panic!("expected InvalidArgument, got {result:?}");
     };
-    assert_eq!(cause, Some(TermError::InvalidName), "{result:?}");
+    assert_eq!(
+        source.downcast_ref::<TermError>(),
+        Some(&TermError::InvalidName)
+    );
 }
 
 const FIELDS: [&str; 3] = ["a", "ab", "b"];

@@ -63,7 +63,8 @@ pub use golemdb_cells::{
     marker,
 };
 pub use golemdb_query::{
-    Bounds, Budget, CountOp, Direction, Filter, InValues, QueryOp, QueryPage, SortKey, ValuesError,
+    Bounds, Budget, CountOp, Direction, EqValue, Filter, InValues, QueryOp, QueryPage, SortKey,
+    ValuesError,
 };
 pub use golemdb_record::{ReadTarget, Record, RecordKey};
 

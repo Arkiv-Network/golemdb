@@ -1,22 +1,22 @@
 //! [`Filter`]: the filter tree a query evaluates, as the caller writes it.
 
-use golemdb_cells::{CellName, CellValue};
+use golemdb_cells::CellName;
 
-use super::{Bounds, InValues};
+use super::{Bounds, EqValue, InValues};
 
 /// A query's filter: plain data the caller builds, validated at admission.
 ///
-/// Leaves are typed by their [`CellValue`]s, the same values records are
+/// Leaves are typed by their values, the same `CellValue`s records are
 /// written with: a cell of another type under the same name is treated as
 /// absent. The value's kind (field or attribute) plays no part in a lookup.
-/// An `In`'s values and a `Range`'s bounds are of one indexable type by
-/// construction ([`InValues`], [`Bounds`]). An `Eq` value of variable-length
-/// `bytes` has no index term and is rejected at admission.
+/// An `Eq`'s value, an `In`'s values and a `Range`'s bounds are of one
+/// indexable type by construction ([`EqValue`], [`InValues`], [`Bounds`]),
+/// so only a field name is checked at admission.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Filter {
     /// The cell holds exactly `value`, with its type.
-    Eq { field: CellName, value: CellValue },
+    Eq { field: CellName, value: EqValue },
     /// The cell holds one of `values`: of one indexable type, distinct and
     /// ascending by construction. No value matches nothing.
     In { field: CellName, values: InValues },

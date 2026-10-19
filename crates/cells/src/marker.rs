@@ -15,6 +15,27 @@
 //! assert_ne!(Dec32::cell(7), I32::cell(7));
 //! assert_ne!(Date32::cell(7), I32::cell(7));
 //! ```
+//!
+//! Every marker is a [`CellMarker`], and every one but [`Bytes`] is
+//! [`Indexable`]:
+//!
+//! ```
+//! use golemdb_cells::CellValue;
+//! use golemdb_cells::marker::{Bytes, CellMarker, Indexable, Str};
+//!
+//! fn indexable<T: Indexable>(_: T) {}
+//!
+//! indexable(Str);
+//! assert_eq!(Bytes::cell(b"any length"), CellValue::from_bytes(b"any length"));
+//! ```
+//!
+//! ```compile_fail,E0277
+//! use golemdb_cells::marker::{Bytes, Indexable};
+//!
+//! fn indexable<T: Indexable>(_: T) {}
+//!
+//! indexable(Bytes);
+//! ```
 
 use crate::{CellType, CellValue, FloatWidth, NotNan32, NotNan64, Width};
 
@@ -23,7 +44,7 @@ use crate::{CellType, CellValue, FloatWidth, NotNan32, NotNan64, Width};
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a cell type marker",
     label = "expected a marker such as `U32`, `Str` or `Dec32`",
-    note = "the markers are in `golemdb_cells::marker`; values only known as `CellValue`s at run time go through the operand's `try_from`"
+    note = "the markers are in `golemdb_cells::marker`; values only known as `CellValue`s at run time go through the operand's runtime constructor: `EqValue::try_from`, `InValues::try_from` or `Bounds::try_new`"
 )]
 pub trait CellMarker: sealed::Sealed + Copy {
     /// The cell type this marker names.
@@ -39,12 +60,13 @@ pub trait CellMarker: sealed::Sealed + Copy {
 
 /// A cell type the index holds: every type but variable-length `bytes`.
 ///
-/// The bound of every query operand: an `In`'s values, a `Range`'s bounds.
+/// The bound of every query operand: an `Eq`'s value, an `In`'s values, a
+/// `Range`'s bounds.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not an indexable cell type",
     label = "expected the marker of an indexable cell type, such as `U32`, `Str` or `Dec32`",
     note = "variable-length `bytes` has no index term, so its marker `Bytes` is not `Indexable`; every other type's marker is",
-    note = "values only known as `CellValue`s at run time go through the operand's `try_from`"
+    note = "values only known as `CellValue`s at run time go through the operand's runtime constructor: `EqValue::try_from`, `InValues::try_from` or `Bounds::try_new`"
 )]
 pub trait Indexable: CellMarker {}
 
@@ -489,31 +511,33 @@ impl CellMarker for Timestamp64 {
 #[diagnostic::do_not_recommend]
 impl Indexable for Timestamp64 {}
 
-/// The types of the [`Indexable`] markers.
+/// The types of the [`Indexable`] markers. Each entry needs its marker to
+/// implement [`Indexable`], so a marker listed here without the impl does
+/// not build.
 const INDEXABLE: &[CellType] = &[
-    <Bool as CellMarker>::CELL_TYPE,
-    <Str as CellMarker>::CELL_TYPE,
-    <Bytes20 as CellMarker>::CELL_TYPE,
-    <Bytes4 as CellMarker>::CELL_TYPE,
-    <Bytes8 as CellMarker>::CELL_TYPE,
-    <Bytes16 as CellMarker>::CELL_TYPE,
-    <Bytes32 as CellMarker>::CELL_TYPE,
-    <U32 as CellMarker>::CELL_TYPE,
-    <U64 as CellMarker>::CELL_TYPE,
-    <U128 as CellMarker>::CELL_TYPE,
-    <U256 as CellMarker>::CELL_TYPE,
-    <I32 as CellMarker>::CELL_TYPE,
-    <I64 as CellMarker>::CELL_TYPE,
-    <I128 as CellMarker>::CELL_TYPE,
-    <I256 as CellMarker>::CELL_TYPE,
-    <Dec32 as CellMarker>::CELL_TYPE,
-    <Dec64 as CellMarker>::CELL_TYPE,
-    <Dec128 as CellMarker>::CELL_TYPE,
-    <Dec256 as CellMarker>::CELL_TYPE,
-    <F32 as CellMarker>::CELL_TYPE,
-    <F64 as CellMarker>::CELL_TYPE,
-    <Date32 as CellMarker>::CELL_TYPE,
-    <Timestamp64 as CellMarker>::CELL_TYPE,
+    indexable::<Bool>(),
+    indexable::<Str>(),
+    indexable::<Bytes20>(),
+    indexable::<Bytes4>(),
+    indexable::<Bytes8>(),
+    indexable::<Bytes16>(),
+    indexable::<Bytes32>(),
+    indexable::<U32>(),
+    indexable::<U64>(),
+    indexable::<U128>(),
+    indexable::<U256>(),
+    indexable::<I32>(),
+    indexable::<I64>(),
+    indexable::<I128>(),
+    indexable::<I256>(),
+    indexable::<Dec32>(),
+    indexable::<Dec64>(),
+    indexable::<Dec128>(),
+    indexable::<Dec256>(),
+    indexable::<F32>(),
+    indexable::<F64>(),
+    indexable::<Date32>(),
+    indexable::<Timestamp64>(),
 ];
 
 /// `bytes`, variable length: a field only. It has no order, so no index
@@ -533,12 +557,25 @@ impl CellMarker for Bytes {
     }
 }
 
-/// The types of the markers that are not [`Indexable`].
-const FIELD_ONLY: &[CellType] = &[<Bytes as CellMarker>::CELL_TYPE];
+/// The types of the markers that are not [`Indexable`]. A negative bound
+/// cannot be written, so the module's `compile_fail` example proves that
+/// [`Bytes`] does not implement it.
+const FIELD_ONLY: &[CellType] = &[field_only::<Bytes>()];
+
+/// `T`'s cell type, for a marker that implements [`Indexable`].
+const fn indexable<T: Indexable>() -> CellType {
+    T::CELL_TYPE
+}
+
+/// `T`'s cell type, for a marker listed as not [`Indexable`].
+const fn field_only<T: CellMarker>() -> CellType {
+    T::CELL_TYPE
+}
 
 // Checked as the crate builds, over the whole type-id space: a cell type
-// added without its marker, or with a marker on the wrong side, is a build
-// error rather than a failing test.
+// added without its marker, or listed on the wrong side, is a build error
+// rather than a failing test. `INDEXABLE`'s entries need the `Indexable`
+// impl; that `Bytes` lacks it is the module's `compile_fail` example.
 const _: () = check_markers();
 
 /// Every cell type has exactly one marker, and that marker is
@@ -554,7 +591,7 @@ const fn check_markers() {
                 "every cell type needs exactly one marker in `marker`"
             );
             assert!(
-                (indexable == 1) == ty.is_indexable(),
+                (indexable == 1) == ty.can_be_attribute(),
                 "a marker is `Indexable` exactly when its cell type is indexable"
             );
         }

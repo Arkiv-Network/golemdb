@@ -5,8 +5,8 @@
 #![allow(dead_code)] // Each test crate uses a different subset.
 
 use golemdb_api::{
-    Api, ApiError, Bounds, CellLimits, CountOp, Database, Filter, Genesis, HashAlgorithm, InValues,
-    QueryOp, RecordKey, RecordOp, op,
+    Api, ApiError, Bounds, CellLimits, CountOp, Database, EqValue, Filter, Genesis, HashAlgorithm,
+    InValues, QueryOp, RecordKey, RecordOp, op,
 };
 use std::{cmp::Ordering, ops::Bound};
 
@@ -67,11 +67,12 @@ pub fn record(key: RecordKey, attributes: &[(&str, CellValue)]) -> RecordOp<op::
         })
 }
 
-/// Raw, so tests can also build names the grammar rejects.
+/// Raw, so tests can also build names the grammar rejects. Through the
+/// runtime path: the value must be of an indexable type.
 pub fn eq(field: &str, value: CellValue) -> Filter {
     Filter::Eq {
         field: CellNameRef::raw(field.as_bytes()).into(),
-        value,
+        value: EqValue::try_from(value).expect("a value of an indexable type"),
     }
 }
 

@@ -32,11 +32,11 @@ mod tests {
         ops::{Bound, RangeBounds},
     };
 
-    use golemdb_cells::{CellKind, CellName, CellNameRef, CellType, CellValue, marker::I32};
+    use golemdb_cells::{CellKind, CellName, CellNameRef, CellValue, marker::I32};
     use golemdb_index::{BitmapContainer, IndexError, IndexTerm, TermError, TermRange, path};
 
     use super::*;
-    use crate::{Bounds, Filter, InValues, QueryError};
+    use crate::{Bounds, EqValue, Filter, InValues, QueryError};
 
     /// Posting lists in a `BTreeMap`: byte-ordered like the `Index` table.
     #[derive(Default)]
@@ -179,10 +179,11 @@ mod tests {
         CellNameRef::raw(field).into()
     }
 
+    /// Through the runtime path: the value must be of an indexable type.
     fn eq(field: &str, value: CellValue) -> Filter {
         Filter::Eq {
             field: name(field.as_bytes()),
-            value,
+            value: EqValue::try_from(value).expect("a value of an indexable type"),
         }
     }
 
@@ -284,12 +285,14 @@ mod tests {
 
     #[test]
     fn the_value_kind_plays_no_part() {
+        // `EqValue` keeps its value as a field, so an attribute and a field
+        // of one value are one leaf, matching the attribute cells indexed.
         let source = FakeSource::default().with("a", CellValue::from_u64(7), [1]);
         let attribute = CellValue::from_u64(7)
             .with_kind(CellKind::Attribute)
             .expect("indexable type");
+        assert_eq!(eq("a", attribute), eq("a", CellValue::from_u64(7)));
         assert_eq!(ids(&source, eq("a", CellValue::from_u64(7))), [1]);
-        assert_eq!(ids(&source, eq("a", attribute)), [1]);
     }
 
     #[test]
@@ -537,7 +540,11 @@ mod tests {
         // FailingSource would surface as QueryError::Internal if it were consulted.
         let not_utf8 = Filter::Eq {
             field: name(&[0xff]),
-            value: CellValue::from_i32(1),
+            value: EqValue::of(I32, 1),
+        };
+        let whole_run = Filter::Range {
+            field: name(b"1bad"),
+            bounds: Bounds::new(I32, Bound::Unbounded, Bound::Unbounded),
         };
         for (filter, field, expected) in [
             (
@@ -546,11 +553,6 @@ mod tests {
                 TermError::InvalidName,
             ),
             (not_utf8, name(&[0xff]), TermError::InvalidName),
-            (
-                eq("b", CellValue::from_bytes(b"x")),
-                name(b"b"),
-                TermError::UnsupportedType(CellType::Bytes),
-            ),
             (
                 is_in("1bad", [CellValue::from_i32(1)]),
                 name(b"1bad"),
@@ -573,6 +575,8 @@ mod tests {
                 name(b"1bad"),
                 TermError::InvalidName,
             ),
+            // Two unbounded sides have no value, but the name is still checked.
+            (whole_run, name(b"1bad"), TermError::InvalidName),
             (prefix("1bad", "a"), name(b"1bad"), TermError::InvalidName),
         ] {
             match evaluate(&FailingSource, &filter) {

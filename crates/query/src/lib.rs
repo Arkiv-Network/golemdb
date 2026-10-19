@@ -1,9 +1,9 @@
 //! Queries over committed state: [`Queries::query`] and [`Queries::count`].
 //!
 //! A [`QueryOp`] or [`CountOp`] is plain data the caller builds around a
-//! [`Filter`]. Leaves are typed: `amount = CellValue::from_i32(100)` reads only
-//! the `i32` run of `amount`, so a cell of another type under the same name is
-//! treated as absent. Only attribute cells are indexed, so only they match.
+//! [`Filter`]. Leaves are typed: `amount = EqValue::of(marker::I32, 100)` reads
+//! only the `i32` run of `amount`, so a cell of another type under the same
+//! name is treated as absent. Only attribute cells are indexed, so only they match.
 //!
 //! Queries read committed state: the head (`None`), or a named commit. The
 //! whole request is admitted before any state read. The filter's match set and
@@ -18,8 +18,8 @@
 //!
 //! ```
 //! use golemdb_api::{
-//!     Api, CellLimits, CellNameRef, CellValue, Database, Filter, Genesis, HashAlgorithm,
-//!     QueryOp, ReadTarget, RecordKey, RecordOp,
+//!     Api, CellLimits, CellNameRef, CellValue, Database, EqValue, Filter, Genesis,
+//!     HashAlgorithm, QueryOp, ReadTarget, RecordKey, RecordOp, marker::Str,
 //! };
 //!
 //! let limits = CellLimits { max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 64 };
@@ -35,7 +35,7 @@
 //!
 //! let filter = Filter::Eq {
 //!     field: CellNameRef::parse_user(b"color", 32)?.into(),
-//!     value: CellValue::from_str("blue"),
+//!     value: EqValue::of(Str, "blue"),
 //! };
 //! let page = db.query(None, QueryOp::from_filter(filter))?;
 //! assert_eq!(page.records, [db.get(ReadTarget::Head, RecordOp::get(key))?]);
@@ -52,5 +52,6 @@ mod query_op;
 pub use error::{QueryError, Result};
 pub use queries::Queries;
 pub use query_op::{
-    Bounds, Budget, CountOp, Direction, Filter, InValues, QueryOp, QueryPage, SortKey, ValuesError,
+    Bounds, Budget, CountOp, Direction, EqValue, Filter, InValues, QueryOp, QueryPage, SortKey,
+    ValuesError,
 };

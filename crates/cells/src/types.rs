@@ -126,12 +126,15 @@ impl CellType {
         }
     }
 
-    /// Whether the index holds values of this type: every type but
-    /// variable-length `bytes`, which has no order.
+    /// Whether a cell of this type can be an attribute, and so be held by
+    /// the index: every type but variable-length `bytes`, which has no order.
     ///
-    /// Exhaustive: a new cell type must choose before the crate builds again,
-    /// and [`crate::marker`]'s build-time check then asks for its marker.
-    pub const fn is_indexable(self) -> bool {
+    /// The one place this is decided. Exhaustive: a new cell type must choose
+    /// before the crate builds again, and [`crate::marker`]'s build-time check
+    /// then asks for its marker. Not to be confused with
+    /// [`CellValue::is_indexable`](crate::CellValue::is_indexable), whether
+    /// one value *is* an attribute.
+    pub const fn can_be_attribute(self) -> bool {
         match self {
             Self::Bytes => false,
             Self::Bool

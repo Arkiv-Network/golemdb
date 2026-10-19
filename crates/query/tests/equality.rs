@@ -1,13 +1,16 @@
 //! Filter semantics against a real database: which records an `Eq` leaf
 //! matches, for every indexable type, as records are created, patched and
-//! deleted.
+//! deleted, and which `Eq` leaves admission rejects.
 
 mod support;
 
 use std::collections::BTreeMap;
 
-use golemdb_api::{Api, ApiError, RecordOp};
-use golemdb_cells::{CellType, CellValue};
+use golemdb_api::{
+    Api, ApiError, CellNameRef, EqValue, Filter, RecordOp,
+    marker::{Date32, Dec32, I32},
+};
+use golemdb_cells::CellValue;
 use golemdb_index::TermError;
 use proptest::prelude::*;
 use support::{TestDb, eq, key, record, small_value};
@@ -207,25 +210,41 @@ fn one_record_under_many_terms() {
 }
 
 #[test]
+fn typed_values_match_as_their_runtime_form_does() {
+    let test = TestDb::default();
+    test.create([
+        record(key(1), &[("f", CellValue::from_dec32_unscaled(5))]),
+        record(key(2), &[("f", CellValue::from_i32(5))]),
+        record(key(3), &[("f", CellValue::from_date32(5))]),
+    ]);
+    let typed = |value| Filter::Eq {
+        field: CellNameRef::parse_user(b"f", 32)
+            .expect("valid name")
+            .into(),
+        value,
+    };
+    // One Rust value, three cell types: the marker decides which matches.
+    assert_eq!(test.keys(typed(EqValue::of(Dec32, 5))).unwrap(), [key(1)]);
+    assert_eq!(test.keys(typed(EqValue::of(I32, 5))).unwrap(), [key(2)]);
+    assert_eq!(test.keys(typed(EqValue::of(Date32, 5))).unwrap(), [key(3)]);
+    let runtime = eq("f", CellValue::from_dec32_unscaled(5));
+    assert_eq!(runtime, typed(EqValue::of(Dec32, 5)));
+}
+
+#[test]
 fn invalid_arguments_are_errors_not_empty_results() {
     let test = TestDb::default();
-    let cause = |result: Result<_, ApiError>| match result {
-        Err(ApiError::InvalidArgument {
-            source: Some(source),
-            ..
-        }) => source.downcast_ref::<TermError>().copied(),
-        _ => None,
+    let result = test.keys(eq("not valid", CellValue::from_i32(1)));
+    let Err(ApiError::InvalidArgument {
+        source: Some(source),
+        ..
+    }) = &result
+    else {
+        panic!("expected InvalidArgument, got {result:?}");
     };
     assert_eq!(
-        cause(test.keys(eq("not valid", CellValue::from_i32(1)))),
-        Some(TermError::InvalidName)
-    );
-    assert_eq!(
-        cause(
-            test.count(eq("f", CellValue::from_bytes(b"x")))
-                .map(|_| vec![])
-        ),
-        Some(TermError::UnsupportedType(CellType::Bytes))
+        source.downcast_ref::<TermError>(),
+        Some(&TermError::InvalidName)
     );
 }
 
