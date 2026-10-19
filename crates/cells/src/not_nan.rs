@@ -8,89 +8,135 @@ use std::{
 
 use crate::{CellType, CellValue, CellValueParseError, FloatWidth, encode_float};
 
-macro_rules! not_nan {
-    ($(#[doc = $doc:literal])* $name:ident($float:ty), $width:expr) => {
-        $(#[doc = $doc])*
-        ///
-        /// Never NaN, and zero is `+0.0`, as a stored float is, so `Eq`, `Ord`
-        /// and `Hash` are lawful and follow the cell's order.
-        #[derive(Debug, Clone, Copy, PartialEq)]
-        pub struct $name($float);
+/// The value of an `f32` cell.
+///
+/// Never NaN, and zero is `+0.0`, as a stored float is, so `Eq`, `Ord` and
+/// `Hash` are lawful and follow the cell's order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NotNan32(f32);
 
-        impl $name {
-            /// `value`, unless it is NaN. `-0.0` becomes `+0.0`, and the
-            /// infinities are kept, as the float cell constructors do.
-            ///
-            /// `const`, so a constant is checked when the crate builds.
-            ///
-            /// # Errors
-            ///
-            /// [`CellValueParseError::FloatNaN`] for any NaN.
-            pub const fn new(value: $float) -> Result<Self, CellValueParseError> {
-                if value.is_nan() {
-                    Err(CellValueParseError::FloatNaN)
-                } else if value == 0.0 {
-                    Ok(Self(0.0))
-                } else {
-                    Ok(Self(value))
-                }
-            }
-
-            /// The float: never NaN, never `-0.0`.
-            pub const fn get(self) -> $float {
-                self.0
-            }
-
-            /// The cell of this value, as a field.
-            pub(crate) fn cell(self) -> CellValue {
-                CellValue::field_from_typed(
-                    CellType::Float($width),
-                    &encode_float(self.0.to_be_bytes()),
-                )
-            }
+impl NotNan32 {
+    /// `value`, unless it is NaN. `-0.0` becomes `+0.0`, and the infinities
+    /// are kept, as the float cell constructors do.
+    ///
+    /// `const`, so a constant is checked when the crate builds.
+    ///
+    /// # Errors
+    ///
+    /// [`CellValueParseError::FloatNaN`] for any NaN.
+    pub const fn new(value: f32) -> Result<Self, CellValueParseError> {
+        if value.is_nan() {
+            Err(CellValueParseError::FloatNaN)
+        } else if value == 0.0 {
+            Ok(Self(0.0))
+        } else {
+            Ok(Self(value))
         }
+    }
 
-        impl Eq for $name {}
+    /// The float: never NaN, never `-0.0`.
+    pub const fn get(self) -> f32 {
+        self.0
+    }
 
-        impl Hash for $name {
-            fn hash<H: Hasher>(&self, state: &mut H) {
-                self.0.to_bits().hash(state);
-            }
-        }
-
-        impl PartialOrd for $name {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-                Some(self.cmp(other))
-            }
-        }
-
-        impl Ord for $name {
-            fn cmp(&self, other: &Self) -> Ordering {
-                self.0.total_cmp(&other.0)
-            }
-        }
-    };
+    /// The cell of this value, as a field.
+    pub(crate) fn cell(self) -> CellValue {
+        CellValue::field_from_typed(
+            CellType::Float(FloatWidth::F32),
+            &encode_float(self.0.to_be_bytes()),
+        )
+    }
 }
 
-not_nan! {
-    /// The value of an `f32` cell.
-    NotNan32(f32), FloatWidth::F32
+impl Eq for NotNan32 {}
+
+impl Hash for NotNan32 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
 }
 
-not_nan! {
-    /// The value of an `f64` cell.
+impl PartialOrd for NotNan32 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for NotNan32 {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
+
+/// The value of an `f64` cell.
+///
+/// Never NaN, and zero is `+0.0`, as a stored float is, so `Eq`, `Ord` and
+/// `Hash` are lawful and follow the cell's order.
+///
+/// ```
+/// use golemdb_cells::NotNan64;
+///
+/// const HALF: NotNan64 = match NotNan64::new(0.5) {
+///     Ok(half) => half,
+///     Err(_) => panic!("NaN"),
+/// };
+/// assert_eq!(HALF.get(), 0.5);
+/// assert!(NotNan64::new(f64::NAN).is_err());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NotNan64(f64);
+
+impl NotNan64 {
+    /// `value`, unless it is NaN. `-0.0` becomes `+0.0`, and the infinities
+    /// are kept, as the float cell constructors do.
     ///
-    /// ```
-    /// use golemdb_cells::NotNan64;
+    /// `const`, so a constant is checked when the crate builds.
     ///
-    /// const HALF: NotNan64 = match NotNan64::new(0.5) {
-    ///     Ok(half) => half,
-    ///     Err(_) => panic!("NaN"),
-    /// };
-    /// assert_eq!(HALF.get(), 0.5);
-    /// assert!(NotNan64::new(f64::NAN).is_err());
-    /// ```
-    NotNan64(f64), FloatWidth::F64
+    /// # Errors
+    ///
+    /// [`CellValueParseError::FloatNaN`] for any NaN.
+    pub const fn new(value: f64) -> Result<Self, CellValueParseError> {
+        if value.is_nan() {
+            Err(CellValueParseError::FloatNaN)
+        } else if value == 0.0 {
+            Ok(Self(0.0))
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// The float: never NaN, never `-0.0`.
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+
+    /// The cell of this value, as a field.
+    pub(crate) fn cell(self) -> CellValue {
+        CellValue::field_from_typed(
+            CellType::Float(FloatWidth::F64),
+            &encode_float(self.0.to_be_bytes()),
+        )
+    }
+}
+
+impl Eq for NotNan64 {}
+
+impl Hash for NotNan64 {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
+impl PartialOrd for NotNan64 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for NotNan64 {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.total_cmp(&other.0)
+    }
 }
 
 #[cfg(test)]

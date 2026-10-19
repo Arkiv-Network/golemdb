@@ -48,97 +48,489 @@ pub trait CellMarker: sealed::Sealed + Copy {
 )]
 pub trait Indexable: CellMarker {}
 
-/// A marker: a unit struct and its [`CellMarker`] impl.
-macro_rules! marker {
-    ($(#[doc = $doc:literal])* $marker:ident($value:ty) = $cell_type:expr, $build:expr) => {
-        $(#[doc = $doc])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub struct $marker;
+// The `do_not_recommend` impls keep the markers out of a failed bound's
+// "other types that implement" list: the `on_unimplemented` notes say
+// what to write instead.
 
-        impl sealed::Sealed for $marker {}
+/// `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bool;
 
-        // Not listed as "other types that implement" in a failed bound: the
-        // `on_unimplemented` notes say what to write instead.
-        #[diagnostic::do_not_recommend]
-        impl CellMarker for $marker {
-            const CELL_TYPE: CellType = $cell_type;
-            type Value<'a> = $value;
+impl sealed::Sealed for Bool {}
 
-            fn cell(value: Self::Value<'_>) -> CellValue {
-                $build(value)
-            }
-        }
-    };
+#[diagnostic::do_not_recommend]
+impl CellMarker for Bool {
+    const CELL_TYPE: CellType = CellType::Bool;
+    type Value<'a> = bool;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_bool(value)
+    }
 }
 
-/// The indexable markers, and the list the build-time check reads.
-macro_rules! indexable {
-    ($($(#[doc = $doc:literal])* $marker:ident($value:ty) = $cell_type:expr, $build:expr;)*) => {
-        $(
-            marker!($(#[doc = $doc])* $marker($value) = $cell_type, $build);
+#[diagnostic::do_not_recommend]
+impl Indexable for Bool {}
 
-            #[diagnostic::do_not_recommend]
-            impl Indexable for $marker {}
-        )*
+/// `str`, from UTF-8 text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Str;
 
-        /// The types of the [`Indexable`] markers.
-        const INDEXABLE: &[CellType] = &[$(<$marker as CellMarker>::CELL_TYPE),*];
-    };
+impl sealed::Sealed for Str {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Str {
+    const CELL_TYPE: CellType = CellType::Str;
+    type Value<'a> = &'a str;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_str(value)
+    }
 }
 
-indexable! {
-    /// `bool`.
-    Bool(bool) = CellType::Bool, CellValue::from_bool;
-    /// `str`, from UTF-8 text.
-    Str(&'a str) = CellType::Str, CellValue::from_str;
-    /// `bytes20`, the address width.
-    Bytes20([u8; 20]) = CellType::Bytes20, CellValue::from_bytes20;
-    /// `bytes4`.
-    Bytes4([u8; 4]) = CellType::FixedBytes(Width::W4), CellValue::from_bytes4;
-    /// `bytes8`.
-    Bytes8([u8; 8]) = CellType::FixedBytes(Width::W8), CellValue::from_bytes8;
-    /// `bytes16`.
-    Bytes16([u8; 16]) = CellType::FixedBytes(Width::W16), CellValue::from_bytes16;
-    /// `bytes32`.
-    Bytes32([u8; 32]) = CellType::FixedBytes(Width::W32), CellValue::from_bytes32;
-    /// `u32`.
-    U32(u32) = CellType::Uint(Width::W4), CellValue::from_u32;
-    /// `u64`.
-    U64(u64) = CellType::Uint(Width::W8), CellValue::from_u64;
-    /// `u128`.
-    U128(u128) = CellType::Uint(Width::W16), CellValue::from_u128;
-    /// `u256`, from its natural big-endian bytes.
-    U256([u8; 32]) = CellType::Uint(Width::W32), CellValue::from_u256_be;
-    /// `i32`.
-    I32(i32) = CellType::Int(Width::W4), CellValue::from_i32;
-    /// `i64`.
-    I64(i64) = CellType::Int(Width::W8), CellValue::from_i64;
-    /// `i128`.
-    I128(i128) = CellType::Int(Width::W16), CellValue::from_i128;
-    /// `i256`, from its two's complement big-endian bytes.
-    I256([u8; 32]) = CellType::Int(Width::W32), CellValue::from_i256_be;
-    /// `dec32`, from the unscaled integer: `123_450` is 12.3450.
-    Dec32(i32) = CellType::Decimal(Width::W4), CellValue::from_dec32_unscaled;
-    /// `dec64`, from the unscaled integer (six places).
-    Dec64(i64) = CellType::Decimal(Width::W8), CellValue::from_dec64_unscaled;
-    /// `dec128`, from the unscaled integer (eighteen places).
-    Dec128(i128) = CellType::Decimal(Width::W16), CellValue::from_dec128_unscaled;
-    /// `dec256`, from the unscaled two's complement big-endian bytes.
-    Dec256([u8; 32]) = CellType::Decimal(Width::W32), CellValue::from_dec256_unscaled_be;
-    /// `f32`, from a float checked once not to be NaN.
-    F32(NotNan32) = CellType::Float(FloatWidth::F32), NotNan32::cell;
-    /// `f64`, from a float checked once not to be NaN.
-    F64(NotNan64) = CellType::Float(FloatWidth::F64), NotNan64::cell;
-    /// `date32`, from days since the Unix epoch.
-    Date32(i32) = CellType::Date32, CellValue::from_date32;
-    /// `timestamp64`, from microseconds since the Unix epoch.
-    Timestamp64(i64) = CellType::Timestamp64, CellValue::from_timestamp64;
+#[diagnostic::do_not_recommend]
+impl Indexable for Str {}
+
+/// `bytes20`, the address width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bytes20;
+
+impl sealed::Sealed for Bytes20 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Bytes20 {
+    const CELL_TYPE: CellType = CellType::Bytes20;
+    type Value<'a> = [u8; 20];
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_bytes20(value)
+    }
 }
 
-marker! {
-    /// `bytes`, variable length: a field only. It has no order, so no index
-    /// term, so it is not [`Indexable`].
-    Bytes(&'a [u8]) = CellType::Bytes, CellValue::from_bytes
+#[diagnostic::do_not_recommend]
+impl Indexable for Bytes20 {}
+
+/// `bytes4`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bytes4;
+
+impl sealed::Sealed for Bytes4 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Bytes4 {
+    const CELL_TYPE: CellType = CellType::FixedBytes(Width::W4);
+    type Value<'a> = [u8; 4];
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_bytes4(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for Bytes4 {}
+
+/// `bytes8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bytes8;
+
+impl sealed::Sealed for Bytes8 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Bytes8 {
+    const CELL_TYPE: CellType = CellType::FixedBytes(Width::W8);
+    type Value<'a> = [u8; 8];
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_bytes8(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for Bytes8 {}
+
+/// `bytes16`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bytes16;
+
+impl sealed::Sealed for Bytes16 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Bytes16 {
+    const CELL_TYPE: CellType = CellType::FixedBytes(Width::W16);
+    type Value<'a> = [u8; 16];
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_bytes16(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for Bytes16 {}
+
+/// `bytes32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bytes32;
+
+impl sealed::Sealed for Bytes32 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Bytes32 {
+    const CELL_TYPE: CellType = CellType::FixedBytes(Width::W32);
+    type Value<'a> = [u8; 32];
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_bytes32(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for Bytes32 {}
+
+/// `u32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct U32;
+
+impl sealed::Sealed for U32 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for U32 {
+    const CELL_TYPE: CellType = CellType::Uint(Width::W4);
+    type Value<'a> = u32;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_u32(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for U32 {}
+
+/// `u64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct U64;
+
+impl sealed::Sealed for U64 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for U64 {
+    const CELL_TYPE: CellType = CellType::Uint(Width::W8);
+    type Value<'a> = u64;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_u64(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for U64 {}
+
+/// `u128`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct U128;
+
+impl sealed::Sealed for U128 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for U128 {
+    const CELL_TYPE: CellType = CellType::Uint(Width::W16);
+    type Value<'a> = u128;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_u128(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for U128 {}
+
+/// `u256`, from its natural big-endian bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct U256;
+
+impl sealed::Sealed for U256 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for U256 {
+    const CELL_TYPE: CellType = CellType::Uint(Width::W32);
+    type Value<'a> = [u8; 32];
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_u256_be(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for U256 {}
+
+/// `i32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct I32;
+
+impl sealed::Sealed for I32 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for I32 {
+    const CELL_TYPE: CellType = CellType::Int(Width::W4);
+    type Value<'a> = i32;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_i32(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for I32 {}
+
+/// `i64`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct I64;
+
+impl sealed::Sealed for I64 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for I64 {
+    const CELL_TYPE: CellType = CellType::Int(Width::W8);
+    type Value<'a> = i64;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_i64(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for I64 {}
+
+/// `i128`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct I128;
+
+impl sealed::Sealed for I128 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for I128 {
+    const CELL_TYPE: CellType = CellType::Int(Width::W16);
+    type Value<'a> = i128;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_i128(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for I128 {}
+
+/// `i256`, from its two's complement big-endian bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct I256;
+
+impl sealed::Sealed for I256 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for I256 {
+    const CELL_TYPE: CellType = CellType::Int(Width::W32);
+    type Value<'a> = [u8; 32];
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_i256_be(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for I256 {}
+
+/// `dec32`, from the unscaled integer: `123_450` is 12.3450.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dec32;
+
+impl sealed::Sealed for Dec32 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Dec32 {
+    const CELL_TYPE: CellType = CellType::Decimal(Width::W4);
+    type Value<'a> = i32;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_dec32_unscaled(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for Dec32 {}
+
+/// `dec64`, from the unscaled integer (six places).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dec64;
+
+impl sealed::Sealed for Dec64 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Dec64 {
+    const CELL_TYPE: CellType = CellType::Decimal(Width::W8);
+    type Value<'a> = i64;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_dec64_unscaled(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for Dec64 {}
+
+/// `dec128`, from the unscaled integer (eighteen places).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dec128;
+
+impl sealed::Sealed for Dec128 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Dec128 {
+    const CELL_TYPE: CellType = CellType::Decimal(Width::W16);
+    type Value<'a> = i128;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_dec128_unscaled(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for Dec128 {}
+
+/// `dec256`, from the unscaled two's complement big-endian bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dec256;
+
+impl sealed::Sealed for Dec256 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Dec256 {
+    const CELL_TYPE: CellType = CellType::Decimal(Width::W32);
+    type Value<'a> = [u8; 32];
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_dec256_unscaled_be(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for Dec256 {}
+
+/// `f32`, from a float checked once not to be NaN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct F32;
+
+impl sealed::Sealed for F32 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for F32 {
+    const CELL_TYPE: CellType = CellType::Float(FloatWidth::F32);
+    type Value<'a> = NotNan32;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        NotNan32::cell(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for F32 {}
+
+/// `f64`, from a float checked once not to be NaN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct F64;
+
+impl sealed::Sealed for F64 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for F64 {
+    const CELL_TYPE: CellType = CellType::Float(FloatWidth::F64);
+    type Value<'a> = NotNan64;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        NotNan64::cell(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for F64 {}
+
+/// `date32`, from days since the Unix epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Date32;
+
+impl sealed::Sealed for Date32 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Date32 {
+    const CELL_TYPE: CellType = CellType::Date32;
+    type Value<'a> = i32;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_date32(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for Date32 {}
+
+/// `timestamp64`, from microseconds since the Unix epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timestamp64;
+
+impl sealed::Sealed for Timestamp64 {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Timestamp64 {
+    const CELL_TYPE: CellType = CellType::Timestamp64;
+    type Value<'a> = i64;
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_timestamp64(value)
+    }
+}
+
+#[diagnostic::do_not_recommend]
+impl Indexable for Timestamp64 {}
+
+/// The types of the [`Indexable`] markers.
+const INDEXABLE: &[CellType] = &[
+    <Bool as CellMarker>::CELL_TYPE,
+    <Str as CellMarker>::CELL_TYPE,
+    <Bytes20 as CellMarker>::CELL_TYPE,
+    <Bytes4 as CellMarker>::CELL_TYPE,
+    <Bytes8 as CellMarker>::CELL_TYPE,
+    <Bytes16 as CellMarker>::CELL_TYPE,
+    <Bytes32 as CellMarker>::CELL_TYPE,
+    <U32 as CellMarker>::CELL_TYPE,
+    <U64 as CellMarker>::CELL_TYPE,
+    <U128 as CellMarker>::CELL_TYPE,
+    <U256 as CellMarker>::CELL_TYPE,
+    <I32 as CellMarker>::CELL_TYPE,
+    <I64 as CellMarker>::CELL_TYPE,
+    <I128 as CellMarker>::CELL_TYPE,
+    <I256 as CellMarker>::CELL_TYPE,
+    <Dec32 as CellMarker>::CELL_TYPE,
+    <Dec64 as CellMarker>::CELL_TYPE,
+    <Dec128 as CellMarker>::CELL_TYPE,
+    <Dec256 as CellMarker>::CELL_TYPE,
+    <F32 as CellMarker>::CELL_TYPE,
+    <F64 as CellMarker>::CELL_TYPE,
+    <Date32 as CellMarker>::CELL_TYPE,
+    <Timestamp64 as CellMarker>::CELL_TYPE,
+];
+
+/// `bytes`, variable length: a field only. It has no order, so no index
+/// term, so it is not [`Indexable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bytes;
+
+impl sealed::Sealed for Bytes {}
+
+#[diagnostic::do_not_recommend]
+impl CellMarker for Bytes {
+    const CELL_TYPE: CellType = CellType::Bytes;
+    type Value<'a> = &'a [u8];
+
+    fn cell(value: Self::Value<'_>) -> CellValue {
+        CellValue::from_bytes(value)
+    }
 }
 
 /// The types of the markers that are not [`Indexable`].
