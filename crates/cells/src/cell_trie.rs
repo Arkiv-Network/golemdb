@@ -4,6 +4,11 @@ use golemdb_storage::{ReadCursor, ReadTransaction, WriteTransaction};
 
 use crate::{CELL_TRIE_PATH_BYTES, CellError, CellKey, CellValue, Result, tables};
 
+/// A cell's routing path, `recordID || H(encoded CellKey)`. Only
+/// [`CellTrie::path`] builds one, so every trie access is routed from a `CellKey`.
+#[derive(Clone, Copy)]
+pub(crate) struct CellPath([u8; CELL_TRIE_PATH_BYTES]);
+
 /// Cell-specific routing, leaf hashing and recovery over branch-only storage.
 pub(crate) struct CellTrie<'h, H: HashProvider> {
     trie: Trie<'h, H, CELL_TRIE_PATH_BYTES>,
@@ -20,10 +25,22 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         }
     }
 
+    /// Route a cell by its record ID, then by the hash of its encoded key, so
+    /// each record's cells share one subtree.
+    pub(crate) fn path(&self, key: &CellKey) -> CellPath {
+        let record_id = key.record_id().to_be_bytes();
+        // The encoded key is `recordID || name`; hashing its parts avoids allocating it.
+        let digest = self.hasher.hash_parts(&[&record_id, key.name().as_bytes()]);
+        let mut path = [0; CELL_TRIE_PATH_BYTES];
+        path[..record_id.len()].copy_from_slice(&record_id);
+        path[record_id.len()..].copy_from_slice(&digest);
+        CellPath(path)
+    }
+
     /// Construct a virtual leaf binding the complete routing path to the tagged
     /// cell value: `H(CELL_LEAF_DOMAIN || path || typeTag || value)`.
-    /// The caller supplies `path = H(encoded CellKey)`; no leaf row is written.
-    fn leaf(&self, path: Hash, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
+    /// No leaf row is written.
+    fn leaf(&self, CellPath(path): CellPath, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
         LeafRef {
             path,
             hash: self
@@ -32,7 +49,7 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         }
     }
 
-    /// Verify that the leaf at `H(key)` commits to the value read from the `Cell` table.
+    /// Verify that the leaf at `path` commits to the value read from the `Cell` table.
     /// `None` requires absence from the trie. A different or missing commitment
     /// returns `RootMismatch`; storage and branch-validation errors propagate.
     /// This checks one address, not the entire state, and also applies to no-ops.
@@ -40,31 +57,28 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         &self,
         tx: &impl ReadTransaction,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
-        key: &[u8],
+        path: CellPath,
         before: Option<&CellValue>,
     ) -> Result<()> {
-        let path = self.hasher.hash(key);
-        if self.trie.get(tx, root, &path)? != before.map(|value| self.leaf(path, value)) {
+        if self.trie.get(tx, root, &path.0)? != before.map(|value| self.leaf(path, value)) {
             return Err(CellError::RootMismatch);
         }
         Ok(())
     }
 
-    /// For each key, insert or replace the leaf at `H(key)`, or remove it when
-    /// the value is `None`, in one batched trie update. Returns the updated root
-    /// and retains old branches for copy-on-write history. The caller updates
-    /// the `Cell` table in the same transaction and must abort that transaction
-    /// if a mutation fails.
+    /// For each path, insert or replace its leaf, or remove it when the value is
+    /// `None`, in one batched trie update. Returns the updated root and retains
+    /// old branches for copy-on-write history. The caller updates the `Cell`
+    /// table in the same transaction and must abort that transaction if a
+    /// mutation fails.
     pub(crate) fn set<'a>(
         &self,
         tx: &mut impl WriteTransaction,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
-        changes: impl IntoIterator<Item = (&'a [u8], Option<&'a CellValue>)>,
+        changes: impl IntoIterator<Item = (CellPath, Option<&'a CellValue>)>,
     ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
-        let edits = changes.into_iter().map(|(key, value)| {
-            let path = self.hasher.hash(key);
-            (path, value.map(|value| self.leaf(path, value).hash))
-        });
+        let edits = (changes.into_iter())
+            .map(|(path, value)| (path.0, value.map(|value| self.leaf(path, value).hash)));
         Ok(self.trie.apply(tx, root, edits)?)
     }
 
@@ -98,9 +112,9 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         if cursor.next()?.is_some() {
             return Err(CellError::RootMismatch);
         }
-        CellKey::decode(&key)?;
+        let key = CellKey::decode(&key)?;
         let value = CellValue::parse(value)?;
-        let leaf = self.leaf(self.hasher.hash(&key), &value);
+        let leaf = self.leaf(self.path(&key), &value);
         if leaf.hash != hash {
             return Err(CellError::RootMismatch);
         }
