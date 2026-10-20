@@ -502,3 +502,57 @@ fn committed_reads_use_head_and_metadata_from_one_snapshot() {
         );
     }
 }
+
+#[test]
+fn range_of_and_ordinal_of_locate_committed_rows() {
+    let db = Database::open_memory(&genesis(HashAlgorithm::Keccak256)).unwrap();
+    assert_eq!(
+        db.immutable_data_range_of("events", CommitId::GENESIS)
+            .unwrap(),
+        0..0
+    );
+
+    let branch = db.begin().unwrap();
+    db.immutable_data_append(branch, "events", Some(key(1)), row(1))
+        .unwrap();
+    db.immutable_data_append(branch, "events", None, row(2))
+        .unwrap();
+    assert_eq!(
+        db.immutable_data_ordinal_of("events", key(1)).unwrap(),
+        None
+    );
+    let first = db.commit(branch).unwrap();
+
+    // A commit that appends nothing still reports where the segment ends.
+    let empty = db.commit(db.begin().unwrap()).unwrap();
+
+    let branch = db.begin().unwrap();
+    db.immutable_data_append(branch, "events", Some(key(3)), row(3))
+        .unwrap();
+    let third = db.commit(branch).unwrap();
+
+    assert_eq!(db.immutable_data_range_of("events", first).unwrap(), 0..2);
+    assert_eq!(db.immutable_data_range_of("events", empty).unwrap(), 2..2);
+    assert_eq!(db.immutable_data_range_of("events", third).unwrap(), 2..3);
+    assert_eq!(db.immutable_data_range_of("receipts", third).unwrap(), 0..0);
+    assert!(matches!(
+        db.immutable_data_range_of("events", CommitId::new(third.get() + 1)),
+        Err(ApiError::CommitUnavailable { .. })
+    ));
+    assert_eq!(
+        db.immutable_data_ordinal_of("events", key(1)).unwrap(),
+        Some(0)
+    );
+    assert_eq!(
+        db.immutable_data_ordinal_of("events", key(3)).unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        db.immutable_data_ordinal_of("events", key(9)).unwrap(),
+        None
+    );
+    assert!(matches!(
+        db.immutable_data_ordinal_of("missing", key(1)),
+        Err(ApiError::NotFound)
+    ));
+}

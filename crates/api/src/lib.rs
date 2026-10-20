@@ -158,6 +158,23 @@ pub trait Api {
         commit: CommitId,
         options: &ImmutableDataReadOptions,
     ) -> Result<Vec<ImmutableDataRow>>;
+
+    /// The half-open ordinal range this commit appended to the segment. A commit
+    /// that appended nothing returns `end..end`, the segment's length at that
+    /// commit; future commits return CommitUnavailable.
+    fn immutable_data_range_of(
+        &self,
+        segment: &str,
+        commit: CommitId,
+    ) -> Result<std::ops::Range<ImmutableDataOrdinal>>;
+
+    /// The ordinal of the committed row bound to `key`, or `None` when no
+    /// committed row carries it.
+    fn immutable_data_ordinal_of(
+        &self,
+        segment: &str,
+        key: ImmutableDataKey,
+    ) -> Result<Option<ImmutableDataOrdinal>>;
 }
 
 #[cfg(test)]
