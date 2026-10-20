@@ -26,6 +26,7 @@ fn configured_page_size_is_applied() {
     let dir = tempfile::tempdir().unwrap();
     let options = MdbxOptions {
         page_size: 16 * KIB,
+        txn_dp_limit: None,
         ..Default::default()
     };
     let db = MdbxStore::open_with_options(dir.path(), options).unwrap();
@@ -37,6 +38,7 @@ fn reopened_database_keeps_its_page_size() {
     let dir = tempfile::tempdir().unwrap();
     let options = MdbxOptions {
         page_size: 16 * KIB,
+        txn_dp_limit: None,
         ..Default::default()
     };
     drop(MdbxStore::open_with_options(dir.path(), options).unwrap());

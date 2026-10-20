@@ -20,6 +20,11 @@ pub struct MdbxOptions {
     pub growth_step: usize,
     /// Page size in bytes, used only when creating a database. Sets the maximum key size.
     pub page_size: usize,
+    /// Pages a write transaction may dirty in memory before MDBX spills them
+    /// to disk; `None` keeps MDBX's default, about 1/42 of RAM. A local
+    /// tuning knob: it never changes what is stored. Raise it for very large
+    /// commits (a bulk load), which otherwise spill and rewrite pages.
+    pub txn_dp_limit: Option<u64>,
 }
 
 impl Default for MdbxOptions {
@@ -29,6 +34,7 @@ impl Default for MdbxOptions {
             max_map_size: DEFAULT_MAX_MAP_SIZE,
             growth_step: 16 * 1024 * 1024,
             page_size: DEFAULT_PAGE_SIZE,
+            txn_dp_limit: None,
         }
     }
 }
@@ -132,6 +138,16 @@ impl MdbxStore {
         };
         if key <= 0 || value <= 0 {
             return Err(backend(libmdbx::Error::Invalid));
+        }
+        if let Some(limit) = options.txn_dp_limit {
+            // SAFETY: the environment is open and remains alive; the option
+            // takes a plain integer and MDBX validates its range.
+            let code = unsafe {
+                mdbx_sys::mdbx_env_set_option(inner.ptr().0, mdbx_sys::MDBX_opt_txn_dp_limit, limit)
+            };
+            if code != 0 {
+                return Err(invalid());
+            }
         }
         Ok(Self {
             inner: Arc::new(inner),
