@@ -60,6 +60,7 @@ fn head_selection_and_record_read_share_one_snapshot() {
             reads: std::sync::atomic::AtomicUsize::new(0),
         },
         Keccak256Hasher,
+        None,
     )
     .unwrap();
     let reader = Records::new(reader_branches.clone());
@@ -173,7 +174,7 @@ fn setup() -> (
 ) {
     let db = MemoryStore::new();
     initialize(&db);
-    let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
     let records = Records::new(branches.clone());
     (db, branches, records)
 }

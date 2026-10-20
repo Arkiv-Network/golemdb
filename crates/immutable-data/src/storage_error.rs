@@ -21,6 +21,8 @@ pub enum ImmutableDataStorageError {
     AlreadyExists,
     #[error("immutable data not found")]
     NotFound,
+    #[error("commit {requested} is newer than published commit {published}")]
+    CommitUnavailable { requested: u64, published: u64 },
     #[error("immutable ordinal, commit or file index overflow")]
     Overflow,
 }

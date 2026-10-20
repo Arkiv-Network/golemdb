@@ -9,7 +9,7 @@ use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransacti
 
 const SUPERBLOCK: Table = Table("Superblock");
 const KEY: RecordKey = RecordKey([0x42; 32]);
-const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\nimmutable_data: {shard_span: 500000, segments: []}\n";
+const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\n";
 
 fn config() -> OpenConfig {
     OpenConfig::new(Genesis::from_yaml(YAML).unwrap())
@@ -39,7 +39,7 @@ pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
 #[test]
 fn yaml_is_explicit_strict_and_has_canonical_identity() {
     let first = Genesis::from_yaml(YAML).unwrap();
-    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nhash_function: keccak-256\nimmutable_data: {segments: [], shard_span: 500000}\n").unwrap();
+    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nhash_function: keccak-256\nimmutable_data: null\n").unwrap();
     assert_eq!(first, reordered);
     assert_eq!(
         Database::open_memory(&first).unwrap().info(),
@@ -120,7 +120,7 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
     );
     assert_eq!(snapshot(&db), before);
 
-    let branches = Branches::new(db.clone(), hasher).unwrap();
+    let branches = Branches::new(db.clone(), hasher, None).unwrap();
     let records = Records::new(branches.clone());
     let branch = branches.begin().unwrap();
     let cells = golemdb_record::RecordCells::from([(
@@ -144,7 +144,7 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
     assert_eq!(reopened.info().commit_id, golemdb_branch::CommitId::new(1));
     assert_eq!(reopened.info().genesis_id, genesis.genesis_id);
     assert_eq!(snapshot(&db), before);
-    let fresh = Records::new(Branches::new(db.clone(), hasher).unwrap());
+    let fresh = Records::new(Branches::new(db.clone(), hasher, None).unwrap());
     assert_eq!(
         fresh.get(ReadTarget::Head, KEY, None).unwrap().cells[b"price".as_slice()].as_i32(),
         Some(50)
@@ -282,8 +282,6 @@ fn missing_or_malformed_metadata_and_reserved_cells_fail_without_repair() {
     }
     for key in [
         CellKey::new(system::PARAMS.id, reserved::MAX_STR_LEN),
-        CellKey::new(system::PARAMS.id, reserved::SHARD_SPAN),
-        CellKey::new(system::PARAMS.id, reserved::IMMUTABLE_DATA_SEGMENTS),
         CellKey::new(system::ALLOC.id, reserved::NEXT_RECORD_ID),
         CellKey::new(system::PARAMS.id, reserved::KEY),
         CellKey::new(
@@ -416,7 +414,7 @@ fn mdbx_genesis_matches_memory_and_reopens_from_disk_after_commit() {
         let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
         let branches = match hash {
             HashAlgorithm::Keccak256 => {
-                let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
+                let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
                 let record = Records::new(branches.clone());
                 let branch = branches.begin().unwrap();
                 record
@@ -432,7 +430,7 @@ fn mdbx_genesis_matches_memory_and_reopens_from_disk_after_commit() {
                 branches.commit(branch).unwrap()
             }
             HashAlgorithm::Blake3 => {
-                let branches = Branches::new(db.clone(), Blake3Hasher).unwrap();
+                let branches = Branches::new(db.clone(), Blake3Hasher, None).unwrap();
                 let record = Records::new(branches.clone());
                 let branch = branches.begin().unwrap();
                 record
@@ -500,7 +498,7 @@ fn mdbx_modes_limits_and_shared_environment_concurrent_opening() {
     cfg.genesis.cell_limits.max_str_len =
         db.max_key_size() as u32 - cfg.genesis.cell_limits.max_cell_name_len - 2;
     Database::from_store(db.clone(), &cfg).unwrap();
-    let branches = Branches::new(db, Keccak256Hasher).unwrap();
+    let branches = Branches::new(db, Keccak256Hasher, None).unwrap();
     let records = Records::new(branches.clone());
     let branch = branches.begin().unwrap();
     let name = "a".repeat(cfg.genesis.cell_limits.max_cell_name_len as usize);

@@ -30,6 +30,8 @@ pub enum OpenError {
     #[error(transparent)]
     Branch(#[from] golemdb_branch::BranchError),
     #[error(transparent)]
+    ImmutableData(#[from] golemdb_immutable_data::ImmutableDataStorageError),
+    #[error(transparent)]
     Index(#[from] golemdb_index::IndexError),
 }
 

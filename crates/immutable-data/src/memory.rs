@@ -11,6 +11,26 @@ pub(crate) struct MemoryStorage {
     rows: BTreeMap<u32, Vec<(u64, PayloadRow)>>,
 }
 impl MemoryStorage {
+    pub(crate) fn recover(
+        &mut self,
+        s: &Segment,
+        ranges: &BTreeMap<u64, Range<u64>>,
+    ) -> StorageResult<()> {
+        let end = ranges.last_key_value().map_or(0, |(_, range)| range.end);
+        if end > self.end_ordinal(s) {
+            return Err(Error::Corrupt("missing published immutable rows"));
+        }
+        if let Some(rows) = self.rows.get(&s.id) {
+            for (span, range) in ranges {
+                let first = usize::try_from(range.start).map_err(|_| Error::Overflow)?;
+                let end = usize::try_from(range.end).map_err(|_| Error::Overflow)?;
+                if rows[first..end].iter().any(|(actual, _)| actual != span) {
+                    return Err(Error::Corrupt("published rows belong to another file span"));
+                }
+            }
+        }
+        self.truncate(s, end)
+    }
     pub(crate) fn new(span: u64) -> Self {
         Self {
             span,

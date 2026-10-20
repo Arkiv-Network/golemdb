@@ -6,7 +6,7 @@
 
 use golemdb_api::{
     Api, ApiError, Bounds, CellLimits, CountOp, Database, EqValue, Filter, Genesis, HashAlgorithm,
-    ImmutableDataConfig, InValues, QueryOp, RecordKey, RecordOp, op,
+    InValues, QueryOp, RecordKey, RecordOp, op,
 };
 use std::{cmp::Ordering, ops::Bound};
 
@@ -24,11 +24,7 @@ impl Default for TestDb {
             max_str_len: 4096,
             max_bytes_len: 64,
         };
-        let genesis = Genesis::new(
-            HashAlgorithm::Keccak256,
-            limits,
-            ImmutableDataConfig::new(500_000, vec![]),
-        );
+        let genesis = Genesis::new(HashAlgorithm::Keccak256, limits, None);
         Self {
             db: Database::open_memory(&genesis).expect("genesis"),
         }

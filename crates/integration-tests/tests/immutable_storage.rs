@@ -1,8 +1,10 @@
 #[path = "immutable_storage/contract.rs"]
 mod contract;
 
+use golemdb_branch::{BranchError, Branches, CommitId, Head, write_head};
 use golemdb_cells::{CellType, CellValue, Width};
 use golemdb_immutable_data::{metadata, *};
+use golemdb_merkle::{HashProvider, Keccak256Hasher};
 use golemdb_storage::{ReadTransaction, Store, Table, WriteTransaction};
 use golemdb_storage_mdbx::MdbxStore;
 
@@ -145,4 +147,83 @@ fn caller_publishes_key_and_range_metadata_and_rolls_back_files_explicitly() {
         22
     );
     assert_eq!(metadata::commit_range(&tx, 0, 2).unwrap(), Some(2..3));
+}
+
+#[test]
+fn builder_recovers_tail_and_staging_uses_published_mdbx_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = MdbxStore::open(dir.path().join("kv")).unwrap();
+    let mut files =
+        ImmutableDataStorage::open(config(), [9; 32], dir.path().join("files")).unwrap();
+    files.append("events", 1, &row(10)).unwrap();
+    files.sync().unwrap();
+    let mut tx = store.begin_write().unwrap();
+    files
+        .bind_key(&mut tx, "events", ImmutableDataKey([1; 32]), 0)
+        .unwrap();
+    files
+        .record_commit_range(&mut tx, "events", 1, 0..1)
+        .unwrap();
+    let empty = Keccak256Hasher.hash(&[]);
+    write_head(
+        &mut tx,
+        &Head {
+            commit_id: CommitId::new(3),
+            state_root: empty,
+            index_root: empty,
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    // A physical tail is not publication. The branch must not allocate from it.
+    files.append("events", 4, &row(99)).unwrap();
+    files.sync().unwrap();
+    drop(files);
+    let files = ImmutableDataStorage::open(config(), [9; 32], dir.path().join("files")).unwrap();
+    let reader = files.reader();
+    let branches = Branches::new(store.clone(), Keccak256Hasher, Some(files)).unwrap();
+    let id = branches.begin().unwrap();
+    assert!(matches!(
+        branches.immutable_data_append(id, "events", Some(ImmutableDataKey([1; 32])), row(11)),
+        Err(BranchError::ImmutableData(
+            ImmutableDataStorageError::AlreadyExists
+        ))
+    ));
+    assert_eq!(
+        branches
+            .immutable_data_append(id, "events", Some(ImmutableDataKey([2; 32])), row(11))
+            .unwrap(),
+        1
+    );
+    branches.seal(id).unwrap();
+    assert_eq!(
+        branches
+            .immutable_data_append(id, "events", None, row(12))
+            .unwrap(),
+        2
+    );
+    assert!(matches!(
+        reader.get(
+            &store.begin_read().unwrap(),
+            3,
+            "events",
+            golemdb_immutable_data::ImmutableDataAddress::Ordinal(1),
+            &ImmutableDataReadOptions::all()
+        ),
+        Err(ImmutableDataStorageError::NotFound)
+    ));
+    branches.immutable_data_truncate(id, "events", 1).unwrap();
+    branches.discard(id).unwrap();
+    let tx = store.begin_read().unwrap();
+    assert_eq!(metadata::end_ordinal_at(&tx, 0, 3).unwrap(), 1);
+    assert_eq!(
+        metadata::ordinal_for_key(&tx, 0, ImmutableDataKey([2; 32])).unwrap(),
+        None
+    );
+    assert_eq!(branches.head().unwrap().get(), 3);
+    drop(tx);
+    drop(branches);
+    drop(reader);
+    let files = ImmutableDataStorage::open(config(), [9; 32], dir.path().join("files")).unwrap();
+    assert_eq!(files.end_ordinal("events").unwrap(), 1);
 }

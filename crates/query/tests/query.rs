@@ -4,7 +4,7 @@ mod support;
 
 use golemdb_api::{Api, CommitId, ReadTarget, RecordOp};
 use golemdb_api::{ApiError, Budget, CountOp, QueryOp, SortKey};
-use golemdb_api::{CellLimits, Database, Genesis, HashAlgorithm, ImmutableDataConfig, OpenConfig};
+use golemdb_api::{CellLimits, Database, Genesis, HashAlgorithm, OpenConfig};
 use golemdb_branch::{BranchError, Branches};
 use golemdb_cells::system::FIRST_USER_RECORD_ID;
 use golemdb_cells::{CellKey, CellType, CellValue, Width, reserved};
@@ -209,11 +209,7 @@ fn an_indexed_record_without_its_key_is_internal_corruption() {
         max_str_len: 64,
         max_bytes_len: 64,
     };
-    let config = OpenConfig::new(Genesis::new(
-        HashAlgorithm::Keccak256,
-        limits,
-        ImmutableDataConfig::new(500_000, vec![]),
-    ));
+    let config = OpenConfig::new(Genesis::new(HashAlgorithm::Keccak256, limits, None));
     let db = Database::from_store(store.clone(), &config).unwrap();
     let branch = db.begin().unwrap();
     db.create(branch, record(key(1), &[("color", blue())]))
@@ -222,7 +218,7 @@ fn an_indexed_record_without_its_key_is_internal_corruption() {
 
     // Corrupt the committed state below the facade: the record keeps its
     // indexed attribute but loses its `#key` cell.
-    let branches = Branches::new(store, Keccak256Hasher).unwrap();
+    let branches = Branches::new(store, Keccak256Hasher, None).unwrap();
     let corrupt = branches.begin().unwrap();
     branches
         .write(corrupt, |cell_writer| {
