@@ -163,6 +163,7 @@ fn late_patch_failure(remove: bool) {
         },
         Keccak256Hasher,
         None,
+        None,
     )
     .unwrap();
     let records = Records::new(branches.clone(), zero_pricing());
@@ -236,6 +237,7 @@ fn late_delete_scan_failure_preserves_cells_effects_and_checkpoint_state() {
             fail: fail.clone(),
         },
         Keccak256Hasher,
+        None,
         None,
     )
     .unwrap();

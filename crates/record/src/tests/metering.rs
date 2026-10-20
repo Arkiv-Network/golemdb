@@ -434,6 +434,7 @@ fn admission_and_unfunded_reads_do_not_access_record_or_index_state() {
             },
             Keccak256Hasher,
             None,
+            None,
         )
         .unwrap();
         let records = Records::new(branches.clone(), pricing());
@@ -497,6 +498,7 @@ fn patch_cutoffs_stop_at_metadata_identity_and_user_cell_boundaries() {
                 accesses: accesses.clone(),
             },
             Keccak256Hasher,
+            None,
             None,
         )
         .unwrap();
@@ -631,6 +633,7 @@ fn deletion_skips_a_long_tombstone_run_without_extra_charges_or_unfunded_steps()
                 accesses: accesses.clone(),
             },
             Keccak256Hasher,
+            None,
             None,
         )
         .unwrap();
