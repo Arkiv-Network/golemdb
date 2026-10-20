@@ -98,7 +98,7 @@ fn successful_publication(store: impl Store + Clone, path: Option<&Path>) {
         None => ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap(),
     };
     let reader = storage.reader();
-    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     let old = store.begin_read().unwrap();
     let winner = b.begin().unwrap();
     let loser = b.begin().unwrap();
@@ -225,7 +225,7 @@ fn mdbx_and_files_publish_and_reopen() {
     let store = MdbxStore::open(&kv).unwrap();
     let storage = ImmutableDataStorage::open(config(), [7; 32], &path).unwrap();
     let reader = storage.reader();
-    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     assert_eq!(b.head().unwrap(), CommitId::new(3));
     assert_eq!(number(&store, &reader, 0), 10);
     assert_eq!(number(&store, &reader, 2), 3);
@@ -386,7 +386,7 @@ fn failures(store: impl Store + Clone + 'static, path: &Path) {
     let store = fault_store(store);
     let storage = ImmutableDataStorage::open(config(), [7; 32], path).unwrap();
     let reader = storage.reader();
-    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     commit_row(&b, 1);
     let id = b.begin().unwrap();
     b.immutable_data_append(id, "events", Some(key(2)), row(2))
@@ -454,7 +454,7 @@ fn failed_publication_in_active_file_preserves_prefix_and_can_retry() {
     seed(&store);
     let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
     let reader = storage.reader();
-    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     commit_row(&b, 1);
     commit_row(&b, 2);
     let id = b.begin().unwrap();
@@ -492,7 +492,7 @@ fn unresolved_commit_and_panics_block_publication_but_keep_committed_reads() {
         let store = fault_store(db.clone());
         let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
         let reader = storage.reader();
-        let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+        let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
         commit_row(&b, 1);
         let id = b.begin().unwrap();
         b.immutable_data_append(id, "events", Some(key(2)), row(2))
@@ -518,7 +518,7 @@ fn unresolved_commit_and_panics_block_publication_but_keep_committed_reads() {
         let store = db;
         let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
         let reader = storage.reader();
-        let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+        let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
         assert_eq!(number(&store, &reader, 0), 1);
         if mode == 5 {
             assert_eq!(number(&store, &reader, 1), 2);
@@ -539,7 +539,7 @@ fn failed_rollback_blocks_publication_and_retains_files_for_recovery() {
     let store = fault_store(db.clone());
     let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
     let reader = storage.reader();
-    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     commit_row(&b, 1);
     let offsets = dir.path().join("segment-events-0-2.off");
     let saved = std::fs::read(&offsets).unwrap();
@@ -562,7 +562,7 @@ fn failed_rollback_blocks_publication_and_retains_files_for_recovery() {
     let store = db;
     let storage = ImmutableDataStorage::open(config(), [7; 32], dir.path()).unwrap();
     let reader = storage.reader();
-    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     assert_eq!(b.head().unwrap().get(), 1);
     assert_eq!(number(&store, &reader, 0), 1);
     assert!(!dir.path().join("segment-events-2-4.jar").exists());
@@ -582,7 +582,7 @@ fn concurrent_visibility(
         ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()
     };
     let reader = storage.reader();
-    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     for n in 1..=baseline {
         commit_row(&b, n);
     }
@@ -699,7 +699,7 @@ fn crash_publication_child() {
     let root = Path::new(&root);
     let store = fault_store(MdbxStore::open(root.join("kv")).unwrap());
     let storage = ImmutableDataStorage::open(config(), [7; 32], root.join("files")).unwrap();
-    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     let next = b.head().unwrap().get() as u8 + 1;
     let id = b.begin().unwrap();
     b.immutable_data_append(id, "events", Some(key(next)), row(next.into()))
@@ -719,7 +719,7 @@ fn process_restart_recovers_aborted_tail_and_keeps_published_tail() {
             seed(&store);
             let storage =
                 ImmutableDataStorage::open(config(), [7; 32], dir.path().join("files")).unwrap();
-            let b = Branches::new(store, Keccak256Hasher, Some(storage)).unwrap();
+            let b = Branches::new(store, Keccak256Hasher, Some(storage), None).unwrap();
             for n in 1..=baseline {
                 commit_row(&b, n);
             }
@@ -740,7 +740,7 @@ fn process_restart_recovers_aborted_tail_and_keeps_published_tail() {
         let storage =
             ImmutableDataStorage::open(config(), [7; 32], dir.path().join("files")).unwrap();
         let reader = storage.reader();
-        let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+        let b = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
         for n in 1..=baseline {
             assert_eq!(number(&store, &reader, u64::from(n - 1)), u64::from(n));
         }
@@ -763,7 +763,7 @@ fn constructor_rejects_missing_head_before_recovery() {
     storage.append("events", 1, &row(1)).unwrap();
     storage.sync().unwrap();
     assert!(matches!(
-        Branches::new(MemoryStore::new(), Keccak256Hasher, Some(storage)),
+        Branches::new(MemoryStore::new(), Keccak256Hasher, Some(storage), None),
         Err(BranchError::MissingHead)
     ));
     // Failure releases ownership without interpreting missing head as genesis

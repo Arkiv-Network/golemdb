@@ -110,7 +110,10 @@ fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashP
             let mut root = RootRef::Empty;
             for i in 0..count {
                 let new = leaf(i, clustered, hasher);
-                root = trie.insert(&mut tx, 0, root, &new.path, new.hash).unwrap();
+                root = trie
+                    .insert(&mut tx, 0, root, &new.path, new.hash)
+                    .unwrap()
+                    .root;
             }
             tx.commit().unwrap();
             let read = db.begin_read().unwrap();
@@ -152,7 +155,7 @@ fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashP
                     _ => trie.remove(&mut check, 1, root, &existing.path),
                 }
                 .unwrap();
-                assert_ne!(changed, root);
+                assert_ne!(changed.root, root);
                 check.abort();
                 group.bench_function(BenchmarkId::new(operation, &parameter), |b| {
                     // One live writer at a time. Setup copies memory state outside

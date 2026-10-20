@@ -32,6 +32,8 @@ pub enum BranchError {
     CommitNotNewer { commit: u64, latest: u64 },
     #[error("database already has a head; genesis is published once")]
     HeadExists,
+    #[error(transparent)]
+    Pruning(#[from] golemdb_pruning::PruningError),
     #[error("branch ID space exhausted")]
     BranchNumberExhausted,
     #[error("branch {0} lock poisoned")]

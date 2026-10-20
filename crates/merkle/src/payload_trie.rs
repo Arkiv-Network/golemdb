@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
-use crate::{Hash, HashProvider, LeafRef, Result, RootRef, Trie, TrieTable, Walk};
+use crate::{Hash, HashProvider, LeafRef, Result, RootRef, Trie, TrieTable, TrieUpdate, Walk};
 
 /// A new leaf for a [`PayloadTrie`]: its hash, and the bytes of its row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,23 +86,33 @@ impl<'h, H: HashProvider, const N: usize, const NS: usize> PayloadTrie<'h, H, N,
     }
 
     /// As [`Trie::apply`], storing each new leaf's payload under `commit` in
-    /// `tx`. A leaf whose hash is unchanged keeps its row and commit. Call once
-    /// per commit for each namespace: a leaf removed by a later call in the same
-    /// commit leaves its row behind for good, unreached and never reclaimed.
+    /// `tx`. A leaf whose hash is unchanged keeps its row and commit; the old row
+    /// of a replaced or removed leaf is listed as superseded, or deleted if this
+    /// commit wrote it.
     pub fn apply(
         &self,
         tx: &mut impl WriteTransaction,
         commit: u64,
         root: RootRef<N>,
         edits: impl IntoIterator<Item = ([u8; N], Option<LeafPayload>)>,
-    ) -> Result<RootRef<N>> {
+    ) -> Result<TrieUpdate<N>> {
         // Keyed by path to find each created leaf's payload; the last edit of a
         // path wins, as in the trie.
         let edits: BTreeMap<_, _> = edits.into_iter().collect();
         let hashes =
             (edits.iter()).map(|(path, payload)| (*path, payload.as_ref().map(|p| p.hash)));
-        let (root, created) = self.trie.apply_leaves(tx, commit, root, hashes)?;
-        for path in created {
+        let (mut write, root) = self.trie.apply_leaves(tx, commit, root, hashes)?;
+        // The trie creates leaves in path order, which the search below relies on.
+        for leaf in std::mem::take(&mut write.replaced) {
+            let key = self.trie.leaf_key(leaf.commit, &leaf.path);
+            if leaf.commit != commit {
+                write.superseded.push((self.leaf_table, key));
+            } else if write.created.binary_search(&leaf.path).is_err() {
+                // Unpublished, and not replaced below under the same key.
+                tx.delete(self.leaf_table, &key)?;
+            }
+        }
+        for path in std::mem::take(&mut write.created) {
             // A leaf without its row would only fail when read.
             let payload = (edits.get(&path).and_then(Option::as_ref))
                 .expect("only edits with a payload create leaves");
@@ -112,6 +122,6 @@ impl<'h, H: HashProvider, const N: usize, const NS: usize> PayloadTrie<'h, H, N,
                 &payload.bytes,
             )?;
         }
-        Ok(root)
+        Ok(write.finish(root))
     }
 }

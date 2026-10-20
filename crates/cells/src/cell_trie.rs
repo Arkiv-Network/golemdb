@@ -1,5 +1,5 @@
 use crate::{CELL_BRANCH_DOMAIN, CELL_LEAF_DOMAIN};
-use golemdb_merkle::{Hash, HashProvider, LeafRef, RootRef, Trie};
+use golemdb_merkle::{Hash, HashProvider, LeafRef, RootRef, Trie, TrieUpdate};
 use golemdb_storage::{ReadCursor, ReadTransaction, WriteTransaction};
 
 use crate::{CELL_TRIE_PATH_BYTES, CellError, CellKey, CellValue, Result, tables};
@@ -51,7 +51,8 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
 
     /// For each key, insert or replace the leaf at `H(key)`, or remove it when
     /// the value is `None`, in one batched trie update. Returns the updated root
-    /// and retains old branches for copy-on-write history. The caller updates
+    /// and the rows it superseded; older commits' rows stay for their roots, and
+    /// rows this commit wrote and then replaced are deleted. The caller updates
     /// the `Cell` table in the same transaction and must abort that transaction
     /// if a mutation fails.
     pub(crate) fn set<'a>(
@@ -60,7 +61,7 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         commit: u64,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
         changes: impl IntoIterator<Item = (&'a [u8], Option<&'a CellValue>)>,
-    ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
+    ) -> Result<TrieUpdate<CELL_TRIE_PATH_BYTES>> {
         let edits = changes.into_iter().map(|(key, value)| {
             let path = self.hasher.hash(key);
             (path, value.map(|value| self.leaf(path, value).hash))

@@ -93,7 +93,7 @@ fn file_failures(store: impl Store + Clone + 'static, path: &Path, during_sync: 
     let store = fault_store(store);
     let storage = ImmutableDataStorage::open(config(), [7; 32], path).unwrap();
     let reader = storage.reader();
-    let branches = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let branches = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     commit_row(&branches, 1);
     let before = published_metadata(&store);
     let prefix = file_bytes(path);
@@ -243,7 +243,7 @@ fn damaged_outcome(store: impl Store + Clone + 'static, path: &Path, damage: Pub
     let store = fault_store(store);
     let storage = ImmutableDataStorage::open(config(), [7; 32], path).unwrap();
     let reader = storage.reader();
-    let branches = Branches::new(store.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let branches = Branches::new(store.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     commit_row(&branches, 1);
     let pending = branches.begin().unwrap();
     for n in [2, 3] {

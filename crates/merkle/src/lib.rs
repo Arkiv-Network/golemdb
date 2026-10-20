@@ -26,7 +26,7 @@
 //! let mut root = RootRef::Empty;
 //! for path in [[0; 6], [1; 6]] {
 //!     let leaf = hash.hash_parts(&[&[EXAMPLE_LEAF_DOMAIN], &path, b"payload"]);
-//!     root = trie.insert(&mut tx, 1, root, &path, leaf)?;
+//!     root = trie.insert(&mut tx, 1, root, &path, leaf)?.root;
 //! }
 //! tx.commit()?;
 //! let read = store.begin_read()?;
@@ -50,7 +50,9 @@ pub use hash::{Blake3Hasher, HASH_BYTES, Hash, HashAlgorithm, HashProvider, Kecc
 pub use node::{BRANCH_SLOTS, BranchNodeCompact, LeafStorage};
 pub use payload_trie::{LeafPayload, PayloadTrie};
 pub use table::TrieTable;
-pub use trie::{BRANCH_ROOT_BYTES, BranchRef, COMMIT_BYTES, LeafRef, RootRef, Trie, Walk};
+pub use trie::{
+    BRANCH_ROOT_BYTES, BranchRef, COMMIT_BYTES, LeafRef, RootRef, Trie, TrieUpdate, Walk,
+};
 
 #[cfg(test)]
 mod tests;
