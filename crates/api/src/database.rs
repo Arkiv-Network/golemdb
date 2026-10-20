@@ -140,6 +140,13 @@ impl Api for Database {
     fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Result<u64> {
         self.inner.count(commit_id, operation)
     }
+    fn query_keys(
+        &self,
+        commit_id: Option<CommitId>,
+        operation: CountOp,
+    ) -> Result<Vec<RecordKey>> {
+        self.inner.query_keys(commit_id, operation)
+    }
     fn head(&self) -> Result<CommitId> {
         self.inner.head()
     }
@@ -282,6 +289,11 @@ impl<S: Store, H: HashProvider> Api for Inner<S, H> {
     }
     fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Result<u64> {
         self.queries.count(commit, operation).map_err(Into::into)
+    }
+    fn query_keys(&self, commit: Option<CommitId>, operation: CountOp) -> Result<Vec<RecordKey>> {
+        self.queries
+            .query_keys(commit, operation)
+            .map_err(Into::into)
     }
     fn head(&self) -> Result<CommitId> {
         self.branches.head().map_err(Into::into)
