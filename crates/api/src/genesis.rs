@@ -19,7 +19,7 @@ fn hash_id(algorithm: HashAlgorithm) -> u16 {
     }
 }
 
-fn initial_cells(config: &Genesis) -> BTreeMap<CellKey, CellValue> {
+fn initial_cells(config: &Genesis) -> OpenResult<BTreeMap<CellKey, CellValue>> {
     let mut cells = BTreeMap::new();
     for record in system::ALL {
         cells.insert(
@@ -46,7 +46,20 @@ fn initial_cells(config: &Genesis) -> BTreeMap<CellKey, CellValue> {
         allocator_key(),
         CellValue::from_u64(system::FIRST_USER_RECORD_ID),
     );
-    cells
+    if let Some(immutable_data) = &config.immutable_data {
+        cells.insert(
+            CellKey::new(system::PARAMS.id, reserved::SHARD_SPAN),
+            CellValue::from_u64(immutable_data.shard_span),
+        );
+        let segments = immutable_data
+            .encode_segments()
+            .map_err(|error| OpenError::InvalidConfig(error.to_string()))?;
+        cells.insert(
+            CellKey::new(system::PARAMS.id, reserved::IMMUTABLE_DATA_SEGMENTS),
+            CellValue::from_bytes(&segments),
+        );
+    }
+    Ok(cells)
 }
 
 fn allocator_key() -> CellKey {
@@ -81,7 +94,7 @@ pub(crate) fn prepare(
     config: &OpenConfig,
     hasher: &impl HashProvider,
 ) -> OpenResult<OpenInfo> {
-    let cells = initial_cells(&config.genesis);
+    let cells = initial_cells(&config.genesis)?;
     let genesis_id = identity(&config.genesis, &cells, hasher);
     if tx.get(SUPERBLOCK, b"head")?.is_none() {
         if !tx.is_empty()? {
@@ -186,6 +199,15 @@ fn validate_state(
         if cells.get(tx, key)?.as_ref() != Some(value) {
             return Err(OpenError::CorruptState(
                 "missing or inconsistent reserved identity, binding, or parameter",
+            ));
+        }
+    }
+    // Disabled immutable data has no parameter cells, including after genesis.
+    for name in [reserved::SHARD_SPAN, reserved::IMMUTABLE_DATA_SEGMENTS] {
+        let key = CellKey::new(system::PARAMS.id, name);
+        if !expected.contains_key(&key) && cells.get(tx, &key)?.is_some() {
+            return Err(OpenError::CorruptState(
+                "immutable-data parameter present while disabled",
             ));
         }
     }

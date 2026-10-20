@@ -107,6 +107,7 @@ fn late_patch_failure(remove: bool) {
             fail: fail.clone(),
         },
         Keccak256Hasher,
+        None,
     )
     .unwrap();
     let records = Records::new(branches.clone());

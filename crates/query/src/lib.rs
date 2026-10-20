@@ -23,7 +23,11 @@
 //! };
 //!
 //! let limits = CellLimits { max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 64 };
-//! let db = Database::open_memory(&Genesis::new(HashAlgorithm::Keccak256, limits))?;
+//! let db = Database::open_memory(&Genesis::new(
+//!     HashAlgorithm::Keccak256,
+//!     limits,
+//!     None,
+//! ))?;
 //!
 //! let key = RecordKey([1; 32]);
 //! let branch = db.begin()?;
