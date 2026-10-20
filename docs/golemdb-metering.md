@@ -1,6 +1,6 @@
 # GolemDB Metering
 
-Status: draft for discussion, 2026-10-09. How Arkiv turns these costs into fees is in a separate document.
+Status: draft for discussion, 2026-10-09; D6 restructured into core and query reads, with a pricing formula and the API impact, 2026-10-20. How Arkiv turns these costs into fees is in a separate document.
 
 ## Contents
 
@@ -8,10 +8,10 @@ Status: draft for discussion, 2026-10-09. How Arkiv turns these costs into fees 
 - **Foundation:** [D1. Where Metering Happens](#d1-where-metering-happens)
 - **Cell store**
   - Writes: [D2. Write Cost Model](#d2-write-cost-model) · [D3. Modeled Trie Depth](#d3-write-metering-and-modeled-trie-depth) · [D4. Storage and Size Counting](#d4-storage-and-size-counting) · [D5. Record Shape and Deletion Bound](#d5-record-shape-and-deletion-bound)
-  - Reads: [D6. Read Cost Model](#d6-read-cost-model)
+  - Reads: [D6. Read Cost Model](#d6-read-cost-model): [Read Call Frame](#the-read-call-frame) · [D6.1 Core Reads](#d61-core-reads) · [D6.2 Query Reads](#d62-query-reads) · [D6.3 Pricing Formula and Cost Compilation](#d63-pricing-formula-and-cost-compilation) · [D6.4 API Impact](#d64-api-impact)
 - **Immutable log:** [D7. Immutable-Log Metering](#d7-immutable-log-metering)
 - **Cross-cutting:** [D8. Budget, Rollback and Commit](#d8-budget-rollback-and-commit) · [D9. Cost Schedules](#d9-cost-schedules) · [D10. GolemDB Weights](#d10-golemdb-weights)
-- **Illustration and open points:** [Worked Example](#worked-example-create-patch-delete) · [Open Questions](#open-questions)
+- **Illustration and open points:** [Worked Example: Writes](#worked-example-create-patch-delete) · [Worked Example: Reads](#worked-example-reads) · [Open Questions](#open-questions)
 
 ## Why
 
@@ -66,6 +66,12 @@ cost, including the `N = 0` case, and add conformance vectors (R13) for successf
 budget-aborted reads. Arkiv's purge depends on the equality and absent-term charges being
 pinned first.
 
+**Progress (2026-10-20).** D6 now separates the core reads that write metering shares (D6.1) from
+the query reads (D6.2), gives every read call's cost as a formula with the charge unit of each step
+(D6.3), and states the API impact (D6.4). Still open: the proposed items of the
+[Read Cost Items](#read-cost-items) list, the container size (item 21), the conformance vectors, and
+calibrated weight values.
+
 ## Goals
 
 1. **Fair cost:** every call pays, accurately enough, for the compute and storage it causes.
@@ -88,7 +94,7 @@ Cost properties:
 
 Budget:
 
-- **R7:** every call requires a budget, with no default. A call without one fails with `InvalidArgument`; a caller who wants no limit passes `Budget::Unlimited` explicitly, which D8 reserves for host-authorized estimation. Every step has a known charge, checked before the step runs: a write's planning steps (D2), a read's execution steps (D6). If a step's charge exceeds the remaining limited budget, that step is not performed and the call stops, with no writes and no partial results. `OutOfBudget{spent, required?}` reports work already performed. For writes, `required` is present only when planning has established the full representable cost; a read stops as it goes and reports none. D8 defines explicit unlimited planning for host-authorized estimation.
+- **R7:** every call requires a budget, with no default. A call without one does not compile: the budget is a constructor argument of every operation (D6.4); a caller who wants no limit passes `Budget::Unlimited` explicitly, which D8 reserves for host-authorized estimation. Every step has a known charge, checked before the step runs: a write's planning steps (D2), a read's execution steps (D6). If a step's charge exceeds the remaining limited budget, that step is not performed and the call stops, with no writes and no partial results. `OutOfBudget{spent, required?}` reports work already performed. For writes, `required` is present only when planning has established the full representable cost; a read stops as it goes and reports none. D8 defines explicit unlimited planning for host-authorized estimation.
 
 Coverage and reporting:
 
@@ -207,9 +213,9 @@ first. The first failure is returned; no later stage runs.
 
 | Stage | Checks | Cost | Failures |
 | --- | --- | --- | --- |
-| 1. Handle | writes and branch reads: the branch handle is known, not consumed, its origin is still the head, and, for writes, not sealed. Committed reads instead select their snapshot: the head, or the requested commit | 0 | `HandleInvalid`, `Sealed`, `CommitUnavailable` |
+| 1. Handle | the branch handle is known, not consumed, its origin is still the head, and not sealed. Reads have their own order of checks ([D6](#the-read-call-frame)) | 0 | `HandleInvalid`, `Sealed` |
 | 2. Admission | input form, including errors found while the request was built; reserved keys; key mode; cell names and value lengths against the genesis limits. Reads no record state | admission cost | `InvalidArgument`, `Reserved`, `KeyModeMismatch` |
-| 3. Record state | the binding, then `#meta`, cells and index terms; the per-record caps | `write.record.{op}` plus the reads performed | `NotFound`, `AlreadyExists`, `CellNotFound`, cap violations |
+| 3. Record state | the binding, then `#meta`, cells and index terms; the per-record caps | the record base (`read.key + write.record.{op}`) plus the core reads performed (D6.1) | `NotFound`, `AlreadyExists`, `CellNotFound`, cap violations |
 
 Stage 1 comes first because it fixes the pricing snapshot (D9): without a valid handle or
 snapshot, there is no schedule to charge with, so a call rejected there costs nothing (D8).
@@ -217,7 +223,7 @@ Validating a handle reads only the current head, a fixed-size row, not record st
 limits and key mode used in stage 2 are `#params` cells, fixed at genesis, so they count as
 configuration rather than state. Within stage 3, the steps below fix the order.
 
-Before each charged planning step, starting with admission and later the `write.record.{op}` binding lookup,
+Before each charged planning step, starting with admission and later the record base with its binding lookup,
 check that its charge fits the remaining limited budget. If it does not, stop without
 performing the step and return `OutOfBudget{spent, required: None}`. Each step must have
 a known, bounded charge before execution; the calibration requirements below cover
@@ -227,9 +233,9 @@ exhausting the budget does not by itself fail a call if no further charge is nee
 
 1. **Plan** (reads only, no writes):
   1. Admission (stage 2): check the input's form, reserved keys, the key mode, cell names and value lengths, charging incrementally as defined below. No record state is read. Rejected input still incurs the admission cost performed before rejection.
-   2. Read the key binding (`write.record.{op}`). `create` fails with `AlreadyExists` if it exists; `patch` and `delete` fail with `NotFound` if it does not. A deleted record has no binding, so its key can be re-created.
-   3. `patch` and `delete` only: read [`#meta`](#the-meta-cell) for the current counts. A `create` starts from zero.
-   4. `patch` and `delete`: read every touched cell. All operations: read every touched index term. The results decide each operation and its bytes.
+   2. Read the key binding: the record base, `read.key + write.record.{op}`, charged together before the lookup. `create` fails with `AlreadyExists` if it exists; `patch` and `delete` fail with `NotFound` if it does not. A deleted record has no binding, so its key can be re-created.
+   3. `patch` and `delete` only: read [`#meta`](#the-meta-cell) for the current counts (`read.cell`). A `create` starts from zero.
+   4. `patch` and `delete`: read every touched cell (`read.cell` each). All operations: read every touched index term (`read.term` each). The results decide each operation and its bytes.
    5. Compute the resulting counts and check them against the per-record caps (D5).
     6. Compare the total cost (admission + record base + reads performed + planned writes) with the limited budget, if any. If it exceeds the budget, fail with `OutOfBudget{spent, required: Some(total)}`: `spent` = admission plus the record base and reads performed. No additional work is done merely to obtain `required` after an earlier budget abort. A total equal to the budget succeeds; `Unlimited` skips budget comparisons, not validation or checked arithmetic.
 2. **Apply:** execute the planned writes, reusing the phase-1 reads. No metering or validation failure can occur here; only local storage faults remain, which are not cost questions.
@@ -239,7 +245,7 @@ A failure in the plan phase writes nothing, so it is charged no write cost (D8).
 The plan phase yields the call's cell and index operations, including the per-record system cells listed below. Host-funded commit overhead is separate (D8). The four cost components are:
 
 ```
-record op cost       = admission cost + write.record.{op}
+record op cost       = admission cost + read.key + write.record.{op}
                      + Σ cell operation costs
                      + Σ index operation costs
 
@@ -247,12 +253,12 @@ admission cost       = write.admission.base
                      + entries inspected × write.admission.entry
                      + bytes validated × write.admission.byte
 
-cell operation cost  = write.cell_read                         (only when read)
+cell operation cost  = read.cell                               (only when read)
                      + write.cell.{create | update | delete}
                      + cell_trie_depth × write.cell_trie_update
                      + cell bytes written × write.cell_byte
 
-index operation cost = write.index_read + write.index.{join | leave}
+index operation cost = read.term + write.index.{join | leave}
                      + index_trie_depth × write.index_trie_update
                      + write.index_term_create                 (only if the term is new)
                      + index bytes written × write.index_byte
@@ -282,27 +288,28 @@ input, rejected input, and budget exhaustion. These rules form part of the versi
 metering model; they must not vary between implementations. The model must also pin
 planning-read order and test charges at budget-exhaustion checkpoints.
 
-Every planned cell or index mutation pays for one leaf's trie path, priced at the modeled depth (D3). Required reads remain charged even for no-ops. `write.cell_read` is charged only where a cell is read: by `patch` and `delete`, never by `create`.
+Every planned cell or index mutation pays for one leaf's trie path, priced at the modeled depth (D3). Required reads remain charged even for no-ops. A touched cell's `read.cell` is charged only where a cell is read: by `patch` and `delete`, never by `create`.
 
-**Record base cost.** `write.record.{op}` covers the fixed per-record work that is not a cell operation:
+**Planning reads are core reads.** Every read a write's planning performs, the key binding, `#meta`, the touched cells and the touched index terms, is charged with the core read steps of [D6.1](#d61-core-reads): `read.key`, `read.cell` and `read.term`, the same steps and weights a `get` pays. Planning returns nothing to a caller, so it charges no `read.byte`.
 
-- All operations: reading the key's binding in `#recordKeys`. Input validation is charged separately as admission.
+**Record base cost.** The record base is `read.key + write.record.{op}`, charged together before the binding lookup. `read.key` is the binding lookup in `#recordKeys`; `write.record.{op}` covers the remaining fixed per-record work that is not a cell operation. Input validation is charged separately as admission.
+
 - `create`: increment the in-memory branch record ID counter. Persisting and merkleizing the final `#alloc` value is host-funded commit overhead (D8). A key collision fails with `AlreadyExists` (D8).
 - `patch`: check the caps.
 - `delete`: one seek to enumerate the record's cells.
 
 This fixed work folds into one weight per operation with no depth term. The allocator's committed cell and trie update are accounted for separately as host-funded overhead (D8).
 
-`write.record.{op}` must be calibrated excluding the admission work now covered by the separate
-weights; adding admission to the former combined base would double charge validation.
+`write.record.{op}` must be calibrated excluding the admission work and the binding lookup, now
+covered by their own weights; including either would charge it twice.
 
 **System cell operations.** The system cells (Record Model) are charged as cell operations, like user cells:
 
 | Record operation | System cell operations |
 | --- | --- |
-| `create` | create binding, create `#key`, create `#meta`; no reads, the record is new and the binding read is in `write.record` |
-| `patch` | read `#meta`, even for empty patches; update it only when a count changes |
-| `delete` | delete binding (read in `write.record`), read and delete `#key`, read and delete `#meta` |
+| `create` | create binding, create `#key`, create `#meta`; no reads, the record is new and the binding read is in the record base |
+| `patch` | read `#meta` (`read.cell`), even for empty patches; update it only when a count changes |
+| `delete` | delete binding (read in the record base), read and delete `#key`, read and delete `#meta` |
 
 System cells have fixed-length encodings, so their byte terms are constants. They are not included in `#meta`'s counts or the receipt's user-cell counts (D4).
 
@@ -315,7 +322,7 @@ System cells have fixed-length encodings, so their byte terms are constants. The
 | cell present, different type, kind or value assigned | update | new cell | old cell |
 | cell present, its current type, kind and value assigned | no-op: read only; no index operation | – | – |
 | cell present, deletion requested | delete | – | old cell |
-| cell missing, deletion requested | read only (`write.cell_read`); no index operation | – | – |
+| cell missing, deletion requested | read only (`read.cell`); no index operation | – | – |
 
 Bytes written are made live and charged (D4). Bytes deleted leave live state but stay in the change-set until pruned; they are reported, not charged.
 
@@ -323,18 +330,18 @@ Bytes written are made live and charged (D4). Bytes deleted leave live state but
 - An old value causes three kinds of work:
   - **Change-set copy.** At commit, the pre-image goes into `CellChangeSet`, once per modified cell per commit, however often the branch touched it. The work grows with the old value's size, not with the number of earlier versions. The write byte weight pre-pays it: every byte is copied at most once, when it is overwritten or deleted, so it is charged once, when written (D4).
   - **History append.** At commit, the commit number is added to the cell's `CellHistory` bitmap, once per modified cell per commit. The bitmap grows with the cell's retained modifications; `write.cell.{op}` covers it as a fixed charge, calibrated for `#minRetention` (D4).
-  - **Branch processing.** On every touch, planning reads the old value and the operation log captures it; a rollback copies it back. This work grows with the old value's size and recurs per touch. `write.cell_read` and `write.cell.{op}` cover it as fixed charges, calibrated up to `#maxBytesLen`.
+  - **Branch processing.** On every touch, planning reads the old value and the operation log captures it; a rollback copies it back. This work grows with the old value's size and recurs per touch. `read.cell` and `write.cell.{op}` cover it as fixed charges, calibrated up to `#maxBytesLen` (D6.1).
 - A patch's `set` takes the kind from the cell read in step 4, so for `set` only the type or value can differ. Its failure on a missing cell is decided by a read the patch owes anyway (R3).
 - A record `delete` performs a cell delete for every user cell.
 - Assigning a cell its current value with its current kind is a no-op: it pays only for the reads that establish that nothing changes. A kind change alone is an update, since it joins or leaves the index. No cell write, index leave or join, or history entry follows.
 
-**Index operations.** Leave the old term if the old cell was indexed; join the new term if the resulting cell is indexed, including attribute/field transitions. Each join or leave charges `write.index_read`, even for the same term:
+**Index operations.** Leave the old term if the old cell was indexed; join the new term if the resulting cell is indexed, including attribute/field transitions. Each join or leave charges a term lookup, `read.term` (D6.1), even for the same term:
 
 | Read result and request | Index operation | Charged |
 | --- | --- | --- |
-| term exists, record joins | join | `write.index_read + write.index.join` |
-| term missing, record joins | create term, then join | `write.index_read + write.index_term_create + write.index.join` |
-| record leaves, whether or not it is the last member | leave | `write.index_read + write.index.leave` |
+| term exists, record joins | join | `read.term + write.index.join` |
+| term missing, record joins | create term, then join | `read.term + write.index_term_create + write.index.join` |
+| record leaves, whether or not it is the last member | leave | `read.term + write.index.leave` |
 | value or type changes | leave the old term, join the new one | both |
 
 - `write.index.join` and `write.index.leave` cover the membership change, the bitmap container and the posting-list path; the index-trie path is the depth term.
@@ -348,7 +355,7 @@ Bytes written are made live and charged (D4). Bytes deleted leave live state but
 - A batch, such as a host transaction, costs the sum of its record op costs. Reads are metered separately (D6).
 - Repeated touches of the same record or cell are charged per touch. An implementation may merge the work, never the charge.
 - These weights aggregate finer structural op classes, which remain the calibration basis (D10).
-- On request, a receipt includes the per-part counts as a diagnostic ledger. This per-call option must be supported by every implementation (R9).
+- Every receipt carries the call's ledger, its count per weight name ([D6.3](#cost-and-ledger), [D6.4](#d64-api-impact)); in process it is always present, a transport may make it opt-in per call (R9).
 
 **Calibration and verification.** Deterministic operation counts alone do not establish
 that weights adequately price the work. Weights must be calibrated against measured
@@ -432,10 +439,10 @@ Meets R10.
 By D2, deleting a record costs:
 
 ```
-delete cost = admission cost + write.record.delete
+delete cost = admission cost + read.key + write.record.delete
             + system cell deletes                        (binding, #key, #meta; fixed size)
-            + cells         × (write.cell_read + write.cell.delete + cell_trie_depth  × write.cell_trie_update)
-            + indexed cells × (write.index_read  + write.index.leave   + index_trie_depth × write.index_trie_update)
+            + cells         × (read.cell + write.cell.delete + cell_trie_depth  × write.cell_trie_update)
+            + indexed cells × (read.term + write.index.leave + index_trie_depth × write.index_trie_update)
 ```
 
 Every leave costs the same, whether or not it empties the term (D2), and deleted bytes were pre-paid at write (D4). A valid delete request carries a fixed-size record key and no cell changes, so its admission cost is fixed by the schedule. The total therefore depends only on the record's counts and is exact at current weights and depth.
@@ -455,56 +462,201 @@ Meets R1, R3, R4, R5, R7, R8, R13.
 Reads are counted, not modeled: nothing on the read path is deferred, so cost accumulates step by
 step as the work happens. Every step has a known charge, checked before the step runs; the first
 charge the remaining budget cannot pay stops the call without performing that step, with no
-partial result and the cost spent so far (R7). The steps and their order are those of the
-reference execution: for `get`, the key resolution and the cells read; for `query` and `count`,
-the execution rules of the [query proposal](query-proposal.md#execution-rules-normative).
+partial result and the cost spent so far (R7).
 
-- **Order of checks.** Top-level parts not implemented yet are rejected first, at no cost. Then
-  admission validates the whole request without reading state, charged as admission (D2). Then
-  one storage snapshot is opened, and the target commit is checked against its head; every state
-  read uses that snapshot.
-- **Admission** has D2's three-part shape, with weights of its own that start at D2's values:
-  `read.admission.base` once per query or count, `read.admission.entry` per entry (each filter
-  node, `In` value, `Range` bound, projected name and sort key) and `read.admission.byte` per byte
-  of names and values inspected. It is charged incrementally, each part checked before its work,
-  so an oversized filter stops early with `OutOfBudget`. `In` values must be given in strictly
-  ascending order and are checked in one pass, so admission stays linear in their number.
-- **Logical steps only.** The counted descent is the reference one, whether or not an
-  implementation short-circuits it (D1, R5).
+D6 has two parts with different users, plus the rules that turn both into a cost:
+
+| Part | Covers | Used by |
+| --- | --- | --- |
+| [The read call frame](#the-read-call-frame) | the order of checks, the call base and admission of a read call | `get`, `query`, `count` |
+| [D6.1 Core reads](#d61-core-reads) | point reads of one record's cells and of one index term | `get`, write planning (D2), query materialization, `id_of` / `key_of` |
+| [D6.2 Query reads](#d62-query-reads) | query admission, term scans, posting lists, set combination, sort, paging | `query` and `count` only |
+| [D6.3 Pricing formula and cost compilation](#d63-pricing-formula-and-cost-compilation) | the cost of each read call as a formula, and how an implementation accumulates it while executing | every read call |
+| [D6.4 API impact](#d64-api-impact) | what read metering adds to the API: budgets, receipts, the ledger, errors | callers and hosts |
+
+D6.1 is the part write metering depends on: its steps and weights are the ones D2 charges for
+the reads a write's planning performs. D6.2 can change, or grow with new query features, without
+touching the price of a write.
+
+Rules for both parts:
+
+- **Logical steps only.** The counted work is the reference execution, whether or not an
+  implementation short-circuits it (D1, R5): a cached term, a warm node or a held result never
+  reduces a charge.
 - **Charges bound the work; algorithms are free.** Every read charge is defined in logical
-  quantities: steps, terms, bitmap containers, bytes. Each is an upper bound on the work of any
-  reasonable implementation. How an implementation performs a step (which set it walks, how it
+  quantities: lookups, rows, terms, bitmap containers, bytes. Each is an upper bound on the work of
+  any reasonable implementation. How an implementation performs a step (which set it walks, how it
   searches, whether it merges several sets at once) is its own choice and never changes the
   charge; weights are calibrated from the reference implementation (D10).
-- **Leaves.** An `Eq` is one term lookup (`read.term`), present or absent. An `In` is one term
-  lookup per distinct value, in the strictly ascending order the request gives. Every term found
-  then pays for its posting list, one `read.container` per bitmap container loaded, and its
-  containers enter the leaf's union (combining sets, below).
-- **Range scans.** Positioning the cursor at the lower bound reads the first index entry and is
-  one `read.term`; every further entry read is one `read.term_step`, including the entry that
-  ends the scan: past the upper bound, past the end of the name and type run, or at the end of the
-  table. A scan over `k` terms therefore costs `read.term + k × read.term_step` plus their
-  containers, and a range with no term in it costs one `read.term`, like an absent `Eq`. An
-  `Excluded` lower bound that matches an existing term costs one more step, for the entry read
-  and skipped. Bounds that admit no value read nothing ([query proposal](query-proposal.md#range-bounds)).
-  So ranges over attributes with many distinct values pay for their width.
-- **Containers are charged as they are loaded.** Each bitmap container's charge is checked before
-  the container is loaded, whether by loading containers one at a time or by knowing their count
-  from the posting root. Today's `bitmap_at` loads all containers at once and needs one of the two.
-- **Combining sets** is charged one `read.set_container` per bitmap container of every set it
-  takes as input, the same rule for all three combinations:
-  - **union:** an `Or`, an `In` and a `Range` each combine their inputs in **one** union, charged
-    per container of every input; its order and algorithm are free;
+- **Reads touch flat tables, not trie paths.** A key resolution, a cell read and a term lookup are
+  single lookups, with no depth term as in D2. The posting-list trie walk is covered by the bitmap
+  container charge, at the constant posting-trie depth (D3).
+- **Separate weights, equal starting values.** Steps that do similar work have separate weights
+  and start with the same value; measurements may set them apart later. A key resolution and a
+  term lookup are both single lookups in a flat table; a cell point read and a cell scan step both
+  read one cell row.
+
+### The Read Call Frame
+
+What every read call, `get`, `query` and `count`, does around its reads. Write planning has its own
+frame, D2's admission and record base, and charges none of this.
+
+| Step | When | Weight |
+| --- | --- | --- |
+| Admission | once per call, per entry and per byte inspected | `read.admission.base`, `read.admission.entry`, `read.admission.byte` |
+| Call base | once per call, when the storage snapshot is opened and its head read | `read.base` |
+
+**Order of checks.** The first failure is returned; no later check runs.
+
+1. **Handle**, `get` on a branch only: the handle is known, not consumed and its origin is still
+   the head. A failure is `HandleInvalid` and costs 0 (D8).
+2. **Not implemented**, `query` only: top-level parts not built yet (sort, limit, offset, cursor)
+   are `NotImplemented` and cost 0.
+3. **Admission** validates the whole request without reading state, charged incrementally, each
+   part checked before its work, so an oversized request stops early with `OutOfBudget`.
+4. **Snapshot**, charged `read.base`: one storage snapshot is opened, or for a branch the base
+   snapshot the overlay sits on, and a requested commit is checked against its head
+   (`CommitUnavailable`). Every state read uses that snapshot.
+5. **Reads**: the core reads (D6.1), and for `query` and `count` the query reads (D6.2).
+
+**Admission** has D2's three-part shape, with weights of its own that start at D2's values:
+`read.admission.base` once per call, then entries and bytes:
+
+| Request part | Entries | Bytes inspected |
+| --- | --- | --- |
+| a filter node: a leaf, an `And`, an `Or` or a `Not` | 1 | the leaf's field name |
+| a leaf's operand | 1 per value: an `Eq` value, each `In` value, each bounded side of a `Range`, a `Prefix` string; none for `Exists` | the value's bytes |
+| a projected name, a sort key | 1 each | the name |
+| the record key of a `get` | none: fixed size, covered by the base | – |
+
+Operands arrive valid: an `In`'s values are distinct and ascending, and every operand has one
+indexable type, when the operand is built
+([query proposal](query-proposal.md#ast-query-format)), so admission inspects them once each and
+stays linear.
+
+### D6.1 Core Reads
+
+The point reads of one record and of one index term. They are the shared vocabulary of every
+call that reads state: a `get` is made of them, a write's planning (D2 steps 2 to 4) is charged
+with them, and a query materializes its records with them.
+
+| Step | Reads | Weight |
+| --- | --- | --- |
+| Key resolution | the binding of one record key in `#recordKeys`, present or absent | `read.key` |
+| Cell point read | one cell row by record and name, present or absent | `read.cell` |
+| Cell scan step | one cell row of a full-record scan | `read.cell_scan` |
+| Bytes returned | per byte of each cell returned to the caller, on the D4 basis | `read.byte` |
+| Term lookup | one index term row, present or absent: whether the term exists, and its posting root | `read.term` |
+
+- **Flat charges, calibrated for the maximum size.** A cell point read and a scan step are flat,
+  calibrated for a value of the maximum size (`#maxStrLen`, `#maxBytesLen`), as D2's fixed
+  per-cell charges are. A term lookup is flat, calibrated for the longest term key the genesis
+  limits allow.
+- **Bytes are charged after the read and before the copy.** A cell read yields the value's length;
+  the cell's bytes are then charged as a step of their own, before the value is decoded and copied
+  into the result. Only `str` and `bytes` vary; every other type has a fixed width.
+- **The byte basis is D4's:** a returned cell counts `(8 + |name|) + (1 + |value|)`, the same
+  basis as `#meta`'s `cell_bytes` and as `max_bytes` paging (D6.2). The two system cells a read
+  returns have fixed sizes: `#key` 45 bytes, `#meta` 46 bytes.
+- **Absent costs the lookup, not the bytes.** A key resolution, cell read or term lookup that finds
+  nothing still pays its lookup; it returns no bytes.
+- **Cell reads need a metering-aware method.** Reading a cell must expose its length before
+  decoding or copying it, so that a large `bytes` value that would exceed the budget is detected
+  without copying any of its bytes. MDBX supports this directly: a read returns a reference into
+  the memory-mapped file with its length, and the value's overflow pages are only loaded when its
+  bytes are touched. Today's `CellReader::get` decodes into an owned value at once and needs this
+  amended method.
+
+**Reading a record.** A record is read in one of three shapes; the same rules serve `get` and a
+query's materialization (D6.2):
+
+| Shape | Steps | Bytes returned |
+| --- | --- | --- |
+| projection `.only(names)` | one `read.cell` per distinct name, present or absent | the D4 size of each cell found |
+| existence check `.only([])` | none beyond resolving the record | none |
+| full record | one `read.cell` each of `#key` and `#meta`, which gives the record's exact counts; then one `read.cell_scan` per user cell | `cell_bytes` from `#meta`, plus 45 for `#key` and 46 for `#meta` |
+
+A full record's charge is known from `#meta` before its user cells are scanned, so the scan is
+charged as one step. A projection may name reserved cells, such as `#meta` alone
+([API `#meta`](golemdb-api.md#meta)); they are point reads like any other.
+
+**`get`** is the read call frame (admission and the call base), one key resolution, and then the
+record in its requested shape (D6.3). A missing record costs admission, the call base and the key resolution, and returns
+`NotFound`.
+
+**Write planning** charges its reads with these steps (D2): the key binding is one `read.key`;
+`#meta` and every touched cell of a `patch` or `delete` one `read.cell` each; every index term a
+join or leave touches one `read.term`. Planning returns nothing to a caller, so it charges no
+`read.byte`; processing an old value is covered by D2's fixed per-cell charges instead.
+
+**Branch reads cost what committed reads cost.** A `get` on a branch looks each cell up in the
+branch's in-memory overlay first and falls back to the branch's base snapshot; a full-record read
+merges both. Where a cell comes from is a physical detail, like a warm or cold cache (R5), so a
+branch read is charged the same steps and weights as the committed read, calibrated for an overlay
+miss followed by a base read (R4). Its `#meta` reflects the branch's own writes, and its cost
+schedule is the one captured at the branch's base commit (R12). Write planning reads the branch
+the same way. Queries read committed state only, so `get` is the only branch read a caller makes.
+
+**`id_of` and `key_of`**, to be specified with the proof API, are core reads with a flat charge:
+`id_of` is one key resolution (`read.key`), `key_of` one cell read of `#key` (`read.cell`).
+
+**Historical reads** (deferred). Resolving an item at a past commit is a flat surcharge per item,
+independent of how far back.
+
+### D6.2 Query Reads
+
+The steps of `query` and `count` beyond the read call frame and the core reads. Their order is the
+reference execution: the execution rules of the
+[query proposal](query-proposal.md#execution-rules-normative).
+
+| Step | When | Weight |
+| --- | --- | --- |
+| Term stepped | `Range`, `Prefix`, `Exists`: per further index entry read in a scan | `read.term_step` |
+| Bitmap container loaded | per bitmap container of a term's posting list | `read.container` |
+| Set combination | per bitmap container processed by a union, intersection or difference | `read.set_container` |
+| Sort comparison | modeled, from the match count and the number of sort terms | `read.sort_compare` (deferred) |
+
+- **Leaves.** An `Eq` is one `read.term`, present or absent. An `In` is one `read.term` per value,
+  in the values' order. Every term found then pays for its posting list, one `read.container` per
+  bitmap container loaded.
+- **Scans.** `Range`, `Prefix` and `Exists` step through one `(name, type)` run in ascending key
+  order:
+  - Positioning the cursor reads the first entry and is one `read.term`; every further entry read
+    is one `read.term_step`, including the entry that ends the scan: past the end of the range, past
+    the end of the run, or at the end of the table. A scan over `k` terms therefore costs
+    `read.term + k × read.term_step`, plus their containers; a scan with no term in it costs one
+    `read.term`, like an absent `Eq`.
+  - `Range` starts at its lower bound; an `Excluded` lower bound that matches an existing term
+    costs one more step, for the entry read and skipped. Two `Unbounded` sides scan the whole run,
+    as `Exists` does. Bounds that admit no value read nothing.
+  - `Prefix` starts at `name ‖ 0x00 ‖ tag ‖ prefix` and ends at the first entry that does not
+    start with it. The empty prefix scans the whole `str` run.
+
+  So scans over attributes with many distinct values pay for their width.
+- **Containers are charged one at a time, as they are loaded.** A posting root does not record
+  how many containers it holds, so the charge-before-step rule requires loading them one at a
+  time, walking the posting-list trie. Today's `bitmap_at` loads all of a term's containers at
+  once and needs a container-by-container variant.
+- **The containers of a set.** Every set a query holds, a posting list or the result of a
+  combination, is a set of record IDs. Its **container count** `C(s)` is the number of distinct
+  upper 48-bit values among its members: the bitmap containers it occupies. It is a function of
+  the set alone, so every node derives the same count for the same result, whatever its
+  representation.
+- **Combining sets** is charged one `read.set_container` per container of every set it takes as
+  input, the same rule for all three combinations:
+  - **union:** an `Or`, an `In` and a scan each combine their inputs in **one** union, charged per
+    container of every input; its order and algorithm are free. An `Or`'s inputs are its children's
+    sets, empty ones included; an `In`'s and a scan's are the posting lists of the terms found. A
+    union of fewer than two inputs combines nothing and is not charged;
   - **intersection:** each further positive child of an `And` is intersected with the running set,
-    charged per container of both;
-  - **difference:** each `Not` child of an `And` is subtracted from the running set, charged per
-    container of both.
+    charged `C(running) + C(child)`;
+  - **difference:** each `Not` child of an `And` is subtracted from the running set, charged
+    `C(running) + C(child)`.
 
   Any merge of sets by container visits at most the containers of its inputs, so this bounds the
   work of every roaring implementation (R4). The inputs' containers were already loaded and
   charged, so a combination costs at most about as much again. Record IDs are dense, so the
-  number of distinct containers, and with it every search among them, is bounded by the size of
-  the database.
+  number of distinct containers is bounded by the size of the database.
 - **`And` runs in the written order.** The running set starts with the first positive child; each
   further child is evaluated and charged only when its turn comes, a positive child intersected,
   a `Not` child subtracted. As soon as the running set is empty, the remaining children are
@@ -513,50 +665,35 @@ the execution rules of the [query proposal](query-proposal.md#execution-rules-no
 - **`Or`** evaluates every child, in the written order, with no early exit, and unions them.
 - **`Not`** is allowed only inside an `And`, after a positive child. A standalone `Not` needs the
   set of all live records (P08) and returns `NotImplemented` until then.
-- **`count`** runs admission, the leaves and the combinations only: it materializes nothing, and the
-  size of the match set is free.
-- **Materialization** reads the returned page's records only, in page order. Per record: `#key`,
-  one cell point read; then, with a projection, one cell point read per projected name, present
-  or absent; without one, `#meta` first, one cell point read, which gives the exact number of user
-  cells and their bytes before the cells are scanned. `get` resolves the key first.
-- **Branch reads cost what committed reads cost.** A `get` on a branch looks each cell up in the
-  branch's in-memory overlay first and falls back to the branch's base snapshot; a full-record read
-  merges both. Where a cell comes from is a physical detail, like a warm or cold cache (R5), so a
-  branch read is charged the same steps and weights as the committed read, calibrated for an
-  overlay miss followed by a base read (R4). Its `#meta` reflects the branch's own writes, and its
-  cost schedule is the one captured at the branch's base commit (R12). Queries read committed
-  state only, so `get` is the only branch read.
+- **No early exit on the match set.** Every query builds its whole match set, sorted or not, so
+  `total_matched` is always free and the charge does not depend on where a page falls.
+- **`count`** runs admission, the call base, the leaves and the combinations only: it materializes
+  nothing, and the size of the match set is free.
+- **Sort** (deferred). Sorting fetches sort values with core cell reads (`read.cell` plus
+  `read.byte` per value fetched) and charges comparisons as a model rather than a count, so the
+  choice of algorithm stays out of the receipt: `S × N × ceil_log2(N)` comparisons for `N`
+  matched records and `S` sort terms, with `ceil_log2(0) = ceil_log2(1) = 0`. This overestimates
+  `⌈N log₂ N⌉ × S` slightly and is exact in integers. Which records need a deeper level's value is
+  fixed by the data ([design §12](golemdb-design.md#typed-sort-terms-and-multi-key-sorts)).
 - **Paging has no charge of its own.** `offset`, `limit` and `max_bytes` work on the match set
-  already built, and paid for, in the same call; only the page's records are materialized, each
-  charged as above. A page ends at `limit` records or at `max_bytes`, whichever comes first, with
-  at least one record ([query proposal](query-proposal.md#execution-rules-normative), rule 9). A
-  full record that would not fit is detected from its `#meta` before its cells are read. Calls are
-  stateless, so every page builds and pays for the whole match set again, and with `sort` the
-  whole sort: a deep `offset` is not cheap, which the cursor (D11) is to address.
-- **Bytes are charged after the read and before the copy.** A cell point read is a flat charge,
-  calibrated for a value of the maximum size (`#maxStrLen`, `#maxBytesLen`), as D2's fixed per-cell
-  charges are. It yields the value's length; the value's bytes are then charged as a step of their
-  own, on the D4 basis, before the value is decoded and copied into the result. All types but
-  `str` and `bytes` have a fixed width, so only those two vary. A full-record read charges all its
-  cells and bytes at once, from `#meta`.
-- **Cell reads need a metering-aware method.** Reading a cell must expose its length before
-  decoding or copying it, so that a large `bytes` value that would exceed the budget is detected
-  without copying any of its bytes. MDBX supports this directly: a read returns a reference into
-  the memory-mapped file with its length, and the value's overflow pages are only loaded when its
-  bytes are touched. Today's `CellReader::get` decodes into an owned value at once and needs this
-  amended method.
-- **Sort comparisons** are the exception to counting: modeled as `⌈N log₂ N⌉ × S` from the match
-  count N and S sort terms, so the choice of sort algorithm stays out of the receipt.
-- **Historical reads.** Resolving an item at a past commit is a flat surcharge, independent of how
-  far back.
-- Reading `#meta` is a `get` of one cell; the full record includes it. The `id_of` and `key_of`
-  accessors, to be specified with the proof API, are fixed-size point reads with a flat charge:
-  `id_of` is one key resolution (`read.key`), `key_of` one cell read (`read.cell`).
-- Bulk deletion, such as a host's expiry purge, uses ordinary reads: Arkiv's purge queries one
-  equality term of its expiry attribute in record-ID order and deletes record by record under its
-  own budget ([tokenomics](arkiv-tokenomics.md#purge-budget)). It reads the parent block's
-  committed state once per expiry block, since queries do not see a branch's deletes. No special
-  scan is provided.
+  already built, and paid for, in the same call. A page ends at `limit` records or at `max_bytes`,
+  whichever comes first, with at least one record
+  ([query proposal](query-proposal.md#execution-rules-normative), rule 9); bytes are counted on the
+  D6.1 basis. Calls are stateless, so every page builds and pays for the whole match set again, and
+  with `sort` the whole sort: a deep `offset` is not cheap, which the cursor (design D11) is to
+  address.
+- **Materialization** reads the page's records only, in page order, as core reads (D6.1), in the
+  requested shape. The result carries each record's key, so with a projection or an empty one,
+  `#key` is read first, one `read.cell` with its 45 bytes, unless the projection names it; a full
+  record includes it already. With no projection, a record that would
+  not fit `max_bytes` is detected from its `#meta` before its cells are scanned; with a projection,
+  its size is known only after the reads, which are charged, and the record is left out of the
+  page.
+- **Bulk deletion**, such as a host's expiry purge, uses ordinary reads: Arkiv's purge queries one
+  equality term of its expiry attribute in record-ID order with an empty projection and a limit,
+  and deletes record by record under its own budget
+  ([tokenomics](arkiv-tokenomics.md#purge-budget)). It reads the parent block's committed state
+  once per expiry block, since queries do not see a branch's deletes. No special scan is provided.
 
 **Example.** `And[ Eq status="open", Range price [10, 20), Not Eq flagged=true ]`, where
 `status="open"` has 3 containers, the price range covers two terms with 2 and 1 containers, and
@@ -580,40 +717,233 @@ re-encodes it canonically to compare, on every read, and query sets are rebuilt 
 node (sync, import) or before they are hashed; rows a node wrote itself are canonical by
 construction, so committed reads can skip both, with corruption covered by an audit. Keeping query
 sets as a sorted list of containers, combined container by container with the library's
-per-container operations, avoids the rebuild and makes the charging rules a literal description of
-the work. Loading containers one at a time is needed for the charge-before-step rule anyway.
+per-container operations, avoids the rebuild, gives `C(s)` as the list's length, and makes the
+charging rules a literal description of the work.
 
-### Read Steps
+### D6.3 Pricing Formula and Cost Compilation
 
-Every read is a sequence of these steps, each with its own weight. The weights are separate even
-where two steps do similar work; such pairs start with the same value, and measurements may set
-them apart later.
+#### Cost and ledger
 
-| Step | When | Weight |
-| --- | --- | --- |
-| Call base | once per read call: open the snapshot, read the head | `read.base` |
-| Admission | once per query, per entry and per byte inspected | `read.admission.base`, `read.admission.entry`, `read.admission.byte` |
-| Key resolution | `get`: look up the key's binding, present or absent | `read.key` |
-| Cell point read | `#key`, each projected cell, present or absent | `read.cell` |
-| Cell scan step | full-record read: per cell row | `read.cell_scan` |
-| Bytes read | per byte of each cell value returned | `read.byte` |
-| Term lookup | `Eq`, each `In` value: look up the term, present or absent | `read.term` |
-| Term stepped | `Range`, `Prefix`, `Exists`: per term stepped over | `read.term_step` |
-| Bitmap container loaded | per bitmap container when a term's posting list is loaded | `read.container` |
-| Set combination | per bitmap container processed by `And`, `Or` and `Not` | `read.set_container` |
-| Sort comparison | modeled, `⌈N log₂ N⌉ × S` | `read.sort_compare` (deferred) |
-| Historical read | per item resolved at a past commit | flat surcharge (deferred) |
+A call performs steps, and every step is charged with one weight of the pricing snapshot. Counting
+how often each weight was charged gives the call's **ledger**: for example 1 × `read.key`,
+3 × `read.cell`, 200 × `read.byte`. The cost is then each count times its weight, added up:
 
-- **Bitmap containers are the unit for posting lists** ([The Index](#the-index)). They are part of
-  the logical schema (D1), deterministic and independent of storage pages, and they are the real unit of work
-  when posting lists are loaded and combined. Charging per bitmap container makes a popular term
-  pay for its size: one term lookup on a value with millions of postings loads, and pays for, many
-  bitmap containers (R4).
-- **Reads touch flat tables, not trie paths.** A term lookup and a cell read are single lookups,
-  with no depth term as in D2. The posting trie walk is covered by the bitmap container charge, at the
-  constant posting-trie depth (D3).
-- **Equal starting values:** key resolution and term lookup are both single lookups in a flat
-  table; a cell point read and a cell scan step both read one cell row.
+```
+cost = Σ over the weights the call charged:  count × weight
+     = 1 × read.key + 3 × read.cell + 200 × read.byte + …
+```
+
+Modeled terms are counts like any other: a write's trie paths count `depth` per mutation under
+`write.cell_trie_update`, a sort counts its modeled comparisons under `read.sort_compare`.
+
+The ledger is what makes a cost checkable rather than just a number:
+
+- **Receipts** carry it (D6.4), so anyone holding the pricing snapshot can recompute the cost and
+  see what it was spent on, for example containers or bytes.
+- **Conformance vectors** pin the ledger as `steps`, not only the total: where two implementations
+  disagree, the ledger shows which step they count differently, and one vector serves any weight
+  set.
+- **Implementations** only count steps; the cost follows from the counts, so no step's price is
+  computed in two places.
+
+The formulas below are the same rule written out per call: each term is a count times a weight.
+
+#### Read formulas
+
+Notation: `A(n, b)` is admission over `n` entries and `b` bytes inspected; `KEY` and `META` are
+the D4 sizes of the two system cells a read returns (D6.1),
+
+```
+A(n, b) = read.admission.base + n × read.admission.entry + b × read.admission.byte
+KEY     = (8 + |"#key"|)  + (1 + 32) = 45                             record ID and name; tag and record key
+META    = (8 + |"#meta"|) + (1 + 32) = 46                             record ID and name; tag and four u64 counts
+```
+
+**`get`**:
+
+```
+cost_get    = A(names, name bytes) + read.base + read.key + cost_record
+cost_record = 0                                                       record not found
+            | 0                                                       existence check
+            | Σ over cell names n:  read.cell + size(n) × read.byte    projection; size 0 if absent
+            | 2 × read.cell + cells × read.cell_scan
+              + (cell_bytes + KEY + META) × read.byte                  full record: #key, #meta, then the scan
+```
+
+**`count`** and **`query`**:
+
+```
+cost_count = A(filter entries, bytes) + read.base + cost_filter(filter)
+cost_query = A(filter, projection and sort entries, bytes) + read.base + cost_filter(filter)
+           + sort + cost_page
+cost_page  = Σ over the page's records r:
+               read.cell + KEY × read.byte + cost_record(r)           existence check, or projection without #key
+             | cost_record(r)                                         projection naming #key, or full record
+```
+
+A query finds records by record ID, through the index, but returns each with its record key, so
+`cost_page` reads each record's `#key` cell. A full record or a projection naming `#key` reads it
+within `cost_record`; `get` needs no such read, since its caller supplies the key.
+
+`cost_filter` is the filter's cost, evaluated depth-first in the written order:
+
+```
+cost_filter(Eq t)        = read.term + C(t) × read.container          C = 0 if t is absent
+cost_filter(In t₁…t_k)   = k × read.term + Σᵢ C(tᵢ) × read.container + U(the tᵢ found)
+cost_filter(Range, k terms)                                           also Prefix and Exists: a scan
+                         = read.term + k × read.term_step             +1 step for a matching Excluded lower bound
+                           + Σᵢ C(tᵢ) × read.container + U(t₁…t_k)   every scanned term is found
+cost_filter(Or c₁…c_k)   = Σᵢ cost_filter(cᵢ) + U(c₁…c_k)
+cost_filter(And c₁…c_k)  = Σᵢ₌₁…ₘ cost_filter(cᵢ) + I(c₁…c_m)        m: the children evaluated, see below
+U(s₁…s_k)                = Σᵢ C(sᵢ) × read.set_container if k ≥ 2, else 0
+                                                                      U: the union of k sets, charged per input container
+I(s₁…s_m)                = Σᵢ₌₂…ₘ (C(rᵢ₋₁) + C(sᵢ)) × read.set_container
+                                                                      I: the intersection of m sets, charged per container of
+                                                                      the running set and of each further set
+```
+
+`C(s)` is the container count of a set (D6.2). In an `And`, `r₁ = s₁` and `rᵢ = rᵢ₋₁ ∩ sᵢ` is the
+running set after the `i`-th child; a `Not` child subtracts instead, `rᵢ = rᵢ₋₁ − sᵢ`, and is charged
+the same. `m` is the first `i` whose running set `rᵢ` is empty, or `k` if none is: the children after
+it are neither evaluated nor charged. The page and `sort` follow D6.2.
+
+**Writes** keep D2's formula; their planning reads are the core reads above.
+
+#### Compiling the cost while executing
+
+An implementation accumulates the cost with a **meter**, one per call, created after the handle
+stage and before admission:
+
+```rust
+struct Meter<'s> {
+    schedule: &'s PricingSnapshot,   // captured once (D9); priced_at
+    budget: Budget,                  // Limited(remaining) or Unlimited
+    spent: u64,
+    ledger: Ledger,                  // count per weight name
+}
+
+impl Meter<'_> {
+    /// Charge `count × weight` before the step it pays for.
+    fn charge(&mut self, weight: WeightName, count: u64) -> Result<(), OutOfBudget> {
+        let price = self.schedule.weight(weight).ok_or(OutOfBudget::UNPRICED)?;   // D9
+        let cost = price.checked_mul(count).ok_or(OutOfBudget::OVERFLOW)?;       // D8
+        let spent = self.spent.checked_add(cost).ok_or(OutOfBudget::OVERFLOW)?;
+        if let Budget::Limited(limit) = self.budget {
+            if spent > limit { return Err(OutOfBudget { required: None }); }   // equal fits
+        }
+        self.spent = spent;
+        self.ledger.add(weight, count);
+        Ok(())
+    }
+}
+```
+
+Rules for using it:
+
+1. **Charge, then perform.** Every step calls `charge` before it runs; a step whose charge fails
+   is not performed. The call then returns `OutOfBudget { required: None }` with the receipt of
+   what was spent, and drops every partial result.
+2. **The charge unit is normative.** Where a charge is taken one unit at a time or for a batch
+   decides where a budget stops, so it is part of the reference execution:
+
+   | Step | Charged |
+   | --- | --- |
+   | admission | per part as inspected: the base, then each entry with its bytes |
+   | `read.base` | once, before the snapshot is opened |
+   | `read.key`, `read.term`, `read.cell` | once per lookup, before it |
+   | `read.term_step` | once per entry, before the cursor steps |
+   | `read.container` | once per container, before it is loaded |
+   | `read.set_container` | once per combination, for all its input containers, before it runs |
+   | `read.byte` | once per cell of a projection, for its D4 size, after the read and before the copy |
+   | full-record scan | once per record, after the `#key` and `#meta` point reads and before the scan: all scan steps and the bytes of the whole record, `#key` and `#meta` included, from `#meta`'s counts |
+   | `read.sort_compare` | once per sort, before it runs |
+
+   A batch whose charge does not fit stops before any of its units.
+3. **Counts come from the request or from data already paid for.** A combination's input sizes,
+   a record's counts from `#meta`, a value's length from its read: never from a read made only to
+   price a step (R3).
+4. **`Unlimited` meters too.** It skips the comparison only: the ledger, checked arithmetic and
+   unpriced weights apply as for a limited budget (D8).
+5. **One meter per call, threaded through.** The meter passes through admission, planning and
+   evaluation, and through the storage seams that load containers and read cells. The evaluator
+   holds it, not the storage layer: storage exposes per-container loading and length-first cell
+   reads, and the evaluator charges around them.
+6. **The receipt is built from the meter**, on success and on every failure after the handle
+   stage: `cost = spent`, the ledger, `priced_at` from the schedule, and for reads the
+   `evaluated_at` of the snapshot, if one was opened.
+
+### D6.4 API Impact
+
+What read metering adds to the [API](golemdb-api.md). It extends the record calls' `Metered<T>`
+shape, which is not on `main` yet ([api-priorities](api-priorities.md#priority-1-fix-the-shape-of-the-record-calls-and-add-meta)),
+to every read.
+
+**Every read returns a receipt.** `get`, `query` and `count`, and the immutable-data reads (D7),
+return `Metered<T>`: their result together with a receipt, on success and on failure.
+
+```rust
+fn get(&self, target: ReadTarget, op: RecordOp<op::Get>) -> Metered<Record>;
+fn query(&self, commit: Option<CommitId>, op: QueryOp) -> Metered<QueryPage>;
+fn count(&self, commit: Option<CommitId>, op: CountOp) -> Metered<u64>;
+```
+
+**Budgets are constructor arguments,** with no default: `RecordOp::get(k, budget)`,
+`QueryOp::filter(f, budget)`, `CountOp::filter(f, budget)`. An operation without one does not
+compile (R7). Today's `QueryOp::from_filter(f).budget(b)` and `CountOp::filter(f).budget(b)` take
+an optional step that the call ignores.
+
+**The receipt gains the ledger and the evaluated commit:**
+
+```rust
+#[non_exhaustive]
+pub struct Receipt {
+    pub cost: u64,
+    pub priced_at: Option<CommitId>,      // the pricing snapshot (D9)
+    pub evaluated_at: Option<CommitId>,   // reads: the snapshot read; None for writes and early rejections
+    pub details: Details,                 // writes' effects (D4); zero for reads
+    pub ledger: Ledger,                   // count per weight name (D6.3)
+}
+
+/// Counts per weight name, in name order. `cost == Σ count × weight` under the snapshot
+/// named by `priced_at`.
+pub struct Ledger(BTreeMap<WeightName, u64>);
+```
+
+- **The ledger is keyed by weight name**, not a struct with a field per step: the weight list is
+  model code, versioned by the GolemDB code version `G` (D9), so a new step is a new name, never
+  a breaking change to the type. In process it is always present; a transport may make it opt-in
+  (R9).
+- **`evaluated_at` moves into the receipt.** A read can fail after its snapshot is opened, for
+  example with `OutOfBudget`, and the caller still needs to know which state it was charged
+  against. `QueryPage::evaluated_at` then duplicates it and can be dropped when `Metered` lands.
+- **`priced_at` ≤ `evaluated_at`.** The pricing snapshot is captured at admission, from the head
+  the in-memory schedule belongs to (D9); the storage snapshot is opened after admission (QR5). A
+  commit landing in between makes `evaluated_at` the later head; the call is priced, consistently,
+  by the earlier one. Inside a host's block execution the two are equal, since the branch base
+  does not move.
+
+**Costs and receipts by outcome:**
+
+| Outcome | `cost` | `priced_at` | `evaluated_at` |
+| --- | --- | --- | --- |
+| invalid branch handle (`get` on a branch) | 0 | `None` | `None` |
+| top-level part not implemented (`NotImplemented`) | 0 | `None` | `None` |
+| admission error (`InvalidArgument`, `InvalidQuery`, `LimitExceeded`) | admission work done | head at admission | `None` |
+| `CommitUnavailable` | admission + `read.base` | head at admission | the snapshot's head |
+| `NotFound` (`get`) | admission + `read.base` + `read.key` | head at admission, or the branch base | the snapshot read |
+| `OutOfBudget { required: None }` | the steps performed | as above | the snapshot read, if opened |
+| success | the full cost | as above | the snapshot read |
+
+For a `get` on a branch, "the snapshot read" is the branch's base commit: its overlay sits on that
+committed state, and `priced_at` names the same commit.
+
+**Errors.** `OutOfBudget { required: Option<u64> }` is new in `ApiError`; a read always reports
+`required: None`, since it stops as it goes (D8). `LimitExceeded` is new for the query caps.
+Neither exists on `main` yet.
+
+**Host use.** Arkiv converts `cost` into gas for the owner `get` behind every patch, extend and
+delete, and charges its purge queries against `purge_budget`
+([tokenomics](arkiv-tokenomics.md#purge-budget)); both depend on these receipts.
 
 ### Conformance Vectors
 
@@ -627,7 +957,7 @@ R13's vectors pin results, costs and stopping points. Each vector contains:
 | `setup` | ordered calls that build the state, so record IDs and index contents follow from the spec, not from one engine's storage |
 | `call` | the call under test: kind, target, operation and budget |
 | `expect` | `ok` with the result, cost, `priced_at` and `evaluated_at`, or `error` with the kind, the cost spent and `required` if any |
-| `steps` | the expected count of each step, as the receipt's diagnostic ledger reports them (D2) |
+| `steps` | the expected ledger: the count of each weight name, as the receipt reports it (D6.4) |
 
 - **Step counts say where two engines disagree;** the cost alone says only that they do. They also
   make a vector reusable under other weights.
@@ -635,6 +965,8 @@ R13's vectors pin results, costs and stopping points. Each vector contains:
   keeps two counting errors from cancelling out.
 - **The stopping point** of an `OutOfBudget` vector is given by its `steps`: only the steps
   performed. A pair of vectors pins it, one with exactly enough budget and one with one unit less.
+- **Core reads first.** Vectors for D6.1 (`get` in every shape, and the planning reads of `create`,
+  `patch` and `delete`) come before query vectors, since write metering depends on them.
 
 The file format is shared with the encoding vectors (design D09) and decided with the conformance
 strategy (CHANGES S13); a common choice, as in Ethereum's test suites, is hand-written YAML or code
@@ -642,34 +974,40 @@ generating JSON fixtures. The files live in `conformance/vectors/metering/`.
 
 ### Read Cost Items
 
-Every moving part of the read cost model, decided or not, ordered by relevance: the foundations
-(1–2), what Arkiv needs first (3–11), the rest of the query MVP (12–18), and what is deferred
-(19–20). A working list towards resolving finding F1: once every item is settled, the counting
-rules above carry its content and the list is removed.
+Every moving part of the read cost model, decided or not, by part: the foundations, the core reads
+write metering depends on, the query reads, and the API. A working list towards resolving finding
+F1: once every item is settled, the rules above carry its content and the list is removed.
 
-| # | Item | Status | Current view |
-| --- | --- | --- | --- |
-| 1 | Charge checked before each step; the call stops at the first that does not fit | decided | R7; no partial results |
-| 2 | Order of checks | decided | `NotImplemented` first, then admission, then snapshot and commit check, then reads |
-| 3 | Read steps and their weights | proposed | [Read Steps](#read-steps); separate weights, similar steps start equal |
-| 4 | Unit for combining sets | decided | per bitmap container, a logical unit (D1) |
-| 5 | Equality lookup, including an absent term | proposed | one `read.term`, present or absent, plus the containers of a term found |
-| 6 | `In` | decided | one term read per distinct term, in key order |
-| 7 | `Range` scan | proposed | `read.term` plus one `read.term_step` per further entry read, including the one ending the scan; an empty range costs one `read.term` |
-| 8 | Materialization | proposed | `#key` plus projected cells, or `#meta` then a full scan; bytes charged after the read and before the copy |
-| 9 | Admission for queries | proposed | D2's three-part shape, own weights starting at D2's values; `In` values strictly ascending, checked linearly |
-| 10 | `get` | proposed | one key resolution, then one cell read per cell |
-| 11 | Purge read: equality, record-ID order, limit | decided shape | charges follow from items 5 and 8 |
-| 12 | `And` | decided | written order; early exit when the running set is empty, remaining children not charged; intersection and difference per container of both sets |
-| 13 | `Or`, `Not` inside `And` | decided | `Or` evaluates every child, one union charged per container of every input; standalone `Not` waits for P08 |
-| 14 | `count` | decided | admission, leaves and combinations only; no materialization |
-| 15 | `limit`, `offset`, `max_bytes` | proposed | no charge of their own; page ends at `limit` or `max_bytes`, at least one record; caps as defaults |
-| 16 | Branch reads | proposed | the same steps and weights as a committed read, calibrated for an overlay miss (R4, R5) |
-| 17 | Conformance vector format | proposed | [Conformance Vectors](#conformance-vectors): content fixed here, file format shared with the encoding vectors (S13) |
-| 18 | Caps | proposed | depth 16 (ceiling 64), records per page 1,000 (10,000), bytes per page 160 MiB (320 MiB), sort keys 4 (16); `#maxQueryBytes` at least the largest record; [query proposal](query-proposal.md#caps) |
-| 21 | Container size | open | a container holds 1 to 65,536 record IDs, as an array or an 8 KiB bitmap; a flat per-container weight overcharges sparse posting lists. Measure loading and combining sparse against dense containers; if the gap is large, add a charge per record ID or per byte |
-| 19 | Sort | deferred | `⌈N log₂ N⌉ × S`; integer evaluation, including `N = 0` |
-| 20 | Historical reads | deferred | flat surcharge |
+| # | Part | Item | Status | Current view |
+| --- | --- | --- | --- | --- |
+| 1 | all | Charge checked before each step; the call stops at the first that does not fit | decided | R7; no partial results |
+| 2 | all | Order of checks | decided | `NotImplemented` first, then admission, then snapshot and commit check, then reads |
+| 3 | all | Step list and weights | proposed | [D6.1](#d61-core-reads) and [D6.2](#d62-query-reads) tables; separate weights, similar steps start equal |
+| 22 | all | Ledger and cost as ledger × weights | proposed | [D6.3](#d63-pricing-formula-and-cost-compilation); ledger keyed by weight name |
+| 23 | all | Charge unit per step | proposed | [D6.3](#compiling-the-cost-while-executing) rule 2 |
+| 24 | core | Core reads shared with write planning | decided (2026-10-20) | D2 charges `read.key`, `read.cell`, `read.term` for its planning reads; no `read.byte` |
+| 10 | core | `get` | proposed | admission, call base, key resolution, then the record's shape |
+| 8 | core | Record shapes and byte basis | proposed | projection, existence check, full record from `#meta`; D4 basis, `#key` 45 and `#meta` 46 bytes |
+| 16 | core | Branch reads | proposed | the same steps and weights as a committed read, calibrated for an overlay miss (R4, R5) |
+| 20 | core | Historical reads | deferred | flat surcharge per item |
+| 4 | query | Unit for combining sets | decided | per bitmap container, a logical unit (D1) |
+| 25 | query | Container count of a computed set | proposed | distinct upper 48-bit values among its members |
+| 5 | query | Equality lookup, including an absent term | proposed | one `read.term`, present or absent, plus the containers of a term found |
+| 6 | query | `In` | decided | one term read per value; values distinct and ascending by construction |
+| 7 | query | Scans: `Range`, `Prefix`, `Exists` | proposed | `read.term` plus one `read.term_step` per further entry read, including the one ending the scan; two unbounded sides and `Exists` scan the whole run |
+| 26 | query | Union of fewer than two inputs | proposed | not charged |
+| 9 | all | Admission for reads | proposed | [read call frame](#the-read-call-frame): D2's three-part shape, own weights starting at D2's values; one entry per filter node, operand value, projected name and sort key; operands valid by construction |
+| 11 | query | Purge read: equality, record-ID order, empty projection, limit | decided shape | charges follow from items 5 and 8 |
+| 12 | query | `And` | decided | written order; early exit when the running set is empty, remaining children not charged; intersection and difference per container of both sets |
+| 13 | query | `Or`, `Not` inside `And` | decided | `Or` evaluates every child, one union charged per container of every input; standalone `Not` waits for P08 |
+| 14 | query | `count` | decided | admission, call base, leaves and combinations only; no materialization |
+| 27 | query | No early exit on the match set | proposed | every query builds its whole match set; `total_matched` free |
+| 15 | query | `limit`, `offset`, `max_bytes` | proposed | no charge of their own; page ends at `limit` or `max_bytes`, at least one record; caps as defaults |
+| 18 | query | Caps | proposed | depth 16 (ceiling 64), records per page 1,000 (10,000), bytes per page 160 MiB (320 MiB), sort keys 4 (16); `#maxQueryBytes` at least the largest record; [query proposal](query-proposal.md#caps) |
+| 21 | query | Container size | open | a container holds 1 to 65,536 record IDs, as an array or an 8 KiB bitmap; a flat per-container weight overcharges sparse posting lists. Measure loading and combining sparse against dense containers; if the gap is large, add a charge per serialized container byte, which the pinned Roaring encoding (D09) makes deterministic |
+| 19 | query | Sort | deferred | `S × N × ceil_log2(N)` modeled comparisons, `ceil_log2(0) = ceil_log2(1) = 0`; fetches as core cell reads |
+| 28 | API | Receipts for reads | proposed | [D6.4](#d64-api-impact): `Metered<T>` for every read, ledger and `evaluated_at` in the receipt, `priced_at ≤ evaluated_at` |
+| 17 | all | Conformance vector format | proposed | [Conformance Vectors](#conformance-vectors): content fixed here, file format shared with the encoding vectors (S13) |
 
 ## D7. Immutable-Log Metering
 
@@ -725,13 +1063,13 @@ Meets R6, R7.
   | Failure | Charge |
   | --- | --- |
   | Admission (malformed input, `Reserved`, `KeyModeMismatch`) | Admission work performed, including the check that detects the error |
-  | Key failure (`AlreadyExists`, `NotFound`) | Admission cost + `write.record.{op}` |
-  | Later check (cap exceeded, invalid value, `CellNotFound`) | Admission cost + `write.record.{op}` + the cell and index reads performed |
+  | Key failure (`AlreadyExists`, `NotFound`) | Admission cost + the record base (`read.key + write.record.{op}`) |
+  | Later check (cap exceeded, invalid value, `CellNotFound`) | Admission cost + the record base + the core cell and term reads performed (D6.1) |
   | `OutOfBudget{spent, required?}` | `spent`: completed charged planning steps, never more than a limited budget; `required` is present only after the full cost is established |
 
   The key-failure and later-check rows assume the preceding charged steps fit the budget;
   otherwise the call stops earlier with `OutOfBudget`. If the remaining budget after
-  admission is below `write.record.{op}`, no binding lookup is performed; `spent` is the admission
+  admission is below the record base, no binding lookup is performed; `spent` is the admission
   cost and `required` is `None`. `write.record.{op}` includes work a failed
   call never reaches, such as the record ID counter; that difference is the penalty for
   a failed call. Returning a receipt with an error code costs nothing extra.
@@ -849,7 +1187,7 @@ version and weight name.
 
 ```
 @meteringModel  1 → (A: 0, G: 1, H: 1)
-@modelWeight    1 ‖ write.cell_read           → 100
+@modelWeight    1 ‖ read.cell                 → 100
                 1 ‖ write.cell_byte           → 2
                 1 ‖ host.storage_price        → 5
 ```
@@ -859,7 +1197,7 @@ is unchanged, so `G` and `H` are too; the model carries its complete weight set.
 
 ```
 @meteringModel  2 → (A: 1000, G: 1, H: 1)      A ≥ 400 + 1 + #minActivationDelay
-@modelWeight    2 ‖ write.cell_read           → 100
+@modelWeight    2 ‖ read.cell                 → 100
                 2 ‖ write.cell_byte           → 2
                 2 ‖ host.storage_price        → 8
 ```
@@ -871,7 +1209,7 @@ code version 2. The host's names are unchanged, so `H` stays 1.
 
 ```
 @meteringModel  3 → (A: 5000, G: 2, H: 1)
-@modelWeight    3 ‖ write.cell_read           → 100
+@modelWeight    3 ‖ read.cell                 → 100
                 3 ‖ write.cell_byte           → 2
                 3 ‖ write.cell_trie_update    → 100
                 3 ‖ host.storage_price        → 8
@@ -894,17 +1232,16 @@ implementation, from which weights are calibrated, and are never stored or charg
 | Weight | Used for | Calibrated from op classes (`op.*`) |
 | --- | --- | --- |
 | `write.admission.base`, `write.admission.entry`, `write.admission.byte` | Fixed request validation, entries inspected and bytes validated, including rejected input (D2) | reference admission validation |
-| `write.record.create`, `write.record.patch`, `write.record.delete` | Record base cost excluding admission: binding read, in-memory record ID counter, cap check, cell enumeration (D2) | `op.key_resolve`, `op.record_create` (in-memory allocator part) |
-| `write.cell_read` | Read of a touched cell before its operation (D2) | `op.cell_read` |
+| `write.record.create`, `write.record.patch`, `write.record.delete` | Record base cost excluding admission and the binding lookup (`read.key`): in-memory record ID counter, cap check, cell enumeration (D2) | `op.record_create` (in-memory allocator part) |
 | `write.cell.create`, `write.cell.update`, `write.cell.delete` | Cell compute (D2) | `op.cell_write` / `op.cell_remove`, `op.cell_history_append`, `op.cell_changeset_write` |
 | `write.cell_trie_update` | Cell-trie path, per node × `cell_trie_depth` (D2, D3) | `op.celltrie_path_rewrite` |
 | `write.cell_byte` | Cell storage: bytes written, including their later copy into history (D2, D4) | byte term, plus the change-set copy |
-| `write.index_read` | Read of an index term before join or leave (D2) | `op.index_seek` |
 | `write.index.join`, `write.index.leave` | Index membership change (D2) | `op.index_term_flip`, `op.secidx_container_rewrite`, `op.secidx_path_rewrite` |
 | `write.index_term_create` | Creating a new term, including its later removal (D2) | new index row and index-trie leaf, plus their removal |
 | `write.index_trie_update` | Index-trie path, per node × `index_trie_depth` (D2, D3) | `op.indextrie_path_rewrite` |
 | `write.index_byte` | Index storage: bytes written (D2, D4) | byte term (new term keys) |
-| Read weights (`read.base`, `read.admission.base`, `read.admission.entry`, `read.admission.byte`, `read.key`, `read.cell`, `read.cell_scan`, `read.byte`, `read.term`, `read.term_step`, `read.container`, `read.set_container`, `read.sort_compare`) | Read steps (D6) | read op classes |
+| Core read weights (`read.key`, `read.cell`, `read.cell_scan`, `read.byte`, `read.term`) | Point reads of records and index terms (D6.1), shared by `get`, write planning (D2) and query materialization | `op.key_resolve`, `op.cell_read`, `op.index_seek` |
+| Query read weights (`read.base`, `read.admission.base`, `read.admission.entry`, `read.admission.byte`, `read.term_step`, `read.container`, `read.set_container`, `read.sort_compare`) | Read steps of `query` and `count` (D6.2); `get` also pays `read.base` and admission | read op classes |
 | `write.log_append.base`, `write.log_append.byte` | Immutable-log append: fixed staging work, row bytes written and their shard residency (D7) | `op.immutable_data_append` plus the byte term |
 | `read.log_row` | Immutable-log row read (D7); bytes read use the `read.byte` read weight (D6) | `op.immutable_data_read` |
 | `host.*` (host-declared) | The host's own prices and limits; never used by GolemDB (D9) | the host's calibration and capacity planning |
@@ -921,16 +1258,18 @@ the accounting for these operations; remaining specification gaps are tracked in
 
 Let `A_create`, `A_patch` and `A_delete` denote the admission costs calculated by D2
 for these requests. The tables show the remaining costs; add the corresponding admission
-cost to obtain the full charge. The illustrative `write.record` values below exclude admission.
+cost to obtain the full charge. The illustrative `write.record` values below exclude admission
+and the binding lookup (`read.key`); planning reads use the core read weights (D6.1).
 Admission weights and exact reference counts are not assigned numerical values here.
 
 | Weight | Value | Weight | Value |
 | --- | --- | --- | --- |
-| `write.record.create` | 300 | `write.index_read` | 100 |
-| `write.record.patch` | 200 | `write.index.join`, `write.index.leave` | 650 |
-| `write.record.delete` | 250 | `write.index_term_create` | 400 |
-| `write.cell_read` | 100 | `write.index_trie_update` | 100 per node |
-| `write.cell.create`, `[update]`, `[delete]` | 350 | `write.index_byte` | 2 |
+| `read.key` | 100 | `read.term` | 100 |
+| `read.cell` | 100 | `write.index.join`, `write.index.leave` | 650 |
+| `write.record.create` | 200 | `write.index_term_create` | 400 |
+| `write.record.patch` | 100 | `write.index_trie_update` | 100 per node |
+| `write.record.delete` | 150 | `write.index_byte` | 2 |
+| `write.cell.create`, `[update]`, `[delete]` | 350 | | |
 | `write.cell_trie_update` | 100 per node | | |
 | `write.cell_byte` | 2 | | |
 
@@ -951,7 +1290,7 @@ The key has no binding. The term `owner` = 0x71C7… is new; the term `status` =
 
 | Operation | Terms | Cost |
 | --- | --- | --- |
-| Record base | `write.record.create`: binding read (absent), record ID | 300 |
+| Record base | `read.key` (binding absent) + `write.record.create` (record ID): 100 + 200 | 300 |
 | Create binding | 350 + 600 + 49 × 2 | 1,048 |
 | Create `#key` | 350 + 600 + 45 × 2 | 1,040 |
 | Create `#meta` | 350 + 600 + 46 × 2 | 1,042 |
@@ -972,7 +1311,7 @@ No cell reads: the record is new. Receipt: 3 cells created, 2 index joins, 1 ter
 
 | Operation | Terms | Cost |
 | --- | --- | --- |
-| Record base | `write.record.patch`: binding read, cap check | 200 |
+| Record base | `read.key` (binding) + `write.record.patch` (cap check): 100 + 100 | 200 |
 | Read and update `#meta` | 100 + 350 + 600 + 46 × 2 | 1,142 |
 | Update `status` | 100 + 350 + 600 + 21 × 2 | 1,092 |
 | Update `payload` | 100 + 350 + 600 + 116 × 2 | 1,282 |
@@ -986,11 +1325,11 @@ Receipt: 2 cells updated, 1 index leave, 1 index join; 137 cell bytes written an
 
 **The same patch with a budget of `A_patch + 5,000`** fails in the plan phase with
 `OutOfBudget{spent: A_patch + 700, required: Some(A_patch + 6,444)}`. Beyond admission,
-`spent` is `write.record.patch` (200) plus the reads performed: `#meta` (100), two cells (200)
+`spent` is the record base (200) plus the core reads performed: `#meta` (100), two cells (200)
 and two index terms (200). Nothing is written.
 
-**With `Limited(A_patch + 250)`**, admission completes and the binding lookup costs
-200; the next `#meta` read would cost 100, so it is not performed. The result is
+**With `Limited(A_patch + 250)`**, admission completes and the record base with its binding
+lookup costs 200; the next `#meta` read would cost 100, so it is not performed. The result is
 `OutOfBudget{spent: A_patch + 200, required: None}`. With `Limited(A_patch + 6,444)`,
 the patch succeeds at the exact budget. With `Unlimited`, the same planner returns
 `A_patch + 6,444` for estimation without applying the patch.
@@ -1008,8 +1347,8 @@ the call instead stops before that step with `OutOfBudget` and no `required` tot
 
 | Operation | Terms | Cost |
 | --- | --- | --- |
-| Record base | `write.record.delete`: binding read, cell enumeration | 250 |
-| Delete binding | 350 + 600 (read in `write.record`) | 950 |
+| Record base | `read.key` (binding) + `write.record.delete` (cell enumeration): 100 + 150 | 250 |
+| Delete binding | 350 + 600 (read in the record base) | 950 |
 | Read and delete `#key` | 100 + 350 + 600 | 1,050 |
 | Read and delete `#meta` | 100 + 350 + 600 | 1,050 |
 | Read and delete `owner`, `status`, `payload` | 3 × (100 + 350 + 600) | 3,150 |
@@ -1028,6 +1367,70 @@ Receipt: 3 cells deleted, 2 index leaves; 171 cell bytes and 41 index bytes dele
 - **Deleting and creating have similar non-admission costs** (9,150 against 10,116): every row, trie path and index entry has to be touched either way. Their full costs also include their respective admission charges.
 - **An index value change dominates a small patch's non-admission cell work.** Changing `status` costs 3,820 excluding admission and record-level overhead, of which 2,728 is the index leave and join: two terms, two trie paths.
 - **A record's fixed non-admission cost** is 3,430 on `create` (base plus three system cells) and 3,300 on `delete`, before any user cell. Admission is added separately.
+
+## Worked Example: Reads
+
+The two reads Arkiv puts into consensus gas ([tokenomics](arkiv-tokenomics.md#inputs-from-golemdb)),
+priced by D6.3: the owner `get` behind every patch, extend and delete, and the expiry purge's query.
+Each shows its ledger, the counts the receipt reports, and the cost as those counts times the
+weights.
+
+**Weights.** Illustrative, not calibrated; similar steps start equal (D6).
+
+| Weight | Value | Weight | Value |
+| --- | --- | --- | --- |
+| `read.admission.base` | 100 | `read.key` | 100 |
+| `read.admission.entry` | 20 | `read.cell`, `read.cell_scan` | 100 |
+| `read.admission.byte` | 1 | `read.byte` | 1 |
+| `read.base` | 100 | `read.term`, `read.term_step` | 100 |
+| `read.container` | 200 | `read.set_container` | 20 |
+
+### Owner `get`
+
+`get(Head, RecordOp::get(key, budget).only(["$owner"]))` on an existing entity. `$owner` is a
+`bytes20` attribute: `(8 + 6) + (1 + 20)` = 35 bytes on the D4 basis.
+
+| Step | Ledger | Cost |
+| --- | --- | --- |
+| admission: base, one projected name of 6 bytes | 1 `read.admission.base`, 1 `read.admission.entry`, 6 `read.admission.byte` | 126 |
+| call base: snapshot at the head | 1 `read.base` | 100 |
+| key resolution | 1 `read.key` | 100 |
+| point read of `$owner`, then its bytes | 1 `read.cell`, 35 `read.byte` | 135 |
+| **Total** | | **461** |
+
+An unknown key stops after the key resolution with `NotFound` and costs 326; a budget of 460 stops
+before the 35 bytes are copied, with `OutOfBudget` and 426 spent.
+
+### Purge query
+
+One block's purge reads the entities expiring at block `n` (Arkiv's
+[purge order](arkiv-tokenomics.md#purge-budget)):
+
+```
+query(None, QueryOp::filter(Eq { $expiresAt = n as u64 }, budget).only([]).limit(100))
+```
+
+The term `$expiresAt = n` holds 250 entities, whose record IDs fall into 2 bitmap containers. The
+page takes the first 100 in record-ID order; with an empty projection, each returns only its key.
+
+| Step | Ledger | Cost |
+| --- | --- | --- |
+| admission: base; the `Eq` node and its value; the field name (10 bytes) and the `u64` (8 bytes) | 1 `read.admission.base`, 2 `read.admission.entry`, 18 `read.admission.byte` | 158 |
+| call base | 1 `read.base` | 100 |
+| `Eq`: term lookup, its 2 containers; one set, no union | 1 `read.term`, 2 `read.container` | 500 |
+| page of 100 records: each record's `#key`, 45 bytes | 100 `read.cell`, 4,500 `read.byte` | 14,500 |
+| **Total** | | **15,258** |
+
+The full match set is built, all 250 records, but only the page is materialized: the purge's cost
+grows with its `limit`, not with the size of the expiry term. The budget's stopping point is exact:
+
+| Budget | Outcome | Spent | Ledger at the stop |
+| --- | --- | --- | --- |
+| `Limited(15258)` | the page, 100 keys | 15,258 | as above |
+| `Limited(15257)` | `OutOfBudget { required: None }`, no records | 15,213 | 100 `read.cell`, 4,455 `read.byte`: the 100th record's `#key` was read, its 45 bytes did not fit |
+
+A block with nothing expiring reads an absent term: admission, call base and one `read.term`, 358
+in total, with an empty page. This is the cheap step the purge cursor takes through quiet blocks.
 
 ## Open Questions
 
