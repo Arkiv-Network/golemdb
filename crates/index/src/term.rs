@@ -165,19 +165,14 @@ fn validate_name(name: &str) -> Result<(), TermError> {
     Ok(())
 }
 
+/// The index holds the types a cell can be an attribute of, decided once by
+/// [`CellType::can_be_attribute`], so the query operands' markers and the
+/// index cannot disagree.
 fn supported(ty: CellType) -> Result<(), TermError> {
-    match ty {
-        CellType::Bool
-        | CellType::Str
-        | CellType::Bytes20
-        | CellType::FixedBytes(_)
-        | CellType::Uint(_)
-        | CellType::Int(_)
-        | CellType::Decimal(_)
-        | CellType::Date32
-        | CellType::Timestamp64
-        | CellType::Float(_) => Ok(()),
-        _ => Err(TermError::UnsupportedType(ty)),
+    if ty.can_be_attribute() {
+        Ok(())
+    } else {
+        Err(TermError::UnsupportedType(ty))
     }
 }
 

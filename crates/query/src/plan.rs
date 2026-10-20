@@ -2,12 +2,12 @@
 //! before any state read and resolves its leaves to the index work they need.
 //! Pure; no storage access.
 
-use std::{collections::BTreeSet, ops::Bound};
+use std::collections::BTreeSet;
 
 use golemdb_cells::{CellName, CellValue};
 use golemdb_index::{IndexTerm, RangeError, TermError, TermRange};
 
-use crate::{Filter, QueryError, Result};
+use crate::{Bounds, Filter, InValues, QueryError, Result};
 
 /// The written filter with its terms resolved: same shape, same order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +19,7 @@ pub(crate) enum Plan {
     /// once: the union of their postings.
     TermReads(BTreeSet<IndexTerm>),
     /// A scan of the range's terms in ascending key order, one term read
-    /// each: the union of their postings.
+    /// each: the union of their postings. `Range` and `Prefix` leaves.
     Scan(TermRange),
     /// A leaf no record can match, an `In` with no value or a `Range` whose
     /// bounds admit none: nothing is read.
@@ -29,73 +29,60 @@ pub(crate) enum Plan {
 impl TryFrom<&Filter> for Plan {
     type Error = QueryError;
 
-    /// Admission: fails with [`QueryError::InvalidArgument`] on a leaf with no
-    /// valid index term, and with [`QueryError::InvalidQuery`] on a malformed
-    /// leaf (an `In` whose values differ in type; a `Range` with no bound, or
-    /// bounds of two types). A leaf that admits no value is [`Plan::Empty`].
+    /// Admission: fails with [`QueryError::InvalidArgument`] on a leaf with a
+    /// bad field name. A leaf that admits no value is [`Plan::Empty`]. `Eq`
+    /// values, `In` values and `Range` bounds are of one indexable type by
+    /// construction.
     fn try_from(filter: &Filter) -> Result<Self> {
         match filter {
-            Filter::Eq { field, value } => Ok(Self::TermRead(term(field, value)?)),
+            Filter::Eq { field, value } => Ok(Self::TermRead(term(field, value.as_cell())?)),
             Filter::In { field, values } => {
                 Ok(terms(field, values)?.map_or(Self::Empty, Self::TermReads))
             }
-            Filter::Range {
-                field,
-                lower,
-                upper,
-            } => Ok(range(field, lower, upper)?.map_or(Self::Empty, Self::Scan)),
+            Filter::Range { field, bounds } => {
+                Ok(range(field, bounds)?.map_or(Self::Empty, Self::Scan))
+            }
+            Filter::Prefix { field, prefix } => TermRange::with_prefix(field.as_view(), prefix)
+                .map(Self::Scan)
+                .map_err(|source| invalid_argument(field, source)),
         }
     }
 }
 
-/// The terms of `field` between `lower` and `upper`, checked as
-/// [`TermRange::between`] checks them: a field or type with no index term
-/// fails as an `Eq` leaf's would, and a malformed range is an invalid query.
-/// `None` when the bounds admit no value.
-fn range(
-    field: &CellName,
-    lower: &Bound<CellValue>,
-    upper: &Bound<CellValue>,
-) -> Result<Option<TermRange>> {
+/// The terms of `field` between the bounds, in the run of their type, as
+/// [`TermRange::between`] builds them: a bad field name fails as an `Eq`
+/// leaf's would. Two unbounded sides are the whole run. `None` when the
+/// bounds admit no value. The bounds are of one indexable type by
+/// construction, so a type with no term cannot occur here, and a type
+/// mismatch is a broken invariant, not the caller's error.
+fn range(field: &CellName, bounds: &Bounds) -> Result<Option<TermRange>> {
     TermRange::between(
         field.as_view(),
-        lower.as_ref().map(CellValue::as_view),
-        upper.as_ref().map(CellValue::as_view),
+        bounds.cell_type(),
+        bounds.lower().map(CellValue::as_view),
+        bounds.upper().map(CellValue::as_view),
     )
     .map_err(|error| match error {
         RangeError::Term(source) => invalid_argument(field, source),
-        RangeError::NoBound => QueryError::InvalidQuery {
-            reason: "`Range` needs at least one bound",
-        },
-        RangeError::TypeMismatch { .. } => QueryError::InvalidQuery {
-            reason: "`Range` bounds must have one type",
-        },
+        error @ RangeError::TypeMismatch { .. } => QueryError::Internal(Box::new(error)),
     })
 }
 
-/// The terms of `field IN values`, sorted by key and deduplicated; `None`
-/// when there are no values. The list's shape is checked first, without
-/// building a term, then each value as an `Eq` leaf's would be. With no
-/// value, the field's name is still checked.
-fn terms(field: &CellName, values: &[CellValue]) -> Result<Option<BTreeSet<IndexTerm>>> {
-    let [first, rest @ ..] = values else {
-        IndexTerm::check_cell_name(field.as_view())
-            .map_err(|source| invalid_argument(field, source))?;
-        return Ok(None);
-    };
-    if rest
-        .iter()
-        .any(|value| value.cell_type() != first.cell_type())
-    {
-        return Err(QueryError::InvalidQuery {
-            reason: "`In` values must all have one type",
-        });
+/// The terms of `field IN values`, one per value, in the values' order
+/// (ascending term key); `None` when there is no value, once the field's
+/// name is checked. The values are of one indexable type by construction,
+/// so only the name can fail.
+fn terms(field: &CellName, values: &InValues) -> Result<Option<BTreeSet<IndexTerm>>> {
+    match values.as_slice() {
+        [] => IndexTerm::check_cell_name(field.as_view())
+            .map(|()| None)
+            .map_err(|source| invalid_argument(field, source)),
+        values => values
+            .iter()
+            .map(|value| term(field, value))
+            .collect::<Result<_>>()
+            .map(Some),
     }
-    values
-        .iter()
-        .map(|value| term(field, value))
-        .collect::<Result<_>>()
-        .map(Some)
 }
 
 /// The term `field = value` is indexed under, built as seal builds it, so
@@ -114,7 +101,12 @@ fn invalid_argument(field: &CellName, source: TermError) -> QueryError {
 
 #[cfg(test)]
 mod tests {
-    use golemdb_cells::{CellNameRef, CellType};
+    use std::ops::Bound::{self, Excluded, Included, Unbounded};
+
+    use golemdb_cells::{
+        CellNameRef, CellType, NotNan64, Width,
+        marker::{Dec256, F64, I32, I64, I256, Str, U32, U64},
+    };
 
     use super::*;
 
@@ -163,7 +155,7 @@ mod tests {
     }
 
     /// The terms of a non-empty `In` on `f`.
-    fn in_terms(values: &[CellValue]) -> Result<BTreeSet<IndexTerm>> {
+    fn in_terms(values: &InValues) -> Result<BTreeSet<IndexTerm>> {
         terms(&CellNameRef::raw(b"f").into(), values).map(|terms| terms.expect("values given"))
     }
 
@@ -176,49 +168,42 @@ mod tests {
         // The set iterates, and so is read, in term key order, not native
         // order: -1 sorts before 1 once the sign bit is flipped, and "ab"
         // sorts before "b".
-        let (minus, plus) = (CellValue::from_i32(-1), CellValue::from_i32(1));
-        let got = in_terms(&[plus.clone(), minus.clone(), plus.clone()]).expect("valid In");
-        assert!(
-            got.iter().eq([&term_of(&minus), &term_of(&plus)]),
-            "{got:?}"
-        );
+        let got = in_terms(&InValues::of(I32, [1, -1, 1])).expect("valid In");
+        let expected = [-1, 1].map(|n| term_of(&CellValue::from_i32(n)));
+        assert!(got.iter().eq(&expected), "{got:?}");
 
-        let (ab, b) = (CellValue::from_str("ab"), CellValue::from_str("b"));
-        let got = in_terms(&[b.clone(), ab.clone(), b.clone(), ab.clone()]).expect("valid In");
-        assert!(got.iter().eq([&term_of(&ab), &term_of(&b)]), "{got:?}");
+        let got = in_terms(&InValues::of(Str, ["b", "ab", "b", "ab"])).expect("valid In");
+        let expected = ["ab", "b"].map(|s| term_of(&CellValue::from_str(s)));
+        assert!(got.iter().eq(&expected), "{got:?}");
     }
 
     #[test]
-    fn in_with_one_value_reads_the_eq_term() {
-        let value = CellValue::from_u64(9);
-        assert_eq!(
-            in_terms(std::slice::from_ref(&value)).expect("valid In"),
-            BTreeSet::from([term_of(&value)])
-        );
-    }
-
-    #[test]
-    fn malformed_in_is_an_invalid_query() {
+    fn in_terms_follow_the_order_the_values_are_held_in() {
+        // `InValues` holds its values in term key order, one term each.
+        let f64 = |value| NotNan64::new(value).expect("not NaN");
         for values in [
-            vec![CellValue::from_i32(1), CellValue::from_i64(1)],
-            vec![
-                CellValue::from_u32(1),
-                CellValue::from_u32(2),
-                CellValue::from_dec32_unscaled(3),
-            ],
+            InValues::of(I32, [1, -1, 0, i32::MIN, i32::MAX, 1]),
+            InValues::of(U32, [7, 0, u32::MAX]),
+            InValues::of(Str, ["b", "ab", "a", "", "é", "ab"]),
+            InValues::of(I256, [[0xff; 32], [0; 32], [0x7f; 32], [0x80; 32]]),
+            InValues::of(Dec256, [[0xff; 32], [0; 32]]),
+            InValues::of(F64, [f64(1.0), f64(-1.0), f64(f64::INFINITY), f64(-0.0)]),
         ] {
+            let got = in_terms(&values).expect("valid In");
             assert!(
-                matches!(in_terms(&values), Err(QueryError::InvalidQuery { .. })),
+                got.iter()
+                    .eq(&values.as_slice().iter().map(term_of).collect::<Vec<_>>()),
                 "{values:?}"
             );
         }
     }
 
     #[test]
-    fn in_shape_is_checked_before_any_value() {
-        // A bytes value has no term, but the mixed types are reported first.
-        let result = in_terms(&[CellValue::from_str("x"), CellValue::from_bytes(b"x")]);
-        assert!(matches!(result, Err(QueryError::InvalidQuery { .. })));
+    fn in_with_one_value_reads_the_eq_term() {
+        assert_eq!(
+            in_terms(&InValues::of(U64, [9])).expect("valid In"),
+            BTreeSet::from([term_of(&CellValue::from_u64(9))])
+        );
     }
 
     #[test]
@@ -226,7 +211,7 @@ mod tests {
         let plan = |field: &[u8]| {
             Plan::try_from(&Filter::In {
                 field: CellNameRef::raw(field).into(),
-                values: vec![],
+                values: InValues::of(U32, []),
             })
         };
         assert_eq!(plan(b"f").expect("valid In"), Plan::Empty);
@@ -245,17 +230,9 @@ mod tests {
     }
 
     #[test]
-    fn in_values_are_checked_as_eq_values() {
-        let result = in_terms(&[CellValue::from_bytes(b"x"), CellValue::from_bytes(b"y")]);
-        assert!(matches!(
-            result,
-            Err(QueryError::InvalidArgument {
-                source: TermError::UnsupportedType(CellType::Bytes),
-                ..
-            })
-        ));
+    fn an_in_field_is_checked_as_an_eq_field() {
         let field: CellName = CellNameRef::raw(b"1bad").into();
-        let result = terms(&field, &[CellValue::from_u32(1)]);
+        let result = terms(&field, &InValues::of(U32, [1]));
         assert!(matches!(
             result,
             Err(QueryError::InvalidArgument {
@@ -265,44 +242,88 @@ mod tests {
         ));
     }
 
+    /// Admission of a `Range` on `field`.
+    fn range_plan(field: &[u8], bounds: &Bounds) -> Result<Plan> {
+        Plan::try_from(&Filter::Range {
+            field: CellNameRef::raw(field).into(),
+            bounds: bounds.clone(),
+        })
+    }
+
     #[test]
     fn range_resolves_to_a_scan_of_its_run_or_to_empty() {
         let field: CellName = CellNameRef::raw(b"f").into();
-        let (low, high) = (CellValue::from_i64(-5), CellValue::from_i64(5));
-        let plan = |lower: Bound<&CellValue>, upper: Bound<&CellValue>| {
-            let filter = Filter::Range {
-                field: field.clone(),
-                lower: lower.cloned(),
-                upper: upper.cloned(),
-            };
-            Plan::try_from(&filter).expect("valid Range")
-        };
-        for (lower, upper) in [
-            (Bound::Included(&low), Bound::Excluded(&high)),
-            (Bound::Excluded(&low), Bound::Unbounded),
-            (Bound::Unbounded, Bound::Included(&high)),
-            (Bound::Included(&high), Bound::Included(&high)),
+        for bounds in [
+            Bounds::new(I64, Included(-5), Excluded(5)),
+            Bounds::new(I64, Excluded(-5), Unbounded),
+            Bounds::new(I64, Unbounded, Included(5)),
+            Bounds::new(I64, Included(5), Included(5)),
         ] {
             let expected = TermRange::between(
                 field.as_view(),
-                lower.map(CellValue::as_view),
-                upper.map(CellValue::as_view),
+                bounds.cell_type(),
+                bounds.lower().map(CellValue::as_view),
+                bounds.upper().map(CellValue::as_view),
             )
             .expect("valid range")
             .expect("non-empty range");
             assert_eq!(
-                plan(lower, upper),
+                range_plan(b"f", &bounds).expect("valid Range"),
                 Plan::Scan(expected),
-                "{lower:?}..{upper:?}"
+                "{bounds:?}"
             );
         }
-        for (lower, upper) in [
-            (Bound::Included(&high), Bound::Included(&low)),
-            (Bound::Excluded(&high), Bound::Excluded(&low)),
-            (Bound::Included(&high), Bound::Excluded(&high)),
-            (Bound::Excluded(&high), Bound::Excluded(&high)),
+        for bounds in [
+            Bounds::new(I64, Included(5), Included(-5)),
+            Bounds::new(I64, Excluded(5), Excluded(-5)),
+            Bounds::new(I64, Included(5), Excluded(5)),
+            Bounds::new(I64, Excluded(5), Excluded(5)),
         ] {
-            assert_eq!(plan(lower, upper), Plan::Empty, "{lower:?}..{upper:?}");
+            assert_eq!(
+                range_plan(b"f", &bounds).expect("valid Range"),
+                Plan::Empty,
+                "{bounds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_unbounded_sides_scan_the_whole_run() {
+        let bounds = Bounds::new(I64, Unbounded, Unbounded);
+        let expected = TermRange::between(
+            CellNameRef::raw(b"f"),
+            CellType::Int(Width::W8),
+            Unbounded,
+            Unbounded,
+        )
+        .expect("valid range")
+        .expect("non-empty range");
+        assert_eq!(
+            range_plan(b"f", &bounds).expect("valid Range"),
+            Plan::Scan(expected)
+        );
+    }
+
+    #[test]
+    fn a_range_field_is_checked_as_an_eq_field() {
+        let bounded = Bounds::new(I64, Bound::Included(1), Unbounded);
+        let whole_run = Bounds::new(I64, Unbounded, Unbounded);
+        for (field, bounds) in [
+            (&b"1bad"[..], &bounded),
+            (&[0xff], &bounded),
+            (b"1bad", &whole_run),
+            (&[0xff], &whole_run),
+        ] {
+            assert!(
+                matches!(
+                    range_plan(field, bounds),
+                    Err(QueryError::InvalidArgument {
+                        source: TermError::InvalidName,
+                        ..
+                    })
+                ),
+                "{field:?}"
+            );
         }
     }
 
@@ -314,5 +335,43 @@ mod tests {
             result,
             Err(QueryError::InvalidArgument { field: got, .. }) if got == field
         ));
+    }
+
+    /// Admission of `field` starting with `prefix`. Raw, so tests can also
+    /// pass names the grammar rejects.
+    fn prefix(field: &[u8], prefix: &str) -> Result<Plan> {
+        Plan::try_from(&Filter::Prefix {
+            field: CellNameRef::raw(field).into(),
+            prefix: prefix.to_owned(),
+        })
+    }
+
+    #[test]
+    fn a_prefix_resolves_to_a_scan_of_the_strings_starting_with_it() {
+        for value in ["", "ab", "é"] {
+            let expected =
+                TermRange::with_prefix(CellNameRef::raw(b"f"), value).expect("valid prefix");
+            assert_eq!(
+                prefix(b"f", value).expect("valid Prefix"),
+                Plan::Scan(expected),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prefix_field_is_checked_like_any_leaf_field() {
+        for field in [&b"1bad"[..], &[0xff]] {
+            assert!(
+                matches!(
+                    prefix(field, "a"),
+                    Err(QueryError::InvalidArgument {
+                        source: TermError::InvalidName,
+                        ..
+                    })
+                ),
+                "{field:?}"
+            );
+        }
     }
 }

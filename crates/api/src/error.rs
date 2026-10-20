@@ -3,7 +3,7 @@ use std::error::Error;
 use golemdb_branch::BranchError;
 use golemdb_cells::{CellNameError, CellValueParseError};
 use golemdb_immutable_data::{ImmutableDataError, ImmutableDataStorageError};
-use golemdb_query::QueryError;
+use golemdb_query::{QueryError, ValuesError};
 use golemdb_record::RecordError;
 
 use crate::CommitId;
@@ -83,6 +83,14 @@ impl From<CellNameError> for ApiError {
 impl From<CellValueParseError> for ApiError {
     fn from(error: CellValueParseError) -> Self {
         Self::invalid_input("invalid cell value", error)
+    }
+}
+
+/// The runtime constructors of the query operands (`EqValue::try_from`,
+/// `InValues::try_from`, `Bounds::try_new`) check caller input.
+impl From<ValuesError> for ApiError {
+    fn from(error: ValuesError) -> Self {
+        Self::invalid_input("invalid filter values", error)
     }
 }
 
@@ -211,4 +219,29 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
             error.source()
         };
     wrapped.is_some_and(store_full)
+}
+
+#[cfg(test)]
+mod tests {
+    use golemdb_cells::{CellType, CellValue, Width};
+    use golemdb_query::InValues;
+
+    use super::*;
+
+    #[test]
+    fn filter_value_errors_are_invalid_arguments() {
+        fn in_values(values: Vec<CellValue>) -> crate::Result<InValues> {
+            Ok(InValues::try_from(values)?)
+        }
+        let error =
+            in_values(vec![CellValue::from_u32(1), CellValue::from_u64(1)]).expect_err("two types");
+        assert!(matches!(&error, ApiError::InvalidArgument { .. }));
+        assert_eq!(
+            error.source().unwrap().downcast_ref::<ValuesError>(),
+            Some(&ValuesError::MixedTypes {
+                expected: CellType::Uint(Width::W4),
+                found: CellType::Uint(Width::W8),
+            })
+        );
+    }
 }
