@@ -2,7 +2,7 @@
 //! checked against its head, and records materialized from it.
 
 use golemdb_branch::{CommitId, read_head};
-use golemdb_cells::{CellKey, CellName, CellReader, reserved};
+use golemdb_cells::{CellKey, CellName, CellReader, CellValue, reserved, system};
 use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{Record, RecordCells, RecordError, RecordKey, Result, state};
@@ -43,6 +43,36 @@ pub fn read_committed_by_id<R: ReadTransaction>(
     let key = state::identity_key(&identity).ok_or(RecordError::CorruptState("invalid #key"))?;
     let cells = read_cells(cell_reader, id, projection)?;
     Ok(Record { key, cells })
+}
+
+/// Every committed key binding, `(key, record ID)`, in ascending key order:
+/// the bindings are the cells of one reserved record, named by the key, and a
+/// record's cells are stored in name order. Reserved records' own bindings are
+/// included; the binding record's own `#key` is not a binding.
+pub fn committed_bindings<'tx, R: ReadTransaction>(
+    cell_reader: &CellReader<'tx, R>,
+) -> Result<impl Iterator<Item = Result<(RecordKey, u64)>> + 'tx> {
+    let scan = cell_reader.scan_record(system::RECORD_KEYS.id)?;
+    Ok(scan.filter_map(|row| {
+        let (address, value) = match row {
+            Ok((address, _)) if address.name() == reserved::KEY => return None,
+            Ok(row) => row,
+            Err(error) => return Some(Err(error.into())),
+        };
+        Some(binding(address, value))
+    }))
+}
+
+fn binding(address: CellKey, value: CellValue) -> Result<(RecordKey, u64)> {
+    let key = address
+        .name()
+        .as_bytes()
+        .try_into()
+        .map(RecordKey)
+        .map_err(|_| RecordError::CorruptState("invalid record binding"))?;
+    let id = state::record_id(key, Some(value))?
+        .ok_or(RecordError::CorruptState("invalid record binding"))?;
+    Ok((key, id))
 }
 
 /// The committed record bound to `key`, after checking the binding against

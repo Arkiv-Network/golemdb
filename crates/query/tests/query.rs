@@ -190,6 +190,48 @@ fn count_is_the_size_of_the_match_set() {
 }
 
 #[test]
+fn query_keys_are_the_matching_keys_ascending() {
+    let test = TestDb::default();
+    test.create([
+        record(key(9), &[("color", blue())]),
+        record(key(2), &[("color", CellValue::from_str("red"))]),
+        record(key(1), &[("color", blue())]),
+        record(key(5), &[("color", blue())]),
+    ]);
+    let keys = |filter| test.db.query_keys(None, CountOp::filter(filter)).unwrap();
+    assert_eq!(keys(eq("color", blue())), [key(1), key(5), key(9)]);
+    assert_eq!(keys(eq("color", CellValue::from_str("green"))), []);
+}
+
+/// Past the one-by-one limit the keys come off the bindings, which hold
+/// reserved records' keys too: only the matches' are returned.
+#[test]
+fn query_keys_of_a_large_match_set_come_off_the_bindings() {
+    let test = TestDb::default();
+    let n = (1 << 16) + (1 << 13);
+    // Keys created out of key order, every tenth one red.
+    let color = |i: u64| if i.is_multiple_of(10) { "red" } else { "blue" };
+    let scrambled = |i: u64| i.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    test.create((0..n).map(|i| {
+        record(
+            key(scrambled(i)),
+            &[("color", CellValue::from_str(color(i)))],
+        )
+    }));
+    let mut blue_keys: Vec<_> = (0..n)
+        .filter(|&i| color(i) == "blue")
+        .map(|i| key(scrambled(i)))
+        .collect();
+    blue_keys.sort_unstable();
+    let keys = test
+        .db
+        .query_keys(None, CountOp::filter(eq("color", blue())))
+        .unwrap();
+    assert!(keys.len() as u64 > 1 << 16);
+    assert_eq!(keys, blue_keys);
+}
+
+#[test]
 fn a_non_head_commit_is_checked_after_admission() {
     let test = colors();
     let head = test.db.head().unwrap();

@@ -102,6 +102,11 @@ pub trait Api {
     /// the same commit rules as `query`.
     fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Result<u64>;
 
+    /// The keys of the committed records `count` counts, in ascending key
+    /// order, under the same commit rules. No record is materialized.
+    fn query_keys(&self, commit_id: Option<CommitId>, operation: CountOp)
+    -> Result<Vec<RecordKey>>;
+
     // Branch lifecycle. IDs are valid only for their issuing engine.
     fn head(&self) -> Result<CommitId>;
     fn begin(&self) -> Result<BranchId>;

@@ -56,7 +56,7 @@ mod error;
 mod state;
 mod types;
 
-pub use committed::{committed_snapshot, read_committed_by_id};
+pub use committed::{committed_bindings, committed_snapshot, read_committed_by_id};
 pub use crud::Records;
 pub use error::{RecordError, Result};
 pub use types::{CellPatch, ReadTarget, Record, RecordCells, RecordKey, RecordPatch};
