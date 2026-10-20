@@ -2,7 +2,7 @@
 
 use golemdb_cells::CellValue;
 
-use super::values::{ValuesError, into_field, of_indexable_type};
+use super::values::{ValuesError, into_field, of_same_indexable_type};
 use golemdb_cells::marker::Indexable;
 
 /// The values of an [`In`](super::Filter::In): distinct values of one
@@ -88,7 +88,7 @@ impl TryFrom<Vec<CellValue>> for InValues {
     /// type indexable. No value is valid.
     fn try_from(values: Vec<CellValue>) -> Result<Self, Self::Error> {
         if let [first, ..] = values.as_slice() {
-            of_indexable_type(first.cell_type(), &values)?;
+            of_same_indexable_type(first.cell_type(), &values)?;
         }
         Ok(Self::canonical(
             values.into_iter().map(into_field).collect(),

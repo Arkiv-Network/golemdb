@@ -19,7 +19,7 @@ pub enum ValuesError {
 
 /// `Ok` when every value is of type `expected`, and `expected` is
 /// indexable. Another type is reported before `bytes`.
-pub(super) fn of_indexable_type<'a>(
+pub(super) fn of_same_indexable_type<'a>(
     expected: CellType,
     values: impl IntoIterator<Item = &'a CellValue>,
 ) -> Result<(), ValuesError> {

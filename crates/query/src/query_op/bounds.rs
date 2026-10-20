@@ -4,7 +4,7 @@ use std::ops::Bound;
 
 use golemdb_cells::{CellType, CellValue, marker::Indexable};
 
-use super::values::{ValuesError, into_field, of_indexable_type};
+use super::values::{ValuesError, into_field, of_same_indexable_type};
 
 /// The bounds of a [`Range`](super::Filter::Range): an indexable cell type,
 /// and both bounds of that type, as fields. The fields are private, as
@@ -63,7 +63,7 @@ pub struct Bounds {
 impl Bounds {
     /// Bounds of the cell type the marker names: one marker for both sides.
     pub fn new<'a, T: Indexable>(
-        _: T,
+        _type: T,
         lower: Bound<T::Value<'a>>,
         upper: Bound<T::Value<'a>>,
     ) -> Self {
@@ -86,7 +86,7 @@ impl Bounds {
         lower: Bound<CellValue>,
         upper: Bound<CellValue>,
     ) -> Result<Self, ValuesError> {
-        of_indexable_type(ty, [&lower, &upper].into_iter().filter_map(bound_value))?;
+        of_same_indexable_type(ty, [&lower, &upper].into_iter().filter_map(bound_value))?;
         Ok(Self {
             ty,
             lower: lower.map(into_field),

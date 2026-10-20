@@ -2,7 +2,7 @@
 
 use golemdb_cells::{CellType, CellValue, marker::Indexable};
 
-use super::values::{ValuesError, into_field, of_indexable_type};
+use super::values::{ValuesError, into_field, of_same_indexable_type};
 
 /// The value of an [`Eq`](super::Filter::Eq): one value of an indexable cell
 /// type, as a field. The field is private, as [`InValues`](super::InValues)'
@@ -65,7 +65,7 @@ impl TryFrom<CellValue> for EqValue {
 
     /// The runtime path: a value of an indexable type.
     fn try_from(value: CellValue) -> Result<Self, Self::Error> {
-        of_indexable_type(value.cell_type(), [&value])?;
+        of_same_indexable_type(value.cell_type(), [&value])?;
         Ok(Self {
             value: into_field(value),
         })
