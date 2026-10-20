@@ -623,6 +623,18 @@ name = "golemdb-metering"
 version = "0.1.0"
 
 [[package]]
+name = "golemdb-pruning"
+version = "0.1.0"
+dependencies = [
+ "golemdb-cells",
+ "golemdb-index",
+ "golemdb-storage",
+ "golemdb-storage-mdbx",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "golemdb-query"
 version = "0.1.0"
 dependencies = [
