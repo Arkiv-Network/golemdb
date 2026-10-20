@@ -9,16 +9,18 @@ pub type Result<T> = std::result::Result<T, QueryError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
-    /// A leaf names no valid index term: a bad field name, or a value the
-    /// index cannot hold (variable-length `bytes`). Raised at admission,
-    /// before any state read.
+    /// A leaf names no valid index term: a bad field name. A leaf's values
+    /// are of an indexable type by construction. Raised at admission, before
+    /// any state read.
     #[error("invalid argument: field `{field}`: {source}")]
     InvalidArgument {
         field: CellName,
         #[source]
         source: TermError,
     },
-    /// The request cannot be run as written, e.g. it targets a branch.
+    /// The request cannot be run as written. Reserved for the request
+    /// shapes the query proposal rejects (a malformed `And` / `Or`, a cursor
+    /// that does not match its query); no built leaf raises it yet.
     #[error("invalid query: {reason}")]
     InvalidQuery { reason: &'static str },
     /// A part of the query API that is specified but not built yet.
@@ -27,7 +29,8 @@ pub enum QueryError {
     /// Only the head of the read snapshot can be queried for now.
     #[error("commit {requested} unavailable: only current head {head} is supported")]
     CommitUnavailable { requested: CommitId, head: CommitId },
-    /// Reading committed state failed, or found it inconsistent.
+    /// Reading committed state failed, or found it inconsistent; or an
+    /// operand's invariant was broken, a bug rather than the caller's error.
     #[error("internal error")]
     Internal(#[source] Box<dyn Error + Send + Sync>),
 }

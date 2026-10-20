@@ -434,7 +434,13 @@ the future behavior, including pruning and rewind of key bindings.
 
 All four iterations are implemented: typed cells, the facade contract and builders,
 atomic opening/genesis, and a cloneable `Database` with shared branch state.
-Queries support `Eq`, `In` and `Range` filters with full or projected records, and `count`.
+Queries support `Eq`, `In`, `Range` and `Prefix` filters with full or projected records, and `count`.
+A `Prefix` matches `str` values only. `Eq` values, `In` values and `Range` bounds are of one
+indexable type by construction: `EqValue::of(marker::Str, "blue")`,
+`InValues::of(marker::U32, [1, 2])` and `Bounds::new(marker::Str, ..)` take a cell-type marker,
+so mixed types or `bytes` do not compile; `EqValue::try_from`, `InValues::try_from` and
+`Bounds::try_new(ty, ..)` check `CellValue`s at run time (`ValuesError`, which converts into
+`ApiError::InvalidArgument`). A `Range` with two unbounded sides matches every cell of its type.
 Queries read committed state only: `None` reads the head, and an explicit commit
 other than the head returns `ApiError::CommitUnavailable`. Sort, limit and offset
 return `ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost

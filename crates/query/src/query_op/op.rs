@@ -101,9 +101,10 @@ impl CountOp {
 
 #[cfg(test)]
 mod tests {
-    use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
+    use golemdb_cells::{CellNameRef, CellType, Width, marker::Str};
 
     use super::*;
+    use crate::EqValue;
 
     fn name(bytes: &[u8]) -> CellName {
         CellNameRef::raw(bytes).into()
@@ -112,7 +113,7 @@ mod tests {
     fn color_is_blue() -> Filter {
         Filter::Eq {
             field: name(b"color"),
-            value: CellValue::from_str("blue"),
+            value: EqValue::of(Str, "blue"),
         }
     }
 

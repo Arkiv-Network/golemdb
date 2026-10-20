@@ -32,11 +32,11 @@ mod tests {
         ops::{Bound, RangeBounds},
     };
 
-    use golemdb_cells::{CellKind, CellName, CellNameRef, CellType, CellValue};
+    use golemdb_cells::{CellKind, CellName, CellNameRef, CellValue, marker::I32};
     use golemdb_index::{BitmapContainer, IndexError, IndexTerm, TermError, TermRange, path};
 
     use super::*;
-    use crate::{Filter, QueryError};
+    use crate::{Bounds, EqValue, Filter, InValues, QueryError};
 
     /// Posting lists in a `BTreeMap`: byte-ordered like the `Index` table.
     #[derive(Default)]
@@ -179,25 +179,43 @@ mod tests {
         CellNameRef::raw(field).into()
     }
 
+    /// Through the runtime path: the value must be of an indexable type.
     fn eq(field: &str, value: CellValue) -> Filter {
         Filter::Eq {
             field: name(field.as_bytes()),
-            value,
+            value: EqValue::try_from(value).expect("a value of an indexable type"),
         }
     }
 
+    /// Through the runtime path: the values must be of one indexable type.
     fn is_in(field: &str, values: impl IntoIterator<Item = CellValue>) -> Filter {
         Filter::In {
             field: name(field.as_bytes()),
-            values: values.into_iter().collect(),
+            values: InValues::try_from(values.into_iter().collect::<Vec<_>>())
+                .expect("values of one indexable type"),
         }
     }
 
+    /// A range of the bounds' type, through the runtime path: at least one
+    /// side holds a value, and both are of one indexable type.
     fn range(field: &str, lower: Bound<CellValue>, upper: Bound<CellValue>) -> Filter {
+        let ty = [&lower, &upper]
+            .into_iter()
+            .find_map(|bound| match bound {
+                Bound::Included(value) | Bound::Excluded(value) => Some(value.cell_type()),
+                Bound::Unbounded => None,
+            })
+            .expect("a bounded side names the type");
         Filter::Range {
             field: name(field.as_bytes()),
-            lower,
-            upper,
+            bounds: Bounds::try_new(ty, lower, upper).expect("bounds of an indexable type"),
+        }
+    }
+
+    fn prefix(field: &str, prefix: &str) -> Filter {
+        Filter::Prefix {
+            field: name(field.as_bytes()),
+            prefix: prefix.to_owned(),
         }
     }
 
@@ -267,12 +285,14 @@ mod tests {
 
     #[test]
     fn the_value_kind_plays_no_part() {
+        // `EqValue` keeps its value as a field, so an attribute and a field
+        // of one value are one leaf, matching the attribute cells indexed.
         let source = FakeSource::default().with("a", CellValue::from_u64(7), [1]);
         let attribute = CellValue::from_u64(7)
             .with_kind(CellKind::Attribute)
             .expect("indexable type");
+        assert_eq!(eq("a", attribute), eq("a", CellValue::from_u64(7)));
         assert_eq!(ids(&source, eq("a", CellValue::from_u64(7))), [1]);
-        assert_eq!(ids(&source, eq("a", attribute)), [1]);
     }
 
     #[test]
@@ -429,25 +449,73 @@ mod tests {
     }
 
     #[test]
-    fn malformed_range_is_rejected_before_reading() {
-        use Bound::{Excluded, Included, Unbounded};
-        let u = CellValue::from_u32;
-        for filter in [
-            range("a", Unbounded, Unbounded),
-            range("a", Included(u(1)), Included(CellValue::from_u64(2))),
-            range("a", Included(u(2)), Included(CellValue::from_u64(1))),
-            // The shape is checked before the field and the type.
-            range("1bad", Unbounded, Unbounded),
-            range("1bad", Included(u(1)), Excluded(str("x"))),
+    fn prefix_matches_the_union_of_the_strings_starting_with_it() {
+        let source = FakeSource::default()
+            .with("s", str(""), [1])
+            .with("s", str("a"), [2, 40])
+            .with("s", str("ab"), [3])
+            .with("s", str("abc"), [4, 40])
+            .with("s", str("b"), [5])
+            .with("s", str("é"), [6])
+            .with("s", CellValue::from_bytes4(*b"abcd"), [7])
+            .with("sa", str("a"), [8]);
+        for (filter, expected) in [
+            (prefix("s", ""), &[1, 2, 3, 4, 5, 6, 40][..]),
+            (prefix("s", "a"), &[2, 3, 4, 40]),
+            (prefix("s", "ab"), &[3, 4, 40]),
+            (prefix("s", "abc"), &[4, 40]),
+            (prefix("s", "abcd"), &[]),
+            (prefix("s", "e"), &[]),
+            (prefix("s", "é"), &[6]),
         ] {
-            assert!(
-                matches!(
-                    evaluate(&FailingSource, &filter),
-                    Err(QueryError::InvalidQuery { .. })
-                ),
-                "{filter:?}"
-            );
+            assert_eq!(ids(&source, filter.clone()), expected, "{filter:?}");
         }
+    }
+
+    #[test]
+    fn prefix_reads_only_its_strings_in_key_order() {
+        let inner = FakeSource::default()
+            .with("s", str("a"), [1])
+            .with("s", str("ab"), [2])
+            .with("s", str("a\u{10FFFF}"), [3])
+            .with("s", str("aa"), [4])
+            .with("s", str(""), [5])
+            .with("s", str("b"), [6])
+            .with("s", CellValue::from_bytes4(*b"abcd"), [7])
+            .with("sa", str("a"), [8]);
+        let source = RecordingSource {
+            inner,
+            reads: RefCell::default(),
+        };
+        let matches = evaluate(&source, &prefix("s", "a")).expect("filter evaluates");
+        assert_eq!(matches.treemap().iter().collect::<Vec<_>>(), [1, 2, 3, 4]);
+        let term = |value| IndexTerm::from_str_name("s", str(value).as_view()).expect("term");
+        assert_eq!(
+            *source.reads.borrow(),
+            [term("a"), term("aa"), term("ab"), term("a\u{10FFFF}")]
+        );
+    }
+
+    #[test]
+    fn two_unbounded_sides_read_the_whole_run() {
+        let inner = FakeSource::default()
+            .with("n", CellValue::from_i32(1), [1])
+            .with("n", CellValue::from_i32(i32::MIN), [2])
+            .with("n", CellValue::from_u32(0), [3])
+            .with("nn", CellValue::from_i32(0), [4]);
+        let source = RecordingSource {
+            inner,
+            reads: RefCell::default(),
+        };
+        let filter = Filter::Range {
+            field: name(b"n"),
+            bounds: Bounds::new(I32, Bound::Unbounded, Bound::Unbounded),
+        };
+        let matches = evaluate(&source, &filter).expect("filter evaluates");
+        assert_eq!(matches.treemap().iter().collect::<Vec<_>>(), [1, 2]);
+        let term =
+            |n| IndexTerm::from_str_name("n", CellValue::from_i32(n).as_view()).expect("term");
+        assert_eq!(*source.reads.borrow(), [term(i32::MIN), term(1)]);
     }
 
     #[test]
@@ -468,27 +536,15 @@ mod tests {
     }
 
     #[test]
-    fn malformed_in_is_rejected_before_reading() {
-        for filter in [
-            is_in("a", [CellValue::from_i32(1), CellValue::from_u32(1)]),
-            is_in("a", [str("x"), CellValue::from_bytes(b"x")]),
-        ] {
-            assert!(
-                matches!(
-                    evaluate(&FailingSource, &filter),
-                    Err(QueryError::InvalidQuery { .. })
-                ),
-                "{filter:?}"
-            );
-        }
-    }
-
-    #[test]
     fn invalid_arguments_are_rejected_before_reading() {
         // FailingSource would surface as QueryError::Internal if it were consulted.
         let not_utf8 = Filter::Eq {
             field: name(&[0xff]),
-            value: CellValue::from_i32(1),
+            value: EqValue::of(I32, 1),
+        };
+        let whole_run = Filter::Range {
+            field: name(b"1bad"),
+            bounds: Bounds::new(I32, Bound::Unbounded, Bound::Unbounded),
         };
         for (filter, field, expected) in [
             (
@@ -498,19 +554,9 @@ mod tests {
             ),
             (not_utf8, name(&[0xff]), TermError::InvalidName),
             (
-                eq("b", CellValue::from_bytes(b"x")),
-                name(b"b"),
-                TermError::UnsupportedType(CellType::Bytes),
-            ),
-            (
                 is_in("1bad", [CellValue::from_i32(1)]),
                 name(b"1bad"),
                 TermError::InvalidName,
-            ),
-            (
-                is_in("b", [CellValue::from_bytes(b"x")]),
-                name(b"b"),
-                TermError::UnsupportedType(CellType::Bytes),
             ),
             // With no value, the name is still checked.
             (is_in("1bad", []), name(b"1bad"), TermError::InvalidName),
@@ -519,16 +565,7 @@ mod tests {
                 name(b"1bad"),
                 TermError::InvalidName,
             ),
-            (
-                range(
-                    "b",
-                    Bound::Excluded(CellValue::from_bytes(b"x")),
-                    Bound::Unbounded,
-                ),
-                name(b"b"),
-                TermError::UnsupportedType(CellType::Bytes),
-            ),
-            // Emptiness is checked on the terms, after the field and the type.
+            // Emptiness is checked on the terms, after the field.
             (
                 range(
                     "1bad",
@@ -538,15 +575,9 @@ mod tests {
                 name(b"1bad"),
                 TermError::InvalidName,
             ),
-            (
-                range(
-                    "b",
-                    Bound::Included(CellValue::from_bytes(b"y")),
-                    Bound::Included(CellValue::from_bytes(b"x")),
-                ),
-                name(b"b"),
-                TermError::UnsupportedType(CellType::Bytes),
-            ),
+            // Two unbounded sides have no value, but the name is still checked.
+            (whole_run, name(b"1bad"), TermError::InvalidName),
+            (prefix("1bad", "a"), name(b"1bad"), TermError::InvalidName),
         ] {
             match evaluate(&FailingSource, &filter) {
                 Err(QueryError::InvalidArgument { field: got, source }) => {
@@ -568,6 +599,7 @@ mod tests {
                 Bound::Included(CellValue::from_i32(1)),
                 Bound::Unbounded,
             ),
+            prefix("a", ""),
         ] {
             let result = evaluate(&FailingSource, &filter);
             assert!(is_injected_failure(&result), "{filter:?}: {result:?}");

@@ -5,8 +5,8 @@
 #![allow(dead_code)] // Each test crate uses a different subset.
 
 use golemdb_api::{
-    Api, ApiError, CellLimits, CountOp, Database, Filter, Genesis, HashAlgorithm, QueryOp,
-    RecordKey, RecordOp, op,
+    Api, ApiError, Bounds, CellLimits, CountOp, Database, EqValue, Filter, Genesis, HashAlgorithm,
+    InValues, QueryOp, RecordKey, RecordOp, op,
 };
 use std::{cmp::Ordering, ops::Bound};
 
@@ -67,11 +67,12 @@ pub fn record(key: RecordKey, attributes: &[(&str, CellValue)]) -> RecordOp<op::
         })
 }
 
-/// Raw, so tests can also build names the grammar rejects.
+/// Raw, so tests can also build names the grammar rejects. Through the
+/// runtime path: the value must be of an indexable type.
 pub fn eq(field: &str, value: CellValue) -> Filter {
     Filter::Eq {
         field: CellNameRef::raw(field.as_bytes()).into(),
-        value,
+        value: EqValue::try_from(value).expect("a value of an indexable type"),
     }
 }
 
@@ -83,20 +84,48 @@ fn f64_value(value: f64) -> CellValue {
     CellValue::from_f64(value).expect("not NaN")
 }
 
-/// Raw, so tests can also build names the grammar rejects.
+/// Raw, so tests can also build names the grammar rejects. Through the
+/// runtime path: the values must be of one indexable type.
 pub fn is_in(field: &str, values: impl IntoIterator<Item = CellValue>) -> Filter {
     Filter::In {
         field: CellNameRef::raw(field.as_bytes()).into(),
-        values: values.into_iter().collect(),
+        values: InValues::try_from(values.into_iter().collect::<Vec<_>>())
+            .expect("values of one indexable type"),
+    }
+}
+
+/// A range of the bounds' type: at least one side must hold a value. See
+/// [`range_of`] for two unbounded sides.
+pub fn range(field: &str, lower: Bound<CellValue>, upper: Bound<CellValue>) -> Filter {
+    let ty = [&lower, &upper]
+        .into_iter()
+        .find_map(|bound| match bound {
+            Bound::Included(value) | Bound::Excluded(value) => Some(value.cell_type()),
+            Bound::Unbounded => None,
+        })
+        .expect("a bounded side names the type; use `range_of` otherwise");
+    range_of(field, ty, lower, upper)
+}
+
+/// Raw, so tests can also build names the grammar rejects. Through the
+/// runtime path: the bounds must be of type `ty`, an indexable one.
+pub fn range_of(
+    field: &str,
+    ty: CellType,
+    lower: Bound<CellValue>,
+    upper: Bound<CellValue>,
+) -> Filter {
+    Filter::Range {
+        field: CellNameRef::raw(field.as_bytes()).into(),
+        bounds: Bounds::try_new(ty, lower, upper).expect("bounds of an indexable type"),
     }
 }
 
 /// Raw, so tests can also build names the grammar rejects.
-pub fn range(field: &str, lower: Bound<CellValue>, upper: Bound<CellValue>) -> Filter {
-    Filter::Range {
+pub fn prefix(field: &str, prefix: &str) -> Filter {
+    Filter::Prefix {
         field: CellNameRef::raw(field.as_bytes()).into(),
-        lower,
-        upper,
+        prefix: prefix.to_owned(),
     }
 }
 
@@ -210,10 +239,18 @@ pub fn small_values_of_one_type(
     })
 }
 
-/// A lower and an upper bound, each unbounded, included or excluded, over
-/// one random type, from [`small_value`]'s domain: often equal or inverted.
-pub fn small_bounds_of_one_type() -> impl Strategy<Value = (Bound<CellValue>, Bound<CellValue>)> {
-    (0..TYPES).prop_flat_map(|ty| (small_bound(ty), small_bound(ty)))
+/// A random type, and a lower and an upper bound of it, each unbounded,
+/// included or excluded, from [`small_value`]'s domain: often equal,
+/// inverted, or both unbounded.
+pub fn small_bounds_of_one_type()
+-> impl Strategy<Value = (CellType, Bound<CellValue>, Bound<CellValue>)> {
+    (0..TYPES).prop_flat_map(|ty| {
+        (
+            Just(typed_value(ty, 0).cell_type()),
+            small_bound(ty),
+            small_bound(ty),
+        )
+    })
 }
 
 fn small_bound(ty: u8) -> impl Strategy<Value = Bound<CellValue>> {
