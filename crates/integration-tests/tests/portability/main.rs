@@ -26,8 +26,8 @@ use std::{
 };
 
 use golemdb_api::{
-    Api, ApiError, CellLimits, CellValue, Database, Genesis, HashAlgorithm, ImmutableDataConfig,
-    OpenConfig, OpenMode, ReadTarget, RecordKey, RecordOp,
+    Api, ApiError, CellLimits, CellValue, Database, Genesis, HashAlgorithm, OpenConfig, OpenMode,
+    ReadTarget, RecordKey, RecordOp,
 };
 use golemdb_storage::Store;
 use golemdb_storage_mdbx::MdbxStore;
@@ -85,7 +85,7 @@ fn config(hash: HashAlgorithm, mode: OpenMode) -> OpenConfig {
             max_str_len: MAX_STR_LEN as u32,
             max_bytes_len: MAX_BYTES_LEN as u32,
         },
-        ImmutableDataConfig::new(500_000, vec![]),
+        None,
     ))
     .with_mode(mode)
 }

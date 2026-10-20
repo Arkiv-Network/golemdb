@@ -7,10 +7,32 @@ fn yaml(section: &str) -> String {
 }
 
 #[test]
-fn yaml_requires_explicit_configuration_and_rejects_unknown_or_duplicate_fields() {
-    assert!(Genesis::from_yaml(PREFIX).is_err());
+fn omitted_and_null_immutable_data_match_explicit_none() {
+    let expected = Genesis::new(
+        HashAlgorithm::Keccak256,
+        CellLimits {
+            max_cell_name_len: 32,
+            max_str_len: 64,
+            max_bytes_len: 128,
+        },
+        None,
+    );
+    for yaml in [PREFIX.to_owned(), format!("{PREFIX}immutable_data: null\n")] {
+        assert_eq!(Genesis::from_yaml(&yaml).unwrap(), expected);
+    }
+    assert!(matches!(
+        Genesis::from_yaml(&format!(
+            "{PREFIX}immutable_data: null\nimmutable_data: null\n"
+        )),
+        Err(OpenError::Yaml(_))
+    ));
+}
+
+#[test]
+fn yaml_requires_complete_enabled_configuration_and_rejects_unknown_or_duplicate_fields() {
     for section in [
         "  segments: []",
+        "  shard_span: 1\n  segments: []",
         "  shard_span: 1",
         "  shard_span: 1\n  segments: []\n  unexpected: true",
         "  shard_span: 1\n  shard_span: 2\n  segments: []",
@@ -80,11 +102,9 @@ fn yaml_resolves_every_cell_type_and_default_bytes() {
         let config = Genesis::from_yaml(&yaml(&format!(
             "  shard_span: 18446744073709551615\n  segments: [{{name: events, compression: zstd, columns: [{{name: value, type: {name}}}]}}]"
         ))).unwrap();
-        assert_eq!(
-            &config.immutable_data.segments[0].columns[0].value_type,
-            expected
-        );
-        assert_eq!(config.immutable_data.shard_span, u64::MAX);
+        let immutable_data = config.immutable_data.unwrap();
+        assert_eq!(&immutable_data.segments[0].columns[0].value_type, expected);
+        assert_eq!(immutable_data.shard_span, u64::MAX);
     }
     assert_eq!(names.len(), expected.len());
     let implicit = yaml(

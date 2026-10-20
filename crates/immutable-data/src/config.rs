@@ -53,8 +53,8 @@ impl ImmutableDataSegment {
     }
 }
 
-/// Required genesis configuration. Empty deployments explicitly declare an empty
-/// segment list and a positive shard span; there is no implicit retention policy.
+/// Schema and file settings for immutable storage. The API's genesis configuration
+/// wraps this in Option; None disables the feature without a placeholder shard span.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImmutableDataConfig {

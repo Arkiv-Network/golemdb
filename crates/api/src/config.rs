@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use golemdb_cells::CellLimits;
 use golemdb_immutable_data::ImmutableDataConfig;
@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::{OpenError, OpenResult};
 
 /// Immutable startup values written at commit zero and validated on reopening.
-/// YAML fields are required except a column's type (defaults to bytes).
+/// Omitted or null `immutable_data` disables immutable storage. Other YAML fields
+/// are required except a column's type (defaults to bytes).
 /// No admission limit, shard span, compression or hash algorithm is silently
 /// selected by the opener. Unknown fields are rejected so unsupported settings
 /// cannot be silently ignored.
@@ -18,14 +19,16 @@ use crate::{OpenError, OpenResult};
 pub struct Genesis {
     pub hash_function: HashAlgorithm,
     pub cell_limits: CellLimits,
-    pub immutable_data: ImmutableDataConfig,
+    /// None disables immutable storage. Some requires at least one segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub immutable_data: Option<ImmutableDataConfig>,
 }
 
 impl Genesis {
     pub const fn new(
         hash_function: HashAlgorithm,
         cell_limits: CellLimits,
-        immutable_data: ImmutableDataConfig,
+        immutable_data: Option<ImmutableDataConfig>,
     ) -> Self {
         Self {
             hash_function,
@@ -76,9 +79,18 @@ impl Genesis {
     }
 
     fn validate_immutable_data(&self) -> OpenResult<()> {
-        self.immutable_data
-            .validate()
-            .map_err(|error| OpenError::InvalidConfig(error.to_string()))
+        if let Some(config) = &self.immutable_data {
+            config
+                .validate()
+                .map_err(|error| OpenError::InvalidConfig(error.to_string()))?;
+            if config.segments.is_empty() {
+                return Err(OpenError::InvalidConfig(
+                    "immutable_data needs at least one segment; use None or omit it to disable"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -98,6 +110,10 @@ pub enum OpenMode {
 pub struct OpenConfig {
     pub genesis: Genesis,
     pub mode: OpenMode,
+    /// Local immutable-file directory; does not affect genesis identity.
+    /// `Database::open` defaults to `<database>/immutable-data`. `from_store`
+    /// requires an explicit directory when genesis declares immutable segments.
+    pub immutable_data_directory: Option<PathBuf>,
 }
 
 impl OpenConfig {
@@ -105,11 +121,17 @@ impl OpenConfig {
         Self {
             genesis,
             mode: OpenMode::CreateIfMissing,
+            immutable_data_directory: None,
         }
     }
 
     pub const fn with_mode(mut self, mode: OpenMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    pub fn with_immutable_data_directory(mut self, directory: impl AsRef<Path>) -> Self {
+        self.immutable_data_directory = Some(directory.as_ref().to_path_buf());
         self
     }
 }
