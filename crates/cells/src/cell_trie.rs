@@ -32,22 +32,32 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         }
     }
 
-    /// Verify that the leaf at `H(key)` commits to the value read from the `Cell` table.
-    /// `None` requires absence from the trie. A different or missing commitment
+    /// Verify that each leaf at `H(key)` commits to the value read from the
+    /// `Cell` table; `None` requires absence. A different or missing commitment
     /// returns `RootMismatch`; storage and branch-validation errors propagate.
-    /// This checks one address, not the entire state, and also applies to no-ops.
-    pub(crate) fn check(
+    /// This checks these addresses, not the entire state, and also applies to
+    /// no-ops. One ascending walk loads and verifies each branch once, rather
+    /// than once per key: `checks` holds `(H(key), value read)`, ascending by
+    /// path.
+    pub(crate) fn check_sorted(
         &self,
         tx: &impl ReadTransaction,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
-        key: &[u8],
-        before: Option<&CellValue>,
+        checks: &[(Hash, Option<&CellValue>)],
     ) -> Result<()> {
-        let path = self.hasher.hash(key);
-        if self.trie.get(tx, root, &path)? != before.map(|value| self.leaf(path, value)) {
-            return Err(CellError::RootMismatch);
+        let paths: Vec<_> = checks.iter().map(|(path, _)| *path).collect();
+        let found = self.trie.get_sorted(tx, root, &paths)?;
+        for ((path, before), found) in checks.iter().zip(found) {
+            if found != before.map(|value| self.leaf(*path, value)) {
+                return Err(CellError::RootMismatch);
+            }
         }
         Ok(())
+    }
+
+    /// The trie path of an encoded cell key.
+    pub(crate) fn path(&self, key: &[u8]) -> Hash {
+        self.hasher.hash(key)
     }
 
     /// For each key, insert or replace the leaf at `H(key)`, or remove it when
