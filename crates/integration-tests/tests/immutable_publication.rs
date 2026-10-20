@@ -5,6 +5,7 @@ use golemdb_merkle::{HashProvider, Keccak256Hasher};
 use golemdb_storage::{MemoryStore, ReadTransaction, StorageError, Store, Table, WriteTransaction};
 use golemdb_storage_mdbx::MdbxStore;
 use std::{
+    collections::VecDeque,
     path::Path,
     sync::{
         Arc, Mutex, RwLock,
@@ -13,6 +14,9 @@ use std::{
     },
     time::Duration,
 };
+
+#[path = "immutable_publication/safety.rs"]
+mod safety;
 
 // A subprocess can briefly inherit other tests' flock descriptors before exec.
 // Exclude file-owning tests while spawning the crash child in the threaded runner.
@@ -160,9 +164,8 @@ fn successful_publication(store: impl Store + Clone, path: Option<&Path>) {
             CommitId::new(1),
             &ImmutableDataReadOptions::all()
         )
-        .unwrap()
-        .len(),
-        2
+        .unwrap(),
+        vec![row(10), row(11)]
     );
     assert!(
         rows_of(
@@ -241,8 +244,12 @@ struct Faults {
     mode: AtomicU8,
     fail_writer: AtomicBool,
     key_inserts: AtomicUsize,
+    after_key_inserts: AtomicUsize,
+    on_keys_written: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     pause: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
     on_failure: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    before_write: Mutex<VecDeque<Box<dyn FnOnce() + Send>>>,
+    published_damage: Mutex<Option<safety::PublishedDamage>>,
 }
 #[derive(Clone)]
 struct FaultStore<S> {
@@ -268,6 +275,10 @@ impl<S: Store> Store for FaultStore<S> {
     fn begin_write(&self) -> golemdb_storage::Result<Self::Write<'_>> {
         if self.faults.fail_writer.swap(false, Ordering::SeqCst) {
             return Err(fault());
+        }
+        let action = self.faults.before_write.lock().unwrap().pop_front();
+        if let Some(action) = action {
+            action();
         }
         Ok(FaultWrite {
             inner: self.inner.begin_write()?,
@@ -305,12 +316,24 @@ impl<T: WriteTransaction> WriteTransaction for FaultWrite<T> {
         {
             return Err(fault());
         }
-        self.inner.insert(table, key, value)
+        self.inner.insert(table, key, value)?;
+        if table == metadata::KEYS
+            && self
+                .faults
+                .after_key_inserts
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .ok()
+                == Some(1)
+            && let Some(action) = self.faults.on_keys_written.lock().unwrap().take()
+        {
+            action();
+        }
+        Ok(())
     }
     fn delete(&mut self, table: Table, key: &[u8]) -> golemdb_storage::Result<bool> {
         self.inner.delete(table, key)
     }
-    fn commit(self) -> golemdb_storage::Result<()> {
+    fn commit(mut self) -> golemdb_storage::Result<()> {
         let pause = self.faults.pause.lock().unwrap().take();
         if let Some((entered, release)) = pause {
             entered.send(()).unwrap();
@@ -328,6 +351,9 @@ impl<T: WriteTransaction> WriteTransaction for FaultWrite<T> {
                 Err(fault())
             }
             2 => {
+                if let Some(damage) = self.faults.published_damage.lock().unwrap().take() {
+                    damage.apply(&mut self.inner);
+                }
                 self.inner.commit()?;
                 Err(fault())
             }
@@ -380,7 +406,12 @@ fn failures(store: impl Store + Clone + 'static, path: &Path) {
     .unwrap();
     // Fail the reverse key insert after the physical append and forward insert.
     store.faults.key_inserts.store(2, Ordering::SeqCst);
-    assert!(b.commit(id).is_err());
+    assert!(matches!(
+        b.commit(id),
+        Err(BranchError::ImmutableData(
+            ImmutableDataStorageError::Store(StorageError::Backend(_))
+        ))
+    ));
     assert!(b.branch_info(id).unwrap().sealed);
     assert_eq!(b.head().unwrap().get(), 1);
     assert!(!path.join("segment-events-2-4.jar").exists());
@@ -391,7 +422,10 @@ fn failures(store: impl Store + Clone + 'static, path: &Path) {
     drop(tx);
     // Failure after all file fsyncs must roll back both segment tails.
     store.faults.mode.store(1, Ordering::SeqCst);
-    assert!(b.commit(id).is_err());
+    assert!(matches!(
+        b.commit(id),
+        Err(BranchError::Storage(StorageError::Backend(_)))
+    ));
     assert!(!path.join("segment-events-2-4.jar").exists());
     assert!(!path.join("segment-receipts-2-4.jar").exists());
     assert_eq!(number(&store, &reader, 0), 1);
@@ -432,7 +466,10 @@ fn failed_publication_in_active_file_preserves_prefix_and_can_retry() {
     b.immutable_data_append(id, "events", Some(key(3)), row(3))
         .unwrap();
     store.faults.mode.store(1, Ordering::SeqCst);
-    assert!(b.commit(id).is_err());
+    assert!(matches!(
+        b.commit(id),
+        Err(BranchError::Storage(StorageError::Backend(_)))
+    ));
     assert_eq!(number(&store, &reader, 1), 2);
     assert!(matches!(
         read(
@@ -605,7 +642,15 @@ fn concurrent_visibility(
     };
     result.recv_timeout(Duration::from_secs(5)).unwrap();
     release.send(()).unwrap();
-    assert_eq!(writer.join().unwrap().is_err(), abort);
+    let outcome = writer.join().unwrap();
+    if abort {
+        assert!(matches!(
+            outcome,
+            Err(BranchError::Storage(StorageError::Backend(_)))
+        ));
+    } else {
+        assert_eq!(outcome.unwrap(), CommitId::new(u64::from(baseline) + 1));
+    }
     reading.join().unwrap();
     assert_eq!(number(&store, &reader, 0), 1);
     assert!(matches!(

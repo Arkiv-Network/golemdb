@@ -8,11 +8,21 @@ use crate::{ImmutableDataError, Result};
 /// Owned values in schema order on append and projection order on read.
 /// Values are always fields; callers cannot mutate them without normalization.
 /// Read rows carry shared column metadata for named access; append rows created
-/// with `new` contain only ordered values. Equality includes layout metadata.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// with `new` contain only ordered values.
+///
+/// Equality compares typed values in order, ignoring column names, schema and
+/// projection metadata. A full read row equals its append input. Projections of
+/// different columns also compare equal when their ordered typed values match.
+#[derive(Debug, Clone, Default, Eq)]
 pub struct ImmutableDataRow {
     values: Vec<CellValue>,
     layout: Option<Arc<RowLayout>>,
+}
+
+impl PartialEq for ImmutableDataRow {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
 }
 
 impl ImmutableDataRow {

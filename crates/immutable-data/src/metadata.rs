@@ -7,6 +7,10 @@ use std::ops::Range;
 pub const KEYS: Table = Table("ImmutableDataKeys");
 pub const COMMIT_RANGES: Table = Table("ImmutableDataCommitRanges");
 
+const SEGMENT_ID_LEN: usize = size_of::<u32>();
+/// Commit range keys encode segment:u32_be || commit:u64_be (4 + 8 bytes).
+const COMMIT_RANGE_KEY_LEN: usize = SEGMENT_ID_LEN + size_of::<u64>();
+
 fn forward(segment: u32, key: ImmutableDataKey) -> Vec<u8> {
     let mut bytes = vec![0];
     bytes.extend(segment.to_be_bytes());
@@ -131,10 +135,10 @@ pub(crate) fn last_range_at(
     if !key.starts_with(&segment.to_be_bytes()) {
         return Ok(None);
     }
-    if key.len() != 12 {
+    if key.len() != COMMIT_RANGE_KEY_LEN {
         return Err(Error::Corrupt("invalid commit range key"));
     }
-    let commit = u64::from_be_bytes(key[4..].try_into().expect("checked length"));
+    let commit = u64::from_be_bytes(key[SEGMENT_ID_LEN..].try_into().expect("checked length"));
     Ok(Some((commit, decode_range(&value)?)))
 }
 
@@ -166,10 +170,14 @@ pub(crate) fn recovery_ranges(
         if !key.starts_with(&prefix) {
             break;
         }
-        if key.len() != 12 {
+        if key.len() != COMMIT_RANGE_KEY_LEN {
             return Err(Error::Corrupt("invalid commit range key"));
         }
-        let id = u64::from_be_bytes(key[4..].try_into().expect("checked key length"));
+        let id = u64::from_be_bytes(
+            key[SEGMENT_ID_LEN..]
+                .try_into()
+                .expect("checked key length"),
+        );
         if id > commit {
             return Err(Error::Corrupt("commit range exceeds published head"));
         }

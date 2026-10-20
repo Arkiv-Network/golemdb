@@ -90,6 +90,58 @@ fn synthetic_metadata_branches(db: MemoryStore) -> Branches<MemoryStore, Keccak2
 }
 
 #[test]
+fn publication_checks_staged_end_against_metadata_and_physical_rows() {
+    for physical_mismatch in [false, true] {
+        let db = store(0);
+        let storage = ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap();
+        let branches = Branches::new(db.clone(), Keccak256Hasher, Some(storage)).unwrap();
+        let first = branches.begin().unwrap();
+        append(&branches, first, 1);
+        branches.commit(first).unwrap();
+        let pending = branches.begin().unwrap();
+        assert_eq!(append(&branches, pending, 2), 1);
+        if physical_mismatch {
+            // Published metadata and staged start agree; only the physical tail
+            // is ahead. The later append-ordinal check must not mask this guard.
+            branches
+                .inner
+                .immutable_writer
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .storage
+                .append("events", 2, &row(99))
+                .unwrap();
+        } else {
+            // Physical end and staged start agree. Simulate metadata disappearing
+            // after staging without moving head, isolating the metadata check.
+            let mut tx = db.begin_write().unwrap();
+            let range_key = [0u32.to_be_bytes().as_slice(), &1u64.to_be_bytes()].concat();
+            tx.delete(metadata::COMMIT_RANGES, &range_key).unwrap();
+            tx.commit().unwrap();
+        }
+        assert!(matches!(
+            branches.commit(pending),
+            Err(BranchError::ImmutableData(DataError::Corrupt(
+                "staged ordinal disagrees with published or physical end"
+            )))
+        ));
+        assert_eq!(branches.head().unwrap(), CommitId::new(1));
+        assert!(branches.branch_info(pending).unwrap().sealed);
+        let tx = db.begin_read().unwrap();
+        assert_eq!(metadata::commit_range(&tx, 0, 2).unwrap(), None);
+        assert_eq!(metadata::ordinal_for_key(&tx, 0, key(2)).unwrap(), None);
+        drop(tx);
+        if physical_mismatch {
+            // Recovery removes the extra physical row, retaining the pending
+            // branch's ordinal so retry publishes the originally staged value.
+            assert_eq!(branches.commit(pending).unwrap(), CommitId::new(2));
+        }
+    }
+}
+
+#[test]
 fn staging_is_independent_of_cell_frames_and_remains_editable_after_seal() {
     let db = store(0);
     let storage = ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap();

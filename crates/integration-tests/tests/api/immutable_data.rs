@@ -47,10 +47,11 @@ fn ordinal(n: u64) -> ImmutableDataAddress {
 fn all() -> ImmutableDataReadOptions {
     ImmutableDataReadOptions::all()
 }
-fn assert_row(row: ImmutableDataRow, n: u8) {
-    assert_eq!(row.get::<u64>("height").unwrap(), u64::from(n));
-    assert_eq!(row.get::<[u8; 32]>("hash").unwrap(), [n; 32]);
-    assert_eq!(row.get::<Vec<u8>>("payload").unwrap(), vec![n; 128]);
+fn assert_row(actual: ImmutableDataRow, n: u8) {
+    assert_eq!(actual, row(n));
+    assert_eq!(actual.get::<u64>("height").unwrap(), u64::from(n));
+    assert_eq!(actual.get::<[u8; 32]>("hash").unwrap(), [n; 32]);
+    assert_eq!(actual.get::<Vec<u8>>("payload").unwrap(), vec![n; 128]);
 }
 
 fn contract(db: &Database) {

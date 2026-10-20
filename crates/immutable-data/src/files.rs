@@ -14,7 +14,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     ops::Range,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, RwLock, RwLockWriteGuard},
 };
 
 /// Stored in NippyJar's .conf; physical row count and compression belong to jar.
@@ -114,6 +114,14 @@ impl FileSet {
         })
     }
 
+    fn lock_cleanup(&self) -> StorageResult<RwLockWriteGuard<'_, ()>> {
+        #[cfg(not(test))]
+        let guard = self.cleanup.write();
+        #[cfg(test)]
+        let guard = test_sync::write(&self.cleanup);
+        guard.map_err(|_| Error::Invalid("file cleanup lock poisoned"))
+    }
+
     fn path(&self, segment: &Segment, start: u64) -> StorageResult<PathBuf> {
         let end = start.checked_add(self.span).ok_or(Error::Overflow)?;
         Ok(self.directory.join(format!(
@@ -210,10 +218,7 @@ impl FileSet {
             FileState::UnfinishedTail => {
                 // Trimming files must wait for committed readers' mappings to drop.
                 // Clean files and ordinary appends do not acquire this lock.
-                let _cleanup = self
-                    .cleanup
-                    .write()
-                    .map_err(|_| Error::Invalid("file cleanup lock poisoned"))?;
+                let _cleanup = self.lock_cleanup()?;
                 let configured_rows = jar.rows();
                 // NippyJar heals and commits the tail, propagating I/O failures.
                 // Only the configured row count needs an additional policy check.
@@ -238,6 +243,8 @@ impl FileSet {
     ) -> StorageResult<Vec<PayloadRow>> {
         check_range(&jar, &range)?;
         let jar = if committed_prefix {
+            #[cfg(test)]
+            test_sync::at(test_sync::Point::PrefixRead)?;
             validate_prefix(&jar, range.end)?;
             jar
         } else {
@@ -419,6 +426,8 @@ impl NippyJarStorage {
         active.failed = true;
         for value in row {
             active.writer.append_column(Some(Ok(*value)))?;
+            #[cfg(test)]
+            test_sync::at(test_sync::Point::ColumnAppended)?;
         }
         active.failed = false;
         Ok(ordinal)
@@ -440,10 +449,7 @@ impl NippyJarStorage {
         ranges: &BTreeMap<u64, Range<u64>>,
     ) -> StorageResult<()> {
         let files = self.files.clone();
-        let _cleanup = files
-            .cleanup
-            .write()
-            .map_err(|_| Error::Invalid("file cleanup lock poisoned"))?;
+        let _cleanup = files.lock_cleanup()?;
         self.active.remove(&segment.id);
         let starts = self.files.starts(segment, None)?;
         let mut keep = Vec::new();
@@ -627,10 +633,7 @@ impl NippyJarStorage {
 
     pub(crate) fn truncate(&mut self, segment: &Segment, from: u64) -> StorageResult<()> {
         let files = self.files.clone();
-        let _cleanup = files
-            .cleanup
-            .write()
-            .map_err(|_| Error::Invalid("file cleanup lock poisoned"))?;
+        let _cleanup = files.lock_cleanup()?;
         let limit = self.end_ordinal(segment)?;
         if from > limit {
             return Err(Error::Invalid("truncate exceeds physical end"));
@@ -860,3 +863,7 @@ fn read_offset(file: &mut File, index: usize) -> StorageResult<u64> {
 #[cfg(test)]
 #[path = "tests/file_readers.rs"]
 mod reader_tests;
+
+#[cfg(test)]
+#[path = "tests/synchronization.rs"]
+mod test_sync;

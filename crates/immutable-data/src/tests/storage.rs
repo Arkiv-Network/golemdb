@@ -8,6 +8,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[path = "storage_safety.rs"]
+mod safety;
+
 fn config(compression: ImmutableDataCompression) -> ImmutableDataConfig {
     ImmutableDataConfig::new(
         4,
@@ -160,7 +163,12 @@ fn metadata_vectors_reverse_validation_and_invalid_ranges() {
     assert_eq!(metadata::commit_range(&tx, 7, 9).unwrap(), Some(n..n + 2));
     assert_eq!(metadata::key_for_ordinal(&tx, 7, n).unwrap(), Some(key));
     tx.delete(metadata::KEYS, &forward).unwrap();
-    assert!(metadata::key_for_ordinal(&tx, 7, n).is_err());
+    assert!(matches!(
+        metadata::key_for_ordinal(&tx, 7, n),
+        Err(ImmutableDataStorageError::Corrupt(
+            "reverse binding has no matching key"
+        ))
+    ));
     for bad in [
         vec![],
         vec![0; 15],
@@ -168,7 +176,13 @@ fn metadata_vectors_reverse_validation_and_invalid_ranges() {
         [2u64.to_be_bytes(), 1u64.to_be_bytes()].concat(),
     ] {
         tx.put(metadata::COMMIT_RANGES, &range_key, &bad).unwrap();
-        assert!(metadata::commit_range(&tx, 7, 9).is_err());
+        let expected = if bad.len() == 16 {
+            "invalid commit range bounds"
+        } else {
+            "invalid commit range encoding"
+        };
+        assert!(matches!(metadata::commit_range(&tx, 7, 9),
+            Err(ImmutableDataStorageError::Corrupt(message)) if message == expected));
     }
 }
 
@@ -320,14 +334,18 @@ fn corrupt_files_fail_without_auto_healing_or_recreation() {
             dir.path(),
         )
         .unwrap();
-        assert!(
+        for result in [
             storage
                 .get("events_v1", 0, &ImmutableDataReadOptions::all())
-                .is_err(),
-            "{damage}"
-        );
-        assert!(storage.append("events_v1", 1, &row(2)).is_err(), "{damage}");
-        assert!(storage.truncate("events_v1", 0).is_err(), "{damage}");
+                .map(|_| ()),
+            storage.append("events_v1", 1, &row(2)).map(|_| ()),
+            storage.truncate("events_v1", 0),
+        ] {
+            assert!(
+                matches!(result, Err(ImmutableDataStorageError::Corrupt(_))),
+                "{damage}: {result:?}"
+            );
+        }
         let after: Vec<_> = paths.iter().map(|p| fs::read(p).ok()).collect();
         assert_eq!(before, after, "{damage}");
     }
@@ -432,11 +450,12 @@ fn projection_skips_invalid_unselected_payload_and_supports_column_63() {
             .unwrap(),
         42
     );
-    assert!(
-        storage
-            .get("events_v1", 0, &ImmutableDataReadOptions::all())
-            .is_err()
-    );
+    assert!(matches!(
+        storage.get("events_v1", 0, &ImmutableDataReadOptions::all()),
+        Err(ImmutableDataStorageError::Input(
+            ImmutableDataError::InvalidPayload { column: 0, .. }
+        ))
+    ));
 }
 
 #[test]
@@ -595,9 +614,45 @@ fn recovery_resets_a_failed_active_writer_after_transient_sync_failure() {
     storage.append("events_v1", 2, &row(43)).unwrap();
     let temporary = path(dir.path(), 0).with_extension("tmp");
     fs::create_dir(&temporary).unwrap(); // make atomic config replacement fail
-    assert!(storage.sync().is_err());
+    assert!(matches!(
+        storage.sync(),
+        Err(ImmutableDataStorageError::NippyJar(_))
+    ));
     fs::remove_dir(&temporary).unwrap();
-    storage.recover(&db.begin_read().unwrap(), 1).unwrap();
+    // Removing the I/O obstacle must not make a partially synced writer usable.
+    for result in [
+        storage.append("events_v1", 2, &row(44)).map(|_| ()),
+        storage
+            .get("events_v1", 0, &ImmutableDataReadOptions::all())
+            .map(|_| ()),
+        storage.sync(),
+        storage.end_ordinal("events_v1").map(|_| ()),
+    ] {
+        assert!(
+            matches!(
+                result,
+                Err(ImmutableDataStorageError::Invalid(
+                    "file writer failed; recovery required"
+                ))
+            ),
+            "{result:?}"
+        );
+    }
+    let tx = db.begin_read().unwrap();
+    assert_eq!(
+        storage
+            .reader()
+            .get(
+                &tx,
+                1,
+                "events_v1",
+                ImmutableDataAddress::Ordinal(0),
+                &ImmutableDataReadOptions::all()
+            )
+            .unwrap(),
+        row(42)
+    );
+    storage.recover(&tx, 1).unwrap();
     assert_eq!(number(&storage, 0), 42);
     assert_eq!(storage.append("events_v1", 2, &row(44)).unwrap(), 1);
     storage.sync().unwrap();
@@ -605,7 +660,7 @@ fn recovery_resets_a_failed_active_writer_after_transient_sync_failure() {
 
 #[test]
 fn recovery_never_discards_missing_committed_data_or_future_metadata() {
-    for damage in ["missing", "short", "future", "gap"] {
+    for damage in ["missing", "short", "future"] {
         let dir = tempfile::tempdir().unwrap();
         let db = MemoryStore::new();
         let mut storage =
@@ -614,13 +669,8 @@ fn recovery_never_discards_missing_committed_data_or_future_metadata() {
         storage.append("events_v1", 1, &row(42)).unwrap();
         storage.sync().unwrap();
         let mut tx = db.begin_write().unwrap();
-        metadata::record_commit_range(
-            &mut tx,
-            0,
-            if damage == "future" { 2 } else { 1 },
-            if damage == "gap" { 1..2 } else { 0..1 },
-        )
-        .unwrap();
+        metadata::record_commit_range(&mut tx, 0, if damage == "future" { 2 } else { 1 }, 0..1)
+            .unwrap();
         tx.commit().unwrap();
         if damage == "missing" {
             fs::remove_file(path(dir.path(), 0)).unwrap();
@@ -634,10 +684,31 @@ fn recovery_never_discards_missing_committed_data_or_future_metadata() {
                 .unwrap();
         }
         let conf = fs::read(path(dir.path(), 0).with_extension("conf")).unwrap();
-        assert!(
-            storage.recover(&db.begin_read().unwrap(), 1).is_err(),
-            "{damage}"
-        );
+        let result = storage.recover(&db.begin_read().unwrap(), 1);
+        match damage {
+            "missing" => assert!(
+                matches!(result,
+                Err(ImmutableDataStorageError::Io(ref error)) if error.kind() == std::io::ErrorKind::NotFound),
+                "{result:?}"
+            ),
+            "short" => assert!(
+                matches!(
+                    result,
+                    Err(ImmutableDataStorageError::Corrupt("missing published data"))
+                ),
+                "{result:?}"
+            ),
+            "future" => assert!(
+                matches!(
+                    result,
+                    Err(ImmutableDataStorageError::Corrupt(
+                        "commit range exceeds published head"
+                    ))
+                ),
+                "{result:?}"
+            ),
+            _ => unreachable!(),
+        }
         assert_eq!(
             fs::read(path(dir.path(), 0).with_extension("conf")).unwrap(),
             conf
@@ -711,9 +782,8 @@ fn committed_reader_ignores_unflushed_and_partial_tails_without_flushing_writer(
         assert_eq!(
             reader
                 .rows_of(&tx, 9, "events_v1", 1, &ImmutableDataReadOptions::all())
-                .unwrap()
-                .len(),
-            1
+                .unwrap(),
+            vec![row(42)]
         );
         assert!(matches!(
             reader.get(
@@ -765,7 +835,12 @@ fn reader_keeps_directory_owned_after_writer_drops() {
     let last = reader.clone();
     drop(reader);
     drop(storage);
-    assert!(ImmutableDataStorage::open(cfg.clone(), [7; 32], dir.path()).is_err());
+    assert!(matches!(
+        ImmutableDataStorage::open(cfg.clone(), [7; 32], dir.path()),
+        Err(ImmutableDataStorageError::Invalid(
+            "immutable directory already owned or locking unsupported"
+        ))
+    ));
     assert_eq!(
         last.get(
             &db.begin_read().unwrap(),

@@ -77,7 +77,7 @@ fn every_cell_type_round_trips_payload_only_and_normalizes_index_flags() {
     for (value, payload) in values.iter().zip(&payloads) {
         assert_eq!(*payload, &value.encoded_bytes()[1..]);
     }
-    assert_eq!(schema.decode_row(&payloads).unwrap().values(), row.values());
+    assert_eq!(schema.decode_row(&payloads).unwrap(), row);
     assert_eq!(row.clone().into_values(), values);
 }
 
@@ -304,6 +304,60 @@ fn append_rows_remain_ordered_and_report_missing_name_metadata() {
     // Validation alone does not attach a layout or mutate the append request.
     schema_for(row.values()).validate_row(&row).unwrap();
     assert_eq!(row.value("c0"), Err(ImmutableDataError::UnnamedRow));
+}
+
+#[test]
+fn row_equality_ignores_names_schema_and_projection_metadata() {
+    let value = CellValue::from_u64(42);
+    let appended = ImmutableDataRow::new(vec![value.clone()]);
+    let schema = ImmutableDataSchema::new(
+        "dimensions",
+        ["height", "width"]
+            .into_iter()
+            .map(|name| ImmutableDataColumn::new(name).with_type(value.cell_type()))
+            .collect(),
+    )
+    .unwrap();
+    let height = schema
+        .projection(&ImmutableDataReadOptions::columns(["height"]))
+        .unwrap()
+        .decode(&[value.value()])
+        .unwrap();
+    let width = schema
+        .projection(&ImmutableDataReadOptions::columns(["width"]))
+        .unwrap()
+        .decode(&[value.value()])
+        .unwrap();
+    let other_schema = schema_for(appended.values());
+    let full = other_schema.decode_row(&[value.value()]).unwrap();
+
+    // Equality is symmetric and transitive across unnamed rows, different
+    // projections and a full row decoded with another schema.
+    for left in [&appended, &height, &width, &full] {
+        for right in [&appended, &height, &width, &full] {
+            assert_eq!(left, right);
+        }
+    }
+    assert_eq!(height.get::<u64>("height").unwrap(), 42);
+    assert_eq!(width.get::<u64>("width").unwrap(), 42);
+}
+
+#[test]
+fn row_equality_preserves_types_values_and_order() {
+    let first = CellValue::from_u64(42);
+    let second = CellValue::from_u64(7);
+    let appended = ImmutableDataRow::new(vec![first.clone(), second.clone()]);
+    let read = schema_for(appended.values())
+        .decode_row(&[first.value(), second.value()])
+        .unwrap();
+    for different in [
+        vec![second.clone(), first.clone()],
+        vec![first.clone(), first.clone()],
+        vec![first.clone()],
+        vec![CellValue::from_bytes8(42_u64.to_be_bytes()), second],
+    ] {
+        assert_ne!(read, ImmutableDataRow::new(different));
+    }
 }
 
 #[test]

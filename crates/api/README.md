@@ -477,6 +477,9 @@ Unknown segments and absent rows return `NotFound`; future commits return
 `CommitUnavailable`. Read rows own their values and layout metadata. Use
 `row.get::<T>("column")` for checked native conversion, `value` for borrowed cell
 access, or `iter` for named values. Schema types remain exact when projecting.
+Row equality compares typed values in order, ignoring column names, schema and
+projection metadata. A full read row equals its append input; projections of
+different columns also compare equal when their ordered typed values match.
 
 For a segment declared as `height: u64`, `hash: bytes32`:
 
