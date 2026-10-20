@@ -44,7 +44,7 @@ mod trie;
 pub use config::{ConfigError, HashConfig};
 pub use error::{MerkleError, Result};
 pub use hash::{Blake3Hasher, Hash, HashAlgorithm, HashProvider, Keccak256Hasher};
-pub use node::BranchNodeCompact;
+pub use node::{BranchNodeCompact, MAX_PATH_BYTES};
 pub use trie::{BranchRef, LeafRef, RootRef, Trie, Walk, leaf_key, node_key};
 
 #[cfg(test)]

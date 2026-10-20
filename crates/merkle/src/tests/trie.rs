@@ -4,7 +4,8 @@ use std::{
 };
 
 use crate::{
-    BranchNodeCompact, Hash, HashProvider, Keccak256Hasher, LeafRef, MerkleError, RootRef, Trie,
+    BranchNodeCompact, Hash, HashProvider, Keccak256Hasher, LeafRef, MAX_PATH_BYTES, MerkleError,
+    RootRef, Trie,
 };
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
@@ -355,6 +356,37 @@ fn empty_singleton_branch_and_replacement() {
     ]);
 }
 
+/// Two leaves that differ only in the final nibble share a prefix of
+/// `2 * MAX_PATH_BYTES - 1` nibbles: the longest a branch's length byte holds.
+#[test]
+fn widest_paths_store_the_longest_prefix() {
+    const N: usize = MAX_PATH_BYTES;
+    let db = MemoryStore::new();
+    let trie = Trie::<_, N>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
+    let mut tx = db.begin_write().unwrap();
+    let mut last_nibble = [0; N];
+    last_nibble[N - 1] = 1;
+    let leaves = [leaf([0; N], 1), leaf(last_nibble, 2)];
+    let mut root = RootRef::Empty;
+    for leaf in leaves {
+        root = trie
+            .insert(&mut tx, 0, root, &leaf.path, leaf.hash)
+            .unwrap();
+    }
+    let RootRef::Branch(branch) = root else {
+        panic!("two leaves need a branch");
+    };
+    let key = trie.node_key(branch.commit, &[]);
+    let node =
+        BranchNodeCompact::<N>::decode(&tx.get(TABLE, &key).unwrap().unwrap(), false).unwrap();
+    assert_eq!(usize::from(node.prefix_len()), 2 * N - 1);
+    assert_eq!(root.hash(&HASH), bulk(&leaves, 0));
+    assert_eq!(
+        trie.walk(&tx, root).collect::<Result<Vec<_>, _>>().unwrap(),
+        leaves
+    );
+}
+
 fn deepest<const N: usize>() {
     let db = MemoryStore::new();
     let trie = Trie::<_, N>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
@@ -392,6 +424,8 @@ fn deepest<const N: usize>() {
 fn every_depth_splits_and_collapses() {
     deepest::<6>();
     deepest::<32>();
+    // The cell trie's path width.
+    deepest::<40>();
 }
 
 #[test]

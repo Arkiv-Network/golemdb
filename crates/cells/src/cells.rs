@@ -3,7 +3,11 @@ use std::iter::FusedIterator;
 use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::{ReadCursor, ReadTransaction, Scan, WriteTransaction, scan_prefix};
 
-use crate::{CELL_TRIE_PATH_BYTES, CellKey, CellValue, Result, cell_trie::CellTrie, tables};
+use crate::{
+    CELL_TRIE_PATH_BYTES, CellKey, CellValue, Result,
+    cell_trie::{CellPath, CellTrie},
+    tables,
+};
 
 /// Cell storage and commitment over caller-owned transactions.
 ///
@@ -30,6 +34,14 @@ pub struct CellValueChange {
     pub key: CellKey,
     pub before: Option<CellValue>,
     pub after: Option<CellValue>,
+}
+
+/// A net change with its encoded key, which addresses the `Cell` table, and its
+/// path, which addresses the trie.
+struct RoutedChange {
+    encoded_key: Vec<u8>,
+    path: CellPath,
+    change: CellValueChange,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,7 +106,7 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         for (key, after) in normalize_changes(changes) {
             let encoded_key = key.encode();
             let before = read_value(tx, &encoded_key)?;
-            let path = self.trie.path(&encoded_key);
+            let path = self.trie.path(&key);
             read.push((path, encoded_key, key, before, after));
         }
         let mut by_path: Vec<usize> = (0..read.len()).collect();
@@ -107,20 +119,22 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         let changes_by_key: Vec<_> = read
             .into_iter()
             .filter(|(_, _, _, before, after)| before != after)
-            .map(|(_, encoded_key, key, before, after)| {
-                (encoded_key, CellValueChange { key, before, after })
+            .map(|(path, encoded_key, key, before, after)| RoutedChange {
+                encoded_key,
+                path,
+                change: CellValueChange { key, before, after },
             })
             .collect();
         // One trie update for the whole batch writes each touched branch once.
         let edits =
-            (changes_by_key.iter()).map(|(key, change)| (key.as_slice(), change.after.as_ref()));
+            (changes_by_key.iter()).map(|routed| (routed.path, routed.change.after.as_ref()));
         let root = self.trie.set(tx, commit, root, edits)?;
         write_values(tx, &changes_by_key)?;
         Ok(CellsUpdate {
             root,
             changed_cells: changes_by_key
                 .into_iter()
-                .map(|(_, change)| change)
+                .map(|routed| routed.change)
                 .collect(),
         })
     }
@@ -185,12 +199,10 @@ fn read_value(tx: &impl ReadTransaction, key: &[u8]) -> Result<Option<CellValue>
 }
 
 /// Write each change's final value under its encoded key, or delete the row.
-fn write_values(
-    tx: &mut impl WriteTransaction,
-    changes_by_key: &[(Vec<u8>, CellValueChange)],
-) -> Result<()> {
-    for (key, change) in changes_by_key {
-        match &change.after {
+fn write_values(tx: &mut impl WriteTransaction, changes_by_key: &[RoutedChange]) -> Result<()> {
+    for routed in changes_by_key {
+        let key = &routed.encoded_key;
+        match &routed.change.after {
             Some(value) => tx.put(tables::CELL, key, value.encoded_bytes())?,
             None => {
                 tx.delete(tables::CELL, key)?;

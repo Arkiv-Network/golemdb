@@ -37,8 +37,8 @@ fn head(
     tx: &mut impl WriteTransaction,
     hash: &impl HashProvider,
     id: u64,
-    state: RootRef<32>,
-    index: RootRef<32>,
+    state: RootRef<{ golemdb_cells::CELL_TRIE_PATH_BYTES }>,
+    index: RootRef<{ golemdb_index::INDEX_TRIE_PATH_BYTES }>,
 ) {
     let roots = crate::Roots { state, index };
     crate::write_head(tx, crate::CommitId::new(id), &roots, hash).unwrap();
@@ -526,7 +526,14 @@ fn every_commit_records_roots_that_keep_its_tries_walkable() {
         golemdb_index::INDEX_BRANCH_DOMAIN,
         &Keccak256Hasher,
     );
-    let path = Keccak256Hasher.hash(&key(64, b"name").encode());
+    // A cell's path is its record ID, then the hash of its encoded key.
+    let path: [u8; golemdb_cells::CELL_TRIE_PATH_BYTES] = [
+        &64u64.to_be_bytes()[..],
+        &Keccak256Hasher.hash(&key(64, b"name").encode()),
+    ]
+    .concat()
+    .try_into()
+    .unwrap();
     for (commit, roots, value) in published {
         assert_eq!(crate::read_roots(&tx, commit).unwrap(), Some(roots));
         // Each old state trie still holds that commit's value, after later commits.
