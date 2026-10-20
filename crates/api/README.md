@@ -516,7 +516,9 @@ Retention/pruning, key expiry and digests remain deferred.
 
 Typed cells, record CRUD, branch lifecycle, atomic opening/genesis, and typed
 immutable data are implemented behind a cloneable `Database` with shared state.
-Queries support `Eq`, `In`, `Range` and `Prefix` filters with full or projected records, and `count`.
+Queries support `Eq`, `In`, `Range` and `Prefix` filters, combined by `And` and `Or` trees, with
+full or projected records, and `count`. A filter nests at most 64 `And` / `Or` levels, a
+hardcoded cap until it is read from genesis; a deeper one returns `ApiError::LimitExceeded`.
 A `Prefix` matches `str` values only. `Eq` values, `In` values and `Range` bounds are of one
 indexable type by construction: `EqValue::of(marker::Str, "blue")`,
 `InValues::of(marker::U32, [1, 2])` and `Bounds::new(marker::Str, ..)` take a cell-type marker,

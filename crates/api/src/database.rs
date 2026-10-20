@@ -204,6 +204,11 @@ impl Api for Database {
     }
 }
 
+/// The most `And` / `Or` levels a query's filter may nest. Hardcoded for now:
+/// it will be read from genesis (`#maxQueryDepth`) in the scope of issues #48
+/// and #49.
+const MAX_QUERY_DEPTH: u32 = 64;
+
 /// All layers share one store, through clones of its handle, and record and
 /// branch share one branch registry. Immutable reads use the store and reader
 /// directly, with head and metadata taken from the same committed snapshot.
@@ -222,7 +227,7 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
         // Recover before exposing the reader through the completed database handle.
         let branches = Branches::new(store.clone(), hasher.clone(), immutable_data)?;
         let records = Records::new(branches.clone());
-        let queries = Queries::new(store.clone(), hasher);
+        let queries = Queries::new(store.clone(), hasher, Some(MAX_QUERY_DEPTH));
         Ok(Self {
             store,
             immutable_reader,
