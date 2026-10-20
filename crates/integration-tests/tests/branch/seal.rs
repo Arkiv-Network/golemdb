@@ -37,8 +37,8 @@ fn head(
     tx: &mut impl WriteTransaction,
     hash: &impl HashProvider,
     id: u64,
-    state: RootRef<32>,
-    index: RootRef<32>,
+    state: RootRef<{ golemdb_cells::CELL_TRIE_PATH_BYTES }>,
+    index: RootRef<{ golemdb_index::INDEX_TRIE_PATH_BYTES }>,
 ) {
     let roots = golemdb_branch::Roots { state, index };
     golemdb_branch::write_head(tx, golemdb_branch::CommitId::new(id), &roots, hash).unwrap();
