@@ -1,6 +1,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use golemdb_immutable_data::{ImmutableDataStorageError as DataError, metadata};
+use golemdb_merkle::HashProvider;
 use golemdb_storage::{Store, WriteTransaction};
 
 use crate::{
@@ -8,6 +9,7 @@ use crate::{
     head::{Head, read_head, read_head_state, write_head},
     immutable::{ImmutableSegments, ImmutableStaging},
     manager::ImmutableWriter,
+    roots::Roots,
 };
 
 /// The writer has serialized with other publishers before this guard runs.
@@ -16,10 +18,11 @@ pub(crate) fn persist(
     mut tx: impl WriteTransaction,
     origin: CommitId,
     sealed: &SealedCommit,
+    hasher: &impl HashProvider,
 ) -> Result<CommitId> {
     // Drop a failed writer outside unwinding so backend mutexes are not poisoned
     // by a panic while reading head or replaying rows. Nothing has been published.
-    match catch_unwind(AssertUnwindSafe(|| stage(&mut tx, origin, sealed))) {
+    match catch_unwind(AssertUnwindSafe(|| stage(&mut tx, origin, sealed, hasher))) {
         Ok(result) => result?,
         Err(panic) => {
             drop(tx);
@@ -34,13 +37,18 @@ pub(crate) fn stage(
     tx: &mut impl WriteTransaction,
     origin: CommitId,
     sealed: &SealedCommit,
+    hasher: &impl HashProvider,
 ) -> Result<()> {
     if read_head(tx)? != origin {
         return Err(BranchError::Conflict);
     }
     for (table, rows) in &sealed.writes {
+        // `rows` is in key order, and this commit's version keys sort last.
+        let versioned = golemdb_cells::tables::VERSIONED.contains(table)
+            || golemdb_index::tables::VERSIONED.contains(table);
         for (key, value) in rows {
             match value {
+                Some(value) if versioned => tx.append(*table, key, value)?,
                 Some(value) => tx.put(*table, key, value)?,
                 None => {
                     tx.delete(*table, key)?;
@@ -50,14 +58,12 @@ pub(crate) fn stage(
     }
     // History and change-set tables remain deferred. Allocator/binding changes
     // already staged as cells participate in the same sealed write set.
-    write_head(
-        tx,
-        &Head {
-            commit_id: sealed.commit_id,
-            state_root: sealed.state_root,
-            index_root: sealed.index_root,
-        },
-    )
+    let roots = Roots {
+        state: sealed.cells.root,
+        index: sealed.index.root,
+    };
+    write_head(tx, sealed.commit_id, &roots, hasher)?;
+    Ok(())
 }
 
 /// Called with the immutable writer lock held through outcome resolution
@@ -69,6 +75,7 @@ pub(crate) fn publish(
     sealed: &SealedCommit,
     staged: &ImmutableStaging,
     segments: &ImmutableSegments,
+    hasher: &impl HashProvider,
 ) -> Result<CommitId> {
     if writer.recovery_required {
         return Err(BranchError::RecoveryRequired);
@@ -82,7 +89,7 @@ pub(crate) fn publish(
     writer.recovery_required = true;
     let mut attempted_commit = false;
     let outcome = (|| -> Result<()> {
-        crate::commit::stage(&mut tx, origin, sealed)?;
+        crate::commit::stage(&mut tx, origin, sealed, hasher)?;
         for (id, batch) in staged.batches() {
             let name = segments.by_id(id).schema.name();
             if metadata::end_ordinal_at(&tx, id, origin.get())? != batch.first_ordinal

@@ -52,14 +52,8 @@ impl PublishedDamage {
             }
             Self::HeadMoved => {
                 let head = golemdb_branch::read_head_state(tx).unwrap();
-                write_head(
-                    tx,
-                    &Head {
-                        commit_id: CommitId::new(3),
-                        ..head
-                    },
-                )
-                .unwrap();
+                let roots = golemdb_branch::head_roots(tx, &head, &Keccak256Hasher).unwrap();
+                write_head(tx, CommitId::new(3), &roots, &Keccak256Hasher).unwrap();
             }
         }
     }

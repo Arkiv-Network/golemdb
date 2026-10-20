@@ -29,16 +29,11 @@ fn key(n: u8) -> ImmutableDataKey {
     ImmutableDataKey([n; 32])
 }
 fn head(tx: &mut impl WriteTransaction, commit: u64) {
-    let empty = Keccak256Hasher.hash(&[]);
-    crate::write_head(
-        tx,
-        &crate::Head {
-            commit_id: CommitId::new(commit),
-            state_root: empty,
-            index_root: empty,
-        },
-    )
-    .unwrap();
+    let empty = crate::roots::Roots {
+        state: golemdb_merkle::RootRef::Empty,
+        index: golemdb_merkle::RootRef::Empty,
+    };
+    crate::write_head(tx, CommitId::new(commit), &empty, &Keccak256Hasher).unwrap();
 }
 fn store(commit: u64) -> MemoryStore {
     let db = MemoryStore::new();

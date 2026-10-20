@@ -1,10 +1,10 @@
 #[path = "immutable_storage/contract.rs"]
 mod contract;
 
-use golemdb_branch::{BranchError, Branches, CommitId, Head, write_head};
+use golemdb_branch::{BranchError, Branches, CommitId, Roots, write_head};
 use golemdb_cells::{CellType, CellValue, Width};
 use golemdb_immutable_data::{metadata, *};
-use golemdb_merkle::{HashProvider, Keccak256Hasher};
+use golemdb_merkle::{Keccak256Hasher, RootRef};
 use golemdb_storage::{ReadTransaction, Store, Table, WriteTransaction};
 use golemdb_storage_mdbx::MdbxStore;
 
@@ -164,16 +164,11 @@ fn builder_recovers_tail_and_staging_uses_published_mdbx_ranges() {
     files
         .record_commit_range(&mut tx, "events", 1, 0..1)
         .unwrap();
-    let empty = Keccak256Hasher.hash(&[]);
-    write_head(
-        &mut tx,
-        &Head {
-            commit_id: CommitId::new(3),
-            state_root: empty,
-            index_root: empty,
-        },
-    )
-    .unwrap();
+    let empty = Roots {
+        state: RootRef::Empty,
+        index: RootRef::Empty,
+    };
+    write_head(&mut tx, CommitId::new(3), &empty, &Keccak256Hasher).unwrap();
     tx.commit().unwrap();
     // A physical tail is not publication. The branch must not allocate from it.
     files.append("events", 4, &row(99)).unwrap();

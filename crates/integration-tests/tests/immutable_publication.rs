@@ -1,7 +1,7 @@
-use golemdb_branch::{BranchError, Branches, CommitId, Head, read_head, write_head};
+use golemdb_branch::{BranchError, Branches, CommitId, Roots, read_head, write_head};
 use golemdb_cells::{CellKey, CellNameRef, CellType, CellValue, Width, tables};
 use golemdb_immutable_data::{metadata, *};
-use golemdb_merkle::{HashProvider, Keccak256Hasher};
+use golemdb_merkle::{Keccak256Hasher, RootRef};
 use golemdb_storage::{MemoryStore, ReadTransaction, StorageError, Store, Table, WriteTransaction};
 use golemdb_storage_mdbx::MdbxStore;
 use std::{
@@ -45,16 +45,11 @@ fn key(n: u8) -> ImmutableDataKey {
 }
 fn seed(store: &impl Store) {
     let mut tx = store.begin_write().unwrap();
-    let root = Keccak256Hasher.hash(&[]);
-    write_head(
-        &mut tx,
-        &Head {
-            commit_id: CommitId::GENESIS,
-            state_root: root,
-            index_root: root,
-        },
-    )
-    .unwrap();
+    let empty = Roots {
+        state: RootRef::Empty,
+        index: RootRef::Empty,
+    };
+    write_head(&mut tx, CommitId::GENESIS, &empty, &Keccak256Hasher).unwrap();
     tx.commit().unwrap();
 }
 fn read(
