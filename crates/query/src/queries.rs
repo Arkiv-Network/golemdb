@@ -4,7 +4,8 @@
 //!
 //! 1. `query` only: the parts not built yet (sort, limit, offset) are
 //!    rejected as `NotImplemented`.
-//! 2. Admission validates the whole request, without reading state.
+//! 2. Admission validates the whole request, the filter's depth included,
+//!    without reading state.
 //! 3. One storage snapshot is opened. Opening it reads the head, so a
 //!    requested commit other than the head fails here, after admission. All
 //!    reads then use this snapshot.
@@ -28,11 +29,20 @@ use crate::{
 pub struct Queries<S, H> {
     store: S,
     hasher: H,
+    max_query_depth: Option<u32>,
 }
 
 impl<S: Store, H: HashProvider> Queries<S, H> {
-    pub fn new(store: S, hasher: H) -> Self {
-        Self { store, hasher }
+    /// `max_query_depth` caps how many `And` / `Or` levels a filter nests (a
+    /// leaf adds none): a deeper one fails as [`QueryError::LimitExceeded`]
+    /// at admission. Admission and evaluation recurse once per level, so with
+    /// no cap a deep enough filter overflows the stack, aborting the process.
+    pub fn new(store: S, hasher: H, max_query_depth: Option<u32>) -> Self {
+        Self {
+            store,
+            hasher,
+            max_query_depth,
+        }
     }
 
     /// The records matching `op`'s filter at `commit` (`None` for the head),
@@ -97,7 +107,7 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
         commit_id: Option<CommitId>,
         filter: &Filter,
     ) -> Result<Evaluation<S::Read<'_>>> {
-        let plan = Plan::try_from(filter)?;
+        let plan = Plan::admit(filter, self.max_query_depth)?;
         let (snapshot, head) = committed_snapshot(&self.store, commit_id)?;
         let index = Index::new(&self.hasher);
         let matches = match_set(&IndexSource::new(&index, &snapshot), plan)?;

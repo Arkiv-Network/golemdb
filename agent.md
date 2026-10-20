@@ -427,8 +427,9 @@ can use typed request options where appropriate.
 
 Rust edition is 2024; `rust-toolchain.toml` selects Rust 1.97 with rustfmt and Clippy.
 MDBX's pinned bindings are `libmdbx = 0.6.6` and `mdbx-sys = 13.11.0`; native builds
-require a C compiler and libclang. Unit tests live under crate `src/tests` trees;
-cross-component tests and benchmarks live in `crates/integration-tests`.
+require a C compiler and libclang. Unit tests live in the file they test, in an inline
+`#[cfg(test)] mod tests`; some crates keep older ones under `src/tests`. Cross-component tests
+and benchmarks live in `crates/integration-tests`.
 
 ```sh
 cargo build --workspace --all-targets --all-features

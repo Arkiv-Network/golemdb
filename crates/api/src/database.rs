@@ -169,6 +169,11 @@ impl Api for Database {
     }
 }
 
+/// The most `And` / `Or` levels a query's filter may nest. Hardcoded for now:
+/// it will be read from genesis (`#maxQueryDepth`) in the scope of issues #48
+/// and #49.
+const MAX_QUERY_DEPTH: u32 = 64;
+
 /// All layers share one store, through clones of its handle, and record and
 /// branch one branch registry. Business rules, locking, and transaction
 /// boundaries remain in record, query and branch, not in this adapter.
@@ -182,7 +187,7 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
     fn new(store: S, hasher: H) -> OpenResult<Self> {
         let branches = Branches::new(store.clone(), hasher.clone())?;
         let records = Records::new(branches.clone());
-        let queries = Queries::new(store, hasher);
+        let queries = Queries::new(store, hasher, Some(MAX_QUERY_DEPTH));
         Ok(Self {
             branches,
             records,

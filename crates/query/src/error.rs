@@ -18,11 +18,16 @@ pub enum QueryError {
         #[source]
         source: TermError,
     },
-    /// The request cannot be run as written. Reserved for the request
-    /// shapes the query proposal rejects (a malformed `And` / `Or`, a cursor
-    /// that does not match its query); no built leaf raises it yet.
+    /// The request cannot be run as written: an `And` or `Or` with no child.
+    /// Raised at admission, before any state read.
     #[error("invalid query: {reason}")]
     InvalidQuery { reason: &'static str },
+    /// The request exceeds a cap, named by `limit`, whose value is `max`: a
+    /// filter nested deeper than the `max_query_depth` of its
+    /// [`Queries`](crate::Queries). Raised at admission, before any state
+    /// read.
+    #[error("limit exceeded: {limit} is capped at {max}")]
+    LimitExceeded { limit: &'static str, max: u32 },
     /// A part of the query API that is specified but not built yet.
     #[error("operation {operation} is not implemented")]
     NotImplemented { operation: &'static str },
