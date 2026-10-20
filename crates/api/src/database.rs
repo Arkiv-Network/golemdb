@@ -202,6 +202,20 @@ impl Api for Database {
     ) -> Result<Vec<ImmutableDataRow>> {
         self.inner.immutable_data_rows_of(segment, commit, options)
     }
+    fn immutable_data_range_of(
+        &self,
+        segment: &str,
+        commit: CommitId,
+    ) -> Result<std::ops::Range<ImmutableDataOrdinal>> {
+        self.inner.immutable_data_range_of(segment, commit)
+    }
+    fn immutable_data_ordinal_of(
+        &self,
+        segment: &str,
+        key: ImmutableDataKey,
+    ) -> Result<Option<ImmutableDataOrdinal>> {
+        self.inner.immutable_data_ordinal_of(segment, key)
+    }
 }
 
 /// The most `And` / `Or` levels a query's filter may nest. Hardcoded for now:
@@ -357,6 +371,30 @@ impl<S: Store, H: HashProvider> Api for Inner<S, H> {
         let head = read_head(&tx)?;
         reader
             .rows_of(&tx, head.get(), segment, commit.get(), options)
+            .map_err(Into::into)
+    }
+    fn immutable_data_range_of(
+        &self,
+        segment: &str,
+        commit: CommitId,
+    ) -> Result<std::ops::Range<ImmutableDataOrdinal>> {
+        let reader = self.immutable_reader()?;
+        let tx = self.store.begin_read().map_err(ApiError::internal)?;
+        let head = read_head(&tx)?;
+        reader
+            .range_of(&tx, head.get(), segment, commit.get())
+            .map_err(Into::into)
+    }
+    fn immutable_data_ordinal_of(
+        &self,
+        segment: &str,
+        key: ImmutableDataKey,
+    ) -> Result<Option<ImmutableDataOrdinal>> {
+        let reader = self.immutable_reader()?;
+        let tx = self.store.begin_read().map_err(ApiError::internal)?;
+        let head = read_head(&tx)?;
+        reader
+            .ordinal_of(&tx, head.get(), segment, key)
             .map_err(Into::into)
     }
 }

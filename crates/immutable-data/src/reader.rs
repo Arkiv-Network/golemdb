@@ -87,6 +87,49 @@ impl ImmutableDataReader {
             .collect()
     }
 }
+impl ImmutableDataReader {
+    /// The half-open ordinal range `commit` appended to `segment`. A commit that
+    /// appended nothing answers `end..end`, where `end` is the segment's length at
+    /// that commit, so an empty batch still says where it would have started.
+    pub fn range_of(
+        &self,
+        tx: &impl ReadTransaction,
+        published_commit: u64,
+        segment: &str,
+        commit: u64,
+    ) -> StorageResult<std::ops::Range<u64>> {
+        let segment = self.catalogue.segment(segment)?;
+        if commit > published_commit {
+            return Err(Error::CommitUnavailable {
+                requested: commit,
+                published: published_commit,
+            });
+        }
+        if let Some(range) = metadata::commit_range(tx, segment.id, commit)? {
+            return Ok(range);
+        }
+        let end = metadata::end_ordinal_at(tx, segment.id, commit)?;
+        Ok(end..end)
+    }
+
+    /// The ordinal of the committed row named `key`, or `None` if no row carries it.
+    pub fn ordinal_of(
+        &self,
+        tx: &impl ReadTransaction,
+        published_commit: u64,
+        segment: &str,
+        key: crate::ImmutableDataKey,
+    ) -> StorageResult<Option<u64>> {
+        let segment = self.catalogue.segment(segment)?;
+        let Some(ordinal) = metadata::ordinal_for_key(tx, segment.id, key)? else {
+            return Ok(None);
+        };
+        if ordinal >= metadata::end_ordinal_at(tx, segment.id, published_commit)? {
+            return Err(Error::Corrupt("key exceeds published end"));
+        }
+        Ok(Some(ordinal))
+    }
+}
 fn missing_row(error: Error) -> Error {
     match error {
         Error::NotFound | Error::Invalid(_) => Error::Corrupt("missing published immutable rows"),
