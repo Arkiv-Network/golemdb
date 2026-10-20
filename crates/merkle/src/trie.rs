@@ -109,6 +109,83 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         }
     }
 
+    /// [`get`](Self::get) for many paths in one ascending walk: each branch is
+    /// loaded and verified once, however many of the paths run through it,
+    /// rather than once per path. `paths` must be ascending; the answers come
+    /// back in the same order.
+    pub fn get_sorted(
+        &self,
+        tx: &impl ReadTransaction,
+        root: RootRef<N>,
+        paths: &[[u8; N]],
+    ) -> Result<Vec<Option<LeafRef<N>>>> {
+        debug_assert!(paths.is_sorted(), "get_sorted needs ascending paths");
+        let mut found = Vec::with_capacity(paths.len());
+        self.get_run(tx, root, paths, &mut Vec::new(), &mut found)?;
+        Ok(found)
+    }
+
+    /// Answer every path in `paths`, all of which run through `root` at `route`.
+    fn get_run(
+        &self,
+        tx: &impl ReadTransaction,
+        root: RootRef<N>,
+        paths: &[[u8; N]],
+        route: &mut Vec<u8>,
+        found: &mut Vec<Option<LeafRef<N>>>,
+    ) -> Result<()> {
+        let hash = match root {
+            RootRef::Empty => {
+                found.extend(paths.iter().map(|_| None));
+                return Ok(());
+            }
+            RootRef::Leaf(leaf) => {
+                found.extend(
+                    paths
+                        .iter()
+                        .map(|path| (leaf.path == *path).then_some(leaf)),
+                );
+                return Ok(());
+            }
+            RootRef::Branch(hash) => hash,
+        };
+        let node = self.load(tx, hash, route)?;
+        let depth = route.len();
+        let prefix = node.unpack_prefix();
+        route.extend(&prefix);
+        let slot_depth = route.len();
+        let on_route = |path: &[u8; N]| {
+            (prefix.iter().enumerate()).all(|(i, nibble)| path::nibble(path, depth + i) == *nibble)
+        };
+        // Ascending paths keep each child's paths contiguous, and those that
+        // leave the prefix contiguous between them.
+        let mut start = 0;
+        while start < paths.len() {
+            if !on_route(&paths[start]) {
+                found.push(None);
+                start += 1;
+                continue;
+            }
+            let slot = path::nibble(&paths[start], slot_depth);
+            let end = start
+                + paths[start..]
+                    .iter()
+                    .take_while(|path| on_route(path) && path::nibble(*path, slot_depth) == slot)
+                    .count();
+            match node.child(slot) {
+                Some(child) => {
+                    route.push(slot);
+                    self.get_run(tx, child, &paths[start..end], route, found)?;
+                    route.pop();
+                }
+                None => found.extend((start..end).map(|_| None)),
+            }
+            start = end;
+        }
+        route.truncate(depth);
+        Ok(())
+    }
+
     pub fn insert(
         &self,
         tx: &mut impl WriteTransaction,

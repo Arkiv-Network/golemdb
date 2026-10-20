@@ -84,12 +84,29 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         root: RootRef<CELL_TRIE_PATH_BYTES>,
         changes: impl IntoIterator<Item = CellChange>,
     ) -> Result<CellsUpdate> {
-        let mut changes_by_key = Vec::new();
+        // Read every original value, then check them all against the root in
+        // one walk in path order, which loads each shared branch once.
+        let mut read = Vec::new();
         for (key, after) in normalize_changes(changes) {
-            if let Some(change) = self.check_change(tx, root, key, after)? {
-                changes_by_key.push(change);
-            }
+            let encoded_key = key.encode();
+            let before = read_value(tx, &encoded_key)?;
+            let path = self.trie.path(&encoded_key);
+            read.push((path, encoded_key, key, before, after));
         }
+        let mut by_path: Vec<usize> = (0..read.len()).collect();
+        by_path.sort_unstable_by_key(|&i| read[i].0);
+        let checks: Vec<_> = by_path
+            .iter()
+            .map(|&i| (read[i].0, read[i].3.as_ref()))
+            .collect();
+        self.trie.check_sorted(tx, root, &checks)?;
+        let changes_by_key: Vec<_> = read
+            .into_iter()
+            .filter(|(_, _, _, before, after)| before != after)
+            .map(|(_, encoded_key, key, before, after)| {
+                (encoded_key, CellValueChange { key, before, after })
+            })
+            .collect();
         // One trie update for the whole batch writes each touched branch once.
         let edits =
             (changes_by_key.iter()).map(|(key, change)| (key.as_slice(), change.after.as_ref()));
@@ -102,23 +119,6 @@ impl<'h, H: HashProvider> Cells<'h, H> {
                 .map(|(_, change)| change)
                 .collect(),
         })
-    }
-
-    /// Check the original commitment for one net change. No-ops are checked
-    /// but produce no change. Keys are unique within a batch, so the original
-    /// root answers as the evolving root would. Returns the encoded key with
-    /// the change, so each key is encoded once. Any error requires a tx abort.
-    fn check_change(
-        &self,
-        tx: &impl ReadTransaction,
-        root: RootRef<CELL_TRIE_PATH_BYTES>,
-        key: CellKey,
-        after: Option<CellValue>,
-    ) -> Result<Option<(Vec<u8>, CellValueChange)>> {
-        let encoded_key = key.encode();
-        let before = read_value(tx, &encoded_key)?;
-        self.trie.check(tx, root, &encoded_key, before.as_ref())?;
-        Ok((before != after).then_some((encoded_key, CellValueChange { key, before, after })))
     }
 }
 

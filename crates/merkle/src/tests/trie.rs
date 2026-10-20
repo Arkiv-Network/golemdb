@@ -620,3 +620,47 @@ fn storage_errors_propagate_and_abort_discards_partial_branches() {
         vec![a, b]
     );
 }
+
+/// `get_sorted` answers every path as `get` does, over a trie built from
+/// `stored`, for queries that hit, miss inside a prefix and miss a slot.
+fn sorted_lookups<const N: usize>(stored: &[(Vec<u8>, u32)], queried: &[Vec<u8>]) {
+    let path = |tail: &[u8]| {
+        let mut path = [0xaa; N];
+        let width = tail.len().min(N);
+        path[N - width..].copy_from_slice(&tail[tail.len() - width..]);
+        path
+    };
+    let store = MemoryStore::new();
+    let trie = Trie::<_, N>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
+    let mut tx = store.begin_write().unwrap();
+    let root = trie
+        .apply(
+            &mut tx,
+            RootRef::Empty,
+            stored
+                .iter()
+                .map(|(tail, value)| (path(tail), Some(leaf(path(tail), *value).hash))),
+        )
+        .unwrap();
+    let mut paths: Vec<_> = queried.iter().map(|tail| path(tail)).collect();
+    paths.sort();
+    let one_by_one: Vec<_> = paths
+        .iter()
+        .map(|path| trie.get(&tx, root, path).unwrap())
+        .collect();
+    assert_eq!(trie.get_sorted(&tx, root, &paths).unwrap(), one_by_one);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(300))]
+    #[test]
+    fn sorted_lookups_answer_as_single_lookups_do(
+        stored in prop::collection::vec((dense_tail(), 0u32..4), 0..24),
+        queried in prop::collection::vec(dense_tail(), 0..32),
+    ) {
+        sorted_lookups::<1>(&stored, &queried);
+        sorted_lookups::<2>(&stored, &queried);
+        sorted_lookups::<6>(&stored, &queried);
+        sorted_lookups::<32>(&stored, &queried);
+    }
+}
