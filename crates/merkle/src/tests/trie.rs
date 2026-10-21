@@ -148,9 +148,11 @@ fn branches<const N: usize>(tx: &impl ReadTransaction, root: RootRef<N>) -> BTre
     while let Some((root, route)) = stack.pop() {
         if let RootRef::Branch(branch) = root {
             let key = trie.node_key(branch.commit, &route);
-            let node =
-                BranchNodeCompact::<N>::decode(&tx.get(TABLE, &key).unwrap().unwrap(), false)
-                    .unwrap();
+            let node = BranchNodeCompact::<N>::decode(
+                &tx.get(TABLE, &key).unwrap().unwrap(),
+                crate::LeafStorage::InNode,
+            )
+            .unwrap();
             let base: Vec<u8> = route.iter().copied().chain(node.unpack_prefix()).collect();
             for slot in 0..16 {
                 if let Some(child) = node.child(slot) {

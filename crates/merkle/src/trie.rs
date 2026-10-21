@@ -1,4 +1,6 @@
-use crate::{BranchNodeCompact, HASH_BYTES, Hash, HashProvider, MerkleError, Result, path};
+use crate::{
+    BranchNodeCompact, HASH_BYTES, Hash, HashProvider, LeafStorage, MerkleError, Result, path,
+};
 use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
 /// The owner supplies a hash binding the complete path and its leaf payload.
@@ -122,7 +124,7 @@ pub struct Trie<'h, H: HashProvider, const N: usize> {
     domain: u8,
     hasher: &'h H,
     namespace: &'h [u8],
-    leaf_rows: bool,
+    leaf_storage: LeafStorage,
 }
 
 impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
@@ -154,7 +156,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
             domain,
             hasher,
             namespace: &[],
-            leaf_rows: false,
+            leaf_storage: LeafStorage::InNode,
         }
     }
 
@@ -169,7 +171,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     /// Leaves are rows of their own, so branches record their commits too.
     /// [`crate::PayloadTrie`] writes those rows.
     pub(crate) fn with_leaf_rows(mut self) -> Self {
-        self.leaf_rows = true;
+        self.leaf_storage = LeafStorage::Rows;
         self
     }
 
@@ -184,7 +186,10 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
 
     /// A leaf being written: its row, if any, belongs to the write commit.
     fn leaf(&self, commit: u64, path: [u8; N], hash: Hash) -> LeafRef<N> {
-        let commit = if self.leaf_rows { commit } else { 0 };
+        let commit = match self.leaf_storage {
+            LeafStorage::Rows => commit,
+            LeafStorage::InNode => 0,
+        };
         LeafRef { path, hash, commit }
     }
 
@@ -313,7 +318,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         let bytes = tx
             .get(self.table, &self.node_key(branch.commit, route))?
             .ok_or(MerkleError::MissingBranch(branch.hash))?;
-        let node = BranchNodeCompact::decode(&bytes, self.leaf_rows)?;
+        let node = BranchNodeCompact::decode(&bytes, self.leaf_storage)?;
         if node.hash(self.domain, self.hasher) != branch.hash {
             return Err(MerkleError::HashMismatch);
         }
@@ -330,7 +335,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         children: &[RootRef<N>; 16],
         route: &[u8],
     ) -> Result<RootRef<N>> {
-        let node = BranchNodeCompact::from_children(prefix, children, self.leaf_rows)?;
+        let node = BranchNodeCompact::from_children(prefix, children, self.leaf_storage)?;
         node.validate_at(route)?;
         let hash = node.hash(self.domain, self.hasher);
         tx.put(self.table, &self.node_key(commit, route), &node.encode())?;

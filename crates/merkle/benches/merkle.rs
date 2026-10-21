@@ -2,7 +2,8 @@ use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use golemdb_merkle::{
-    Blake3Hasher, BranchNodeCompact, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie,
+    Blake3Hasher, BranchNodeCompact, HashProvider, Keccak256Hasher, LeafRef, LeafStorage, RootRef,
+    Trie,
 };
 use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction};
 
@@ -34,11 +35,20 @@ fn branches(c: &mut Criterion) {
             }
             let hashes = paths.iter().map(|p| HASH.hash(p)).collect();
             let mask = ((1u32 << count) - 1) as u16;
-            let node =
-                BranchNodeCompact::new(prefix, prefix_len, mask, 0, hashes, paths, vec![]).unwrap();
+            let node = BranchNodeCompact::new(
+                prefix,
+                prefix_len,
+                mask,
+                0,
+                hashes,
+                paths,
+                vec![],
+                LeafStorage::InNode,
+            )
+            .unwrap();
             let bytes = node.encode();
             assert_eq!(
-                BranchNodeCompact::<32>::decode(&bytes, false).unwrap(),
+                BranchNodeCompact::<32>::decode(&bytes, LeafStorage::InNode).unwrap(),
                 node
             );
             let parameter = format!("children={count}/prefix={prefix_len}");
@@ -49,7 +59,10 @@ fn branches(c: &mut Criterion) {
                 BenchmarkId::new("decode", &parameter),
                 &bytes,
                 |b, bytes| {
-                    b.iter(|| BranchNodeCompact::<32>::decode(black_box(bytes), false).unwrap())
+                    b.iter(|| {
+                        BranchNodeCompact::<32>::decode(black_box(bytes), LeafStorage::InNode)
+                            .unwrap()
+                    })
                 },
             );
             fn hash_node<H: HashProvider>(

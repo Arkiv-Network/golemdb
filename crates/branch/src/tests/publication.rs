@@ -292,7 +292,11 @@ fn reachable_rows<const N: usize>(
     table: Table,
     roots: &[(Vec<u8>, RootRef<N>)],
 ) -> std::collections::BTreeSet<Vec<u8>> {
-    let leaf_rows = table == golemdb_index::tables::BITMAP_TRIE;
+    let leaf_storage = if table == golemdb_index::tables::BITMAP_TRIE {
+        golemdb_merkle::LeafStorage::Rows
+    } else {
+        golemdb_merkle::LeafStorage::InNode
+    };
     let mut seen = std::collections::BTreeSet::new();
     let mut stack: Vec<_> = roots
         .iter()
@@ -310,7 +314,7 @@ fn reachable_rows<const N: usize>(
         if !seen.insert(key) {
             continue;
         }
-        let node = golemdb_merkle::BranchNodeCompact::<N>::decode(&bytes, leaf_rows).unwrap();
+        let node = golemdb_merkle::BranchNodeCompact::<N>::decode(&bytes, leaf_storage).unwrap();
         let base = [&route[..], &node.unpack_prefix()].concat();
         for slot in 0..16 {
             if let Some(child) = node.child(slot) {
@@ -670,4 +674,31 @@ fn heads_are_published_once_and_in_order() {
         ));
     }
     assert_eq!(crate::read_head(&tx).unwrap().get(), 1);
+}
+
+#[test]
+fn a_stale_roots_row_fails_the_commit_and_keeps_the_branch_retryable() {
+    let db = MemoryStore::new();
+    seed(&db, &Keccak256Hasher, 0, &[]);
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+    let branch = stage(&branches, "Alice");
+    branches.seal(branch).unwrap();
+    // A row for the commit about to be published: `Roots` is appended, never
+    // overwritten.
+    let key = 1u64.to_be_bytes();
+    let mut tx = db.begin_write().unwrap();
+    tx.put(crate::ROOTS, &key, b"stale").unwrap();
+    tx.commit().unwrap();
+    assert!(matches!(
+        branches.commit(branch),
+        Err(BranchError::Storage(
+            golemdb_storage::StorageError::AlreadyExists
+        ))
+    ));
+    assert!(branches.branch_info(branch).unwrap().sealed);
+    assert_eq!(branches.head().unwrap().get(), 0);
+    let mut tx = db.begin_write().unwrap();
+    tx.delete(crate::ROOTS, &key).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(branches.commit(branch).unwrap().get(), 1);
 }

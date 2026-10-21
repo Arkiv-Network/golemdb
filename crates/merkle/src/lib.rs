@@ -45,7 +45,7 @@ mod trie;
 pub use config::{ConfigError, HashConfig};
 pub use error::{MerkleError, Result};
 pub use hash::{Blake3Hasher, HASH_BYTES, Hash, HashAlgorithm, HashProvider, Keccak256Hasher};
-pub use node::BranchNodeCompact;
+pub use node::{BranchNodeCompact, LeafStorage};
 pub use payload_trie::{LeafPayload, PayloadTrie};
 pub use trie::{
     BRANCH_ROOT_BYTES, BranchRef, COMMIT_BYTES, LeafRef, RootRef, Trie, Walk, leaf_key, node_key,

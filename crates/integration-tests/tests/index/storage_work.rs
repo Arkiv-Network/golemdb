@@ -163,7 +163,7 @@ fn reopened_singleton_loads_and_finalizes_its_container_once() {
 }
 
 #[test]
-fn failure_after_both_tries_change_is_rolled_back_with_flat_state() {
+fn failure_in_the_last_write_is_rolled_back_with_flat_state() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
     let mut tx = db.begin_write().unwrap();
@@ -191,15 +191,17 @@ fn failure_after_both_tries_change_is_rolled_back_with_flat_state() {
             .unwrap()
     });
     let mut tx = Observed::new(db.begin_write().unwrap());
-    tx.fail_table = Some(tables::INDEX);
+    // The index trie is written last, after the bitmap trie and the Index row.
+    tx.fail_table = Some(tables::INDEX_TRIE);
     assert!(matches!(
         index.apply(&mut tx, 0, root, [add(term(0), 65536)]),
-        Err(IndexError::Storage(_))
+        Err(IndexError::Merkle(golemdb_merkle::MerkleError::Storage(_)))
     ));
     assert_eq!(
         tx.counts.borrow().writes.get(&tables::BITMAP_TRIE),
         Some(&1)
     );
+    assert_eq!(tx.counts.borrow().writes.get(&tables::INDEX), Some(&1));
     assert_eq!(tx.counts.borrow().writes.get(&tables::INDEX_TRIE), Some(&1));
     tx.abort();
     let latest = db.begin_read().unwrap();

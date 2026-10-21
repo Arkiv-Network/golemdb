@@ -1,5 +1,26 @@
 use crate::{BranchRef, Hash, HashProvider, LeafRef, MerkleError, Result, RootRef, path};
 
+/// Where a trie keeps its leaves, and so which children a branch records the
+/// commit of.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LeafStorage {
+    /// Leaves are only entries in their parent branch; branch children have rows.
+    #[default]
+    InNode,
+    /// Every leaf is also a row of its own ([`crate::PayloadTrie`]).
+    Rows,
+}
+
+impl LeafStorage {
+    /// The children whose rows a branch locates.
+    fn stored_mask(self, state_mask: u16, tree_mask: u16) -> u16 {
+        match self {
+            Self::InNode => tree_mask,
+            Self::Rows => state_mask,
+        }
+    }
+}
+
 /// Canonical compact branch. Leaf paths and child commits are stored routing
 /// metadata and are excluded from the hash; the owner must bind each full path
 /// in its leaf hash. Child commits locate each branch child's row, and each
@@ -13,19 +34,24 @@ pub struct BranchNodeCompact<const N: usize> {
     child_hashes: Vec<Hash>,
     leaf_paths: Vec<[u8; N]>,
     child_commits: Vec<u64>,
+    leaf_storage: LeafStorage,
 }
 
 impl<const N: usize> BranchNodeCompact<N> {
     /// `prefix` is packed high nibble first, relative to this branch's depth.
     /// Hashes, leaf paths and commits follow ascending occupied slots in their
-    /// masks; there is one commit per branch child, or per child when leaves
-    /// are rows. Path widths outside 1..=32 bytes fail at compile time;
+    /// masks; there is one commit per branch child, or per child with
+    /// [`LeafStorage::Rows`]. Path widths outside 1..=32 bytes fail at compile time;
     /// malformed branch contents still return runtime errors.
     ///
     /// ```compile_fail,E0080
     /// use golemdb_merkle::BranchNodeCompact;
-    /// let _ = BranchNodeCompact::<33>::new(vec![], 0, 3, 3, vec![[0; 32]; 2], vec![], vec![0; 2]);
+    /// use golemdb_merkle::LeafStorage;
+    /// let _ = BranchNodeCompact::<33>::new(
+    ///     vec![], 0, 3, 3, vec![[0; 32]; 2], vec![], vec![0; 2], LeafStorage::InNode,
+    /// );
     /// ```
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         prefix: Vec<u8>,
         prefix_len: u8,
@@ -34,6 +60,7 @@ impl<const N: usize> BranchNodeCompact<N> {
         child_hashes: Vec<Hash>,
         leaf_paths: Vec<[u8; N]>,
         child_commits: Vec<u64>,
+        leaf_storage: LeafStorage,
     ) -> Result<Self> {
         const {
             assert!(
@@ -51,8 +78,8 @@ impl<const N: usize> BranchNodeCompact<N> {
             || tree_mask & !state_mask != 0
             || child_hashes.len() != state_mask.count_ones() as usize
             || leaf_paths.len() != (state_mask & !tree_mask).count_ones() as usize
-            || (child_commits.len() != tree_mask.count_ones() as usize
-                && child_commits.len() != state_mask.count_ones() as usize)
+            || child_commits.len()
+                != leaf_storage.stored_mask(state_mask, tree_mask).count_ones() as usize
         {
             return Err(MerkleError::InvalidNode("invalid child masks or counts"));
         }
@@ -64,16 +91,8 @@ impl<const N: usize> BranchNodeCompact<N> {
             child_hashes,
             leaf_paths,
             child_commits,
+            leaf_storage,
         })
-    }
-
-    /// The children whose rows a branch locates.
-    fn stored_mask(state_mask: u16, tree_mask: u16, leaf_rows: bool) -> u16 {
-        if leaf_rows { state_mask } else { tree_mask }
-    }
-
-    fn leaf_rows(&self) -> bool {
-        self.child_commits.len() == self.state_mask.count_ones() as usize
     }
 
     pub fn prefix(&self) -> &[u8] {
@@ -101,7 +120,7 @@ impl<const N: usize> BranchNodeCompact<N> {
         }
         let before = (1u16 << slot) - 1;
         let hash = self.child_hashes[(self.state_mask & before).count_ones() as usize];
-        let stored = Self::stored_mask(self.state_mask, self.tree_mask, self.leaf_rows());
+        let stored = (self.leaf_storage).stored_mask(self.state_mask, self.tree_mask);
         let commit = if stored & (1 << slot) != 0 {
             self.child_commits[(stored & before).count_ones() as usize]
         } else {
@@ -149,9 +168,10 @@ impl<const N: usize> BranchNodeCompact<N> {
     ///
     /// ```compile_fail,E0080
     /// use golemdb_merkle::BranchNodeCompact;
-    /// let _ = BranchNodeCompact::<0>::decode(&[], false);
+    /// use golemdb_merkle::LeafStorage;
+    /// let _ = BranchNodeCompact::<0>::decode(&[], LeafStorage::InNode);
     /// ```
-    pub fn decode(bytes: &[u8], leaf_rows: bool) -> Result<Self> {
+    pub fn decode(bytes: &[u8], leaf_storage: LeafStorage) -> Result<Self> {
         const {
             assert!(
                 N >= 1 && N <= 32,
@@ -166,8 +186,8 @@ impl<const N: usize> BranchNodeCompact<N> {
         let tree_mask = u16::from_be_bytes([header[end + 2], header[end + 3]]);
         let hash_end = end + 4 + state_mask.count_ones() as usize * 32;
         let paths_end = hash_end + (state_mask & !tree_mask).count_ones() as usize * N;
-        let commits_end = paths_end
-            + Self::stored_mask(state_mask, tree_mask, leaf_rows).count_ones() as usize * 8;
+        let commits_end =
+            paths_end + leaf_storage.stored_mask(state_mask, tree_mask).count_ones() as usize * 8;
         if bytes.len() != commits_end {
             return Err(bad());
         }
@@ -191,6 +211,7 @@ impl<const N: usize> BranchNodeCompact<N> {
             child_hashes,
             leaf_paths,
             child_commits,
+            leaf_storage,
         )
     }
 
@@ -208,7 +229,7 @@ impl<const N: usize> BranchNodeCompact<N> {
     pub(crate) fn from_children(
         prefix: &[u8],
         children: &[RootRef<N>; 16],
-        leaf_rows: bool,
+        leaf_storage: LeafStorage,
     ) -> Result<Self> {
         let mut state = 0;
         let mut tree = 0;
@@ -221,7 +242,7 @@ impl<const N: usize> BranchNodeCompact<N> {
                 RootRef::Leaf(leaf) => {
                     hashes.push(leaf.hash);
                     paths.push(leaf.path);
-                    if leaf_rows {
+                    if leaf_storage == LeafStorage::Rows {
                         commits.push(leaf.commit);
                     }
                 }
@@ -241,6 +262,7 @@ impl<const N: usize> BranchNodeCompact<N> {
             hashes,
             paths,
             commits,
+            leaf_storage,
         )
     }
 
