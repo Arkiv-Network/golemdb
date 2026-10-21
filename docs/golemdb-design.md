@@ -2,9 +2,8 @@
 
 This document is the **design record** of the GolemDB database: the schema, the
 commitment, the history mechanism, and the reserved-record structure that carries the engine's own
-state. It supersedes the working draft [golem-db-architecture.md](../golem-db-architecture.md) and
-the change set collected in [golem-db-proposals.md](../golem-db-proposals.md) for everything it
-covers. Its status is tracked **per chapter** in the register below; no chapter is called settled
+state. It supersedes the earlier working draft of the architecture and the change set of proposals
+collected alongside it, neither kept in this repository, for everything it covers. Its status is tracked **per chapter** in the register below; no chapter is called settled
 until it has passed the acceptance checks in [CHANGES.md](CHANGES.md). Requirement IDs cited here
 (SE-1, CS-5 and others) refer to the GolemDB requirements document,
 `arkiv-source-of-truth/golem-db.md`, which is maintained outside this repository.
@@ -2946,7 +2945,7 @@ The physical layout of the key index is open.
 Two additions to the shared surfaces:
 
 - **`Pruned`**, a new error — the ordinal existed but is beyond the retention window — distinct from `NotFound`, which means it never existed. A node serving historical reads needs to tell a caller which of the two happened.
-- **Metering.** Appends consume disk, so under the security property of [architecture §10](../golem-db-architecture.md#what-cost-must-be) they are metered: a `immutable_data_append` op class plus the byte term, and `immutable_data_read` plus `bytes_read` on the way out ([metering D7](golemdb-metering.md#d7-immutable-log-metering)). Who pays is the host's decision: a deployment may pass the cost to its clients, absorb it, or set the weights to zero when its clients already pay for the same bytes elsewhere.
+- **Metering.** Appends consume disk, so under metering's security aim, that no caller obtains more work or storage than it pays for ([metering](golemdb-metering.md#why)), they are metered: an `op.immutable_data_append` op class plus the byte term, and `op.immutable_data_read` plus the `read.byte` weight on the way out ([metering D7](golemdb-metering.md#d7-immutable-log-metering)). Who pays is the host's decision: a deployment may pass the cost to its clients, absorb it, or set the weights to zero when its clients already pay for the same bytes elsewhere.
 
 ### Genesis Declaration
 
@@ -3399,11 +3398,11 @@ queries, which is the one way this design can be quietly got wrong.
 
 **Cost is the canonical execution, warm or cold.** The receipt reports filter evaluation, sort and
 materialisation for the requested window, whether or not the node short-circuited any of it. This is
-not a new rule: [architecture §10](../golem-db-architecture.md#read-metering) already pins that cost
+not a new rule: [metering D6](golemdb-metering.md#d6-read-cost-model) already pins that cost
 counts the _canonical_ descent "whether or not an implementation short-circuits it", precisely so
 that a warm node and a cold one return the same receipt. A held sequence is that same situation one
-layer up, and letting it reach the ledger would make cost node-local — the fault [architecture
-§10](../golem-db-architecture.md#where-metering-happens) exists to prevent.
+layer up, and letting it reach the ledger would make cost node-local — the fault [metering D1 and
+R5](golemdb-metering.md#d1-where-metering-happens) exist to prevent.
 
 The **operator** therefore captures the saving, not the caller.
 
@@ -3452,6 +3451,7 @@ onto chapters.
 | D14 | Cost qualifications: sort is N fetches plus O(N log N) comparisons; does the warm cache hold keys or refetch; history-bitmap growth | §12, §13 |
 | D17 | Are segment columns typed? As written, no: a column is raw bytes and the application owns the format, which keeps the engine ignorant of what a receipt is. The alternative declares a §3 type per column, so a column carries a `typeTag` as a cell does — self-describing segments, tooling without application code, a complete record/cell parallel — at the cost of dragging the type system into a structure built for opaque payloads and pinning at genesis an encoding the application may want to version independently | §11 |
 | D19 | Per-commit log digest (requirement SE-1): how a digest of each segment's appended rows is defined, and whether the engine commits it (lag-one, in `#logDigests`, record 5) or the host does | §4, §11 |
+| D21 | Content addressing for large values: store a large `bytes` (or `str`) value once under its hash, with the cell holding its length and hash, so repeated values are stored only once and record scans can skip payloads. Worth it only if large repeated values are common; costs a second row per such cell, reference counting or garbage collection, and changes to history, change sets and proofs | §3, §7, §8 |
 | P08 | **Standalone negation.** Arkiv's live DSL accepts `status != "open"` and `!` on its own; the API admits negated literals; nothing here says what a negation-only query is a complement *of*. Beside a positive predicate, negation is set difference from the running intermediate and needs nothing new. Standalone negation, `EXISTS` and match-all all need a posting list of every live record — an engine-maintained `#live` index term, one container write per create and per delete. Adopt it, or drop standalone `!=` from the product. Either way, record whether the live DSL's `!=` includes records without the attribute (D01) | §5, §6, §12 |
 | P09 | **Glob `~`.** The live DSL has it; a general glob has no bounded, deterministic cost shape. Proposed: a literal with one trailing wildcard compiles to the §5 prefix scan; anything else is `InvalidQuery` | §5 |
 | T01, T02 | reth claims to verify against source: NippyJar's format properties; static-file write ordering | §11 |

@@ -4,8 +4,8 @@
 2026-10-12, so that the *Query* part of [golemdb-api.md](golemdb-api.md), which still assumes an
 ordered DNF, can be replaced by what follows. Delete this file once the API spec and D01 carry it.
 
-**Starting point:** branch `francesco/query` (revision `de4be83`, "Query equality - first draft"),
-crate `golemdb-query`; see [Staging](#staging).
+**Starting point:** `main` at `794cb44` (#50, "Implement Basic Type - API traits - Equal and In
+query operators"), crate `golemdb-query`; see [Staging](#staging).
 
 ## Principles and requirements
 
@@ -30,10 +30,10 @@ R5, R7 and D6: reads are counted, not modeled, and abort when they cross their b
 | # | Requirement | From |
 | --- | --- | --- |
 | QR1 | `query` and `count` each take an **explicit budget**, `Limited(n)` or `Unlimited`, with no default, received the same way as a `RecordOp`'s. `Unlimited` is for host-authorized estimation only. | P4; metering R7, D8 |
-| QR2 | `query` and `count` return **`Metered<T>`**: the result together with a receipt, on success and on failure, like the record calls. | P4, P5; API *Receipts* |
+| QR2 | `query` and `count` return the result **together with a receipt**, on success and on failure, like the record calls. Today every API call returns `Result<T>` with no receipt; queries move to `Metered<T>` when the API does, for every call at once. | P4, P5; API *Receipts* |
 | QR3 | The **execution order is a pure function of the query**: the order the execution rules derive from the written filter, sort and page. No statistics, caches or warm state change it or the cost. | P1, P2; metering R5, D1 |
 | QR4 | **Same query, same committed state, same pricing snapshot → same result, same cost, same stopping point** on every node and implementation. | P3; metering R1 |
-| QR5 | **Order of checks** as for every call: the target first, at no cost; then admission, validating the whole query before any state read and charged as admission; then the state reads. | metering D2 *Order of checks* |
+| QR5 | **Order of checks:** first the top-level parts not implemented yet, at no cost; then admission, validating the whole query before any state read and charged as admission; then one storage snapshot is opened and the requested commit is checked against its head; then the state reads, all from that snapshot. | metering D2 *Order of checks* |
 | QR6 | **Every step that reads state or combines sets has a known, bounded charge, checked before the step runs:** a term read, a term stepped over, a set combination, a sort-value fetch, a materialized cell read, and the modeled sort comparisons before a sort. A charge equal to the remaining budget fits. | P5; metering D2, D6 |
 | QR7 | **The first charge that does not fit stops execution** without performing that step: `OutOfBudget { required: None }`, the spent cost in the receipt, and **no partial results**. | P4, P5; metering D8 |
 | QR8 | **Caps bound what the budget cannot,** independently of the budget, which may be `Unlimited` ([Caps](#caps)). | P4 |
@@ -45,19 +45,18 @@ they fix the read operations, their order and their charge checkpoints.
 ## The call
 
 ```rust
-fn query(&self, target: ReadTarget, op: QueryOp) -> Metered<QueryPage>;
-fn count(&self, target: ReadTarget, op: CountOp) -> Metered<u64>;
+fn query(&self, commit: Option<CommitId>, op: QueryOp) -> Result<QueryPage>;
+fn count(&self, commit: Option<CommitId>, op: CountOp) -> Result<u64>;
 
-QueryOp::filter(f)                                       // the filter tree; required
+QueryOp::filter(f, budget)                               // the filter tree and the budget; both required
     .sort([SortKey::asc("price", CellType::Uint(W8))])   // optional
     .only(["owner", "status"])                           // projection, as for get
-    .limit(50)
+    .limit(50)                                           // records per page; optional
+    .max_bytes(n)                                        // bytes per page; optional
     .after(cursor) | .offset(n)                          // at most one
     .with_total()                                        // ask for total_matched
-    .budget(Budget::Limited(n))                          // required (QR1)
 
-CountOp::filter(f)
-    .budget(Budget::Limited(n))                          // required (QR1)
+CountOp::filter(f, budget)                               // both required (QR1)
 
 pub enum Budget { Limited(u64), Unlimited }
 
@@ -71,15 +70,30 @@ pub struct QueryPage {
 
 It follows the rest of the API:
 
-- **The `RecordOp` pattern:** a typed builder whose steps never fail; the first invalid step, or a
-  missing budget, is reported by the call.
-- **The same `Budget`** as the record calls, received the same way. How a builder receives a
-  required budget (a constructor argument, or a step checked at the call) is open for `RecordOp`
-  too and decided once for both.
-- **The same `Metered<T>` and `Receipt`:** `cost`, `priced_at` (the head at admission, QR9) and
-  `details`, which are zero for reads.
-- **The same `ReadTarget`:** `Head` (live paging) or `Commit(c)` (pinned). Queries read committed
-  state only, so `Branch` is rejected.
+- **The `RecordOp` pattern:** a typed builder whose steps never fail; the first invalid step is
+  reported by the call.
+- **The budget is a constructor argument, with no default.** A query without a budget cannot be
+  written: the compiler rejects it. A caller who wants no limit passes `Budget::Unlimited`
+  explicitly. A default of `Unlimited` would make a forgotten budget silent: an unbounded query on
+  a node's RPC path, or unbounded work in a block, with no error to notice. A user who wants a
+  default adds it in a thin layer of their own.
+- **The same `Budget` as the record calls, received the same way:** `RecordOp`, `QueryOp` and
+  `CountOp` all take it in their constructor. The budget is part of the request; a future
+  `ImmutableDataOp` would follow the same pattern.
+- **The same receipt as the record calls,** once the API returns `Metered<T>` (QR2): `cost`,
+  `priced_at` (the head at admission, QR9) and `details`, which are zero for reads.
+- **The same builder entry point for both:** `QueryOp::filter(f, budget)` and
+  `CountOp::filter(f, budget)`. Filter and budget are required, so they are given at construction
+  and are never steps. The code's `QueryOp::from_filter` is to be renamed.
+- **A committed state as target:** `commit` is `None` for the head (live paging) or `Some(c)` for
+  a named commit (pinned). Queries read committed state only, so no branch can be named. For now
+  only the head can be read; a commit other than the head returns `CommitUnavailable`, and
+  queries of older commits come later.
+- **The commit is checked after admission** (QR5), against the head of the storage snapshot the
+  query then reads. Admission is pure, so errors in the query itself do not depend on state.
+  Checking a commit is a state read, the head, so admission first rejects bad queries without
+  touching storage. And one snapshot serves both the check and the reads, so no commit can land
+  between them.
 
 `count` takes a filter and a budget, and runs rules 1 to 7 below: it evaluates the filter and
 returns the size of the match set, with no sorting, paging or materialization.
@@ -115,6 +129,32 @@ pub enum Filter {
 - **`Ne`, `!=` and "not in" are `Not(...)`.** Absent and other-typed cells match a `Not`
   (MongoDB-style, D01 1.5).
 - **`Exists` needs no extra index:** it is a scan over all terms of one `(field, type)` run.
+
+### Range bounds
+
+Each side of a `Range` is an explicit `std::ops::Bound`: `Included(v)`, `Excluded(v)` or
+`Unbounded`. There are no defaults; the caller states both sides.
+
+| Bounds | Result |
+| --- | --- |
+| `Included(a)` and `Included(a)` | the same as `Eq a` |
+| `Included(a)` and `Excluded(a)`, or the lower above the upper | **empty**: no error, nothing read |
+| `Unbounded` on both sides | `InvalidQuery`: no condition at all |
+| bounds of two types | `InvalidQuery`: no order between them |
+
+Bounds that admit no value are a valid description of the empty set, not a malformed query, as in
+SQL (`BETWEEN 5 AND 3`) or MongoDB (`{$gt: 5, $lt: 3}`). Business logic that computes the two
+bounds independently can produce equal or inverted bounds; matching nothing spares every caller a
+guard for that case.
+
+**Slicing convention: `[lower, upper)`.** A caller who splits a value space into slices uses
+`Included` for the lower and `Excluded` for the upper bound. Consecutive slices `[a, b)`, `[b, c)`
+then neither overlap nor leave a gap, so results over slices are consistent. Explicit bounds keep
+the other forms available, such as an inclusive upper bound at a type's largest value.
+
+**To consider:** a builder helper taking Rust's range syntax (`RangeBounds`), so `10..20` is a
+half-open slice and `10..=20` inclusive, if this makes Rust users feel at home when adopting
+GolemDB. Rust ranges cannot express an excluded lower bound, so the explicit form stays.
 
 ### Why a tree
 
@@ -172,15 +212,24 @@ The written order of the tree is the execution order. Cost and stopping point ar
 6. **Set combination.** Every `And`, `Or` and `Not` is charged for combining its children's sets,
    per bitmap container processed, so the budget also bounds set work that nesting would
    otherwise multiply.
-7. **Leaves.** `Eq`: one term read. `In`: values sorted by term key and deduplicated, one term read
-   each. `Range`, `Prefix`, `Exists`: step through the run's terms in ascending key order from the
+7. **Leaves.** `Eq`: one term read. `In`: values given in strictly ascending order, in the
+   type's order as for `Range`, which is also term key order; one term read each. Admission checks
+   the order in one pass, so its cost is linear in the number of values. `Range`, `Prefix`, `Exists`: step through the run's terms in ascending key order from the
    lower bound, charging every term stepped.
 8. **Order.** With `sort`: per level, fetch each matched record's sort value in ascending record ID
    order and charge `⌈N log₂ N⌉ × S` comparisons (D14 14.1); ties fall to the next key, then to
    record ID ascending; absent values sort last. Without `sort`: record ID ascending, which is
    creation order.
-9. **Page:** cursor or offset, then `limit`.
-10. **Materialize** the projection for the page's records only, in page order, as point reads.
+9. **Page:** cursor or offset, then the page ends at `limit` records or at `max_bytes`, whichever
+   comes first. Records are taken in query order; a record that would push the page past
+   `max_bytes` ends the page and starts the next one, but every page holds at least one record.
+   Bytes are counted on metering's byte basis (metering D4), so every node cuts the page at the
+   same record. Without `limit` or `max_bytes`, the caps `#maxQueryLimit` and `#maxQueryBytes` are
+   the defaults. The next page's `offset` is the previous one plus the records returned.
+10. **Materialize** the projection for the page's records only, in page order, as point reads. A
+    full record's size is known from its `#meta` before its cells are read, so a record that does
+    not fit is not read; with a projection, its size is known only after the reads, which are
+    charged, and the record is left out.
 11. **`total_matched`** is the size of the match set, free.
 
 Every charge is checked before its step (QR6), so `OutOfBudget` stops at the same point on every
@@ -188,16 +237,39 @@ node (QR4, QR7).
 
 ### Caps
 
-Three genesis parameters in `#params`, each `u32`, fixed per deployment and readable with `get`:
+Four genesis parameters in `#params`, each `u32`, fixed per deployment and readable with `get`:
 
-| Cap | Bounds | Why the budget does not |
-| --- | --- | --- |
-| `#maxQueryDepth` | nesting depth of the filter tree | a deeper tree overflows the evaluator's stack, which aborts the process before or regardless of any charge |
-| `#maxQueryLimit` | records per page | the size of one response and the memory to materialize it, also under `Unlimited` |
-| `#maxSortKeys` | sort keys per query | the memory and work of one sort, also under `Unlimited` |
+| Cap | Bounds | Proposed value | Code ceiling | Why the budget does not |
+| --- | --- | --- | --- | --- |
+| `#maxQueryDepth` | nesting depth of the filter tree | 16 | 64 | a deeper tree overflows the evaluator's stack, which aborts the process before or regardless of any charge |
+| `#maxQueryLimit` | records per page | 1,000 | 10,000 | the size of one response and the memory to materialize it, also under `Unlimited` |
+| `#maxQueryBytes` | bytes per page, on metering's byte basis | 160 MiB | 320 MiB | the same, for pages of large records |
+| `#maxSortKeys` | sort keys per query | 4 | 16 | the memory and work of one sort, also under `Unlimited` |
+
+Why these values:
+
+- **`#maxQueryDepth`:** real filters are shallow; Arkiv's query language yields trees of 2–4
+  levels, and an `Or` of `And` groups is two. Each level costs a few hundred bytes of stack, so
+  even the ceiling is far below a default thread stack.
+- **`#maxQueryLimit`:** common default page sizes are 100–1,000 records, hard maxima around 10,000
+  (Elasticsearch's result window, typical `eth_getLogs` result caps). `#maxQueryBytes` bounds the
+  response size; this cap bounds per-record work and memory for small records. Arkiv's purge reads
+  at most `#maxQueryLimit` entities of one expiry block per block, so the cap must be at least the
+  number of cheapest deletions that fit in its purge budget.
+- **`#maxQueryBytes`:** a page may fill a whole JSON-RPC response of a default node. Arkiv nodes run
+  on reth, whose response limit is 160 MiB by default; with bytes hex-encoded on the wire, a
+  logical page of about 80 MiB already reaches it. The ceiling is twice that, since Arkiv nodes
+  serve data rather than general-purpose traffic. A request's `max_bytes` asks for smaller pages.
+  **TODO (verify):** reth's current default for `--rpc.max-response-size`. Genesis validation
+  checks that `#maxQueryBytes` is at least the largest possible record on the same byte basis
+  (`#maxRecordCells` × the largest cell), so every record fits a page.
+- **`#maxSortKeys`:** queries sort by one or two keys, rarely three; a sort holds `N × S` values.
+  Sort is not built yet.
 
 They are genesis parameters, not node settings, because they decide whether a query is accepted,
-and Arkiv runs queries during block execution (its expiry purge), so every node must agree.
+and Arkiv runs queries during block execution (its expiry purge), so every node must agree. They
+are fixed per chain: unlike the protocol limits a host keeps in the cost schedule, they cannot be
+changed after genesis.
 
 **Policy within physics.** What depth is safe depends on the implementation, so the code defines a
 hard ceiling for each cap, versioned with the format, and genesis validation rejects a cap above
@@ -212,7 +284,8 @@ request-size limit of metering's admission procedure.
 | `InvalidArgument` | a builder step is invalid (cell name, NaN), or the budget is missing | admission work done |
 | `InvalidQuery` | the target is a branch; the tree is malformed (empty `And` / `Or`); a cursor does not match its query. Mixed or `bytes` operands cannot reach a query: they do not compile, or fail as `ValuesError` (`InvalidArgument`) when the operand is built | 0 for a branch target, else admission work done |
 | `LimitExceeded` | a cap is exceeded | admission work done |
-| `NotImplemented { operation }` | a supported-later part is used, such as `"query: sort"` | admission work done |
+| `NotImplemented { operation }` | a supported-later part is used, such as `"query: sort"` | 0 for a top-level part (sort, limit, offset, cursor), checked before admission; admission work done for an unbuilt filter node, found while admitting the tree |
+| `CommitUnavailable` | a commit other than the head is named; older commits come later | admission work done |
 | `OutOfBudget { required: None }` | a charge does not fit (QR7) | the work done before it |
 
 ### Helping callers optimize
@@ -229,36 +302,45 @@ request-size limit of metering's admission procedure.
 The whole API above exists from the start; unsupported parts return `NotImplemented`, naming the
 part. The shape never changes, only what is implemented behind it.
 
-**Starting point: `francesco/query`.** It has:
+**State on `main` (`794cb44`, #50).** `golemdb-query` and the `api` crate provide:
 
-- `Query` with one variant, `Predicate { field, op, value }`; `Op::Eq` only.
-- `Value`: a typed literal for every indexable type, with `From` conversions for the common Rust
-  types.
-- `execute(&impl PostingSource, &Query) -> RoaringTreemap`: the matching record IDs, ascending.
+- `Api::query` and `Api::count` on committed state, at the head; records are returned as `get`
+  returns them, in record ID order, with projection and `total_matched`.
+- `Filter` with `Eq`, `In` and `Range`; `QueryOp` and `CountOp` with every field of the call
+  above except the cursor.
+- Admission before any state read, building a plan: one term read for `Eq`, one per distinct term
+  in key order for `In`, a lazy scan of one typed run for `Range`, nothing for a leaf that admits
+  no value.
 - `PostingSource`, a storage seam, with `IndexSource` over an `Index` at one read snapshot.
-- Typed semantics as specified. Query terms use the same `IndexTerm::new` as the write path, and
-  tests check that both agree for every type.
+- Typed semantics as specified. Query terms use the same `IndexTerm` encoding as the write path.
+- Property tests per leaf against a model.
 
-It is based on the older `main` and does not yet build on `feature/golem-db-api`. Missing for
-users: `Api::query` and `count`, more than one predicate, operators other than `Eq`, records
-instead of IDs, sort, paging, budget and receipt.
+Gaps against this proposal:
+
+- Sort, `limit` and `offset` return `NotImplemented`; `And`, `Or`, `Not`, `Prefix`, `Exists` and
+  the cursor do not exist yet.
+- The budget is an optional step, neither required nor enforced; it becomes a constructor
+  argument. No receipt, no caps.
+- `QueryOp::from_filter` is to be renamed to `QueryOp::filter`.
+- `In` accepts values in any order and deduplicates them; it is to require strictly ascending
+  values.
+- `max_bytes` and `#maxQueryBytes` do not exist yet.
 
 **Steps:**
 
-| Step | Contents |
-| --- | --- |
-| Rebase | onto `feature/golem-db-api` (storage renames, `api` crate) |
-| Tree | `Filter`, `QueryOp`, `CountOp`, admission validation, caps |
-| Boolean | `And`, `Or`, `Not` inside `And`, `In` |
-| Scans | `Range`, `Prefix`, `Exists` over a typed run |
-| API | `query`, `count`, snapshot selection, record IDs → records, projection |
-| Sort | multi-key, typed, absent last, record ID tie-break |
-| Paging | `limit`, `offset`, then the cursor |
-| Metering hooks | counts of reads, steps, set combinations, fetches; budget checkpoints |
-| Tests | property tests against a naive reference evaluator |
+| Step | Contents | Status |
+| --- | --- | --- |
+| Tree | `Filter`, `QueryOp`, `CountOp`, admission validation, caps | done except caps and the tree nodes |
+| Boolean | `And`, `Or`, `Not` inside `And`, `In` | `In` done |
+| Scans | `Range`, `Prefix`, `Exists` over a typed run | `Range` done |
+| API | `query`, `count`, snapshot selection, record IDs → records, projection | done for the head |
+| Sort | multi-key, typed, absent last, record ID tie-break | open |
+| Paging | `limit`, `offset`, then the cursor | open |
+| Metering hooks | counts of reads, steps, set combinations, fetches; budget checkpoints | open |
+| Tests | property tests against a naive reference evaluator | per leaf; tree-level open |
 
 A first cut (MVP): `Eq`, `In`, `Range`, `And`, materialization, `limit` / `offset`, `count`, and
-`NotImplemented` for the rest. Standalone `Not` waits for P08, the cursor for D11.
+`NotImplemented` for the rest. Still missing from it: `And`, `limit` and `offset`. Standalone `Not` waits for P08, the cursor for D11.
 
 ## Decisions needed
 
@@ -272,11 +354,11 @@ A first cut (MVP): `Eq`, `In`, `Range`, `And`, materialization, `limit` / `offse
 
 - `golemdb-api.md`: replace *Specified, not yet implemented → Query* with the call, the tree, the
   execution rules, the caps and the errors; update *Further errors* (`LimitExceeded` now names the
-  three caps).
+  four caps).
 - `decisions_for_architect.md` and `CHANGES.md` D01: record the switch to a tree.
 - `decisions_for_architect.md` D09 item 9.13: replace the DNF caps (`#maxFilterGroups`,
-  `#maxPredicatesPerGroup`) with `#maxQueryDepth`, `#maxQueryLimit`, `#maxSortKeys`.
-- `golemdb-design.md` §4 `#params` table: add the three caps.
+  `#maxPredicatesPerGroup`) with `#maxQueryDepth`, `#maxQueryLimit`, `#maxQueryBytes`, `#maxSortKeys`.
+- `golemdb-design.md` §4 `#params` table: add the four caps.
 - `golemdb-metering.md` D6: charge set combinations per bitmap container.
 - `api-priorities.md`: add the query MVP to the 2-week scope.
 - Delete this file.
