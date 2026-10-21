@@ -1,291 +1,188 @@
-use std::collections::{BTreeMap, btree_map::Entry};
+use golemdb_record::{CreateEntry, PatchChange, PatchEntry};
 
-use golemdb_record::{CellPatch, RecordCells, RecordPatch};
+use crate::{Budget, CellKind, CellName, CellNameRef, CellValue, RecordKey};
 
-use crate::{ApiError, CellKind, CellName, CellNameRef, CellValue, RecordKey, Result};
-
-/// Operation types used by [`RecordOp`] and the CRUD methods of [`crate::Api`].
-/// Their contents are built through RecordOp constructors and helpers.
 pub mod op {
     use super::*;
-
-    /// Create a caller-keyed record, optionally with user cells.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Create {
-        pub(super) cells: RecordCells,
+        pub(super) entries: Vec<CreateEntry>,
     }
-
-    /// Set or remove user cells on an existing record.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Patch {
-        pub(super) patch: RecordPatch,
+        pub(super) entries: Vec<PatchEntry>,
     }
-
-    /// Read all cells or an explicit projection.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Get {
         pub(super) names: Option<Vec<CellName>>,
     }
-
-    /// Delete a record and its binding.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Delete;
 }
 
-/// An owned, typed CRUD request. The key is required at construction; branch or
-/// read target is chosen when executing the request through [`crate::Api`].
-/// Requests can be cloned and inspected by API implementations and mocks.
-///
-/// Write helpers accept explicit [`CellValue`]s and immediately reject invalid
-/// names, incompatible kinds, and duplicate names. Deployment limits and record
-/// existence are checked at execution. Empty creates and patches are valid.
+/// A typed request with an explicit budget. Builder steps only collect input:
+/// names, values, requested kinds and duplicates are preserved without validation
+/// or normalization. Record execution admits the input after handle/snapshot
+/// selection and returns any error with a receipt. There is no validation shortcut.
+/// Budgets reach record execution but remain unenforced until metering is added.
 ///
 /// Only patch operations support removals:
 /// ```compile_fail
-/// use golemdb_api::{RecordKey, RecordOp};
-/// RecordOp::create(RecordKey([1; 32])).remove("price");
+/// use golemdb_api::{Budget, RecordKey, RecordOp};
+/// RecordOp::create(RecordKey([1; 32]), Budget::Limited(100)).remove("price");
 /// ```
-/// Read operations cannot write cells:
+/// Reads cannot write cells:
 /// ```compile_fail
-/// use golemdb_api::{CellValue, RecordKey, RecordOp};
-/// RecordOp::get(RecordKey([1; 32])).field("price", CellValue::from_i32(50));
+/// use golemdb_api::{Budget, CellValue, RecordKey, RecordOp};
+/// RecordOp::get(RecordKey([1; 32]), Budget::Limited(100)).field("price", CellValue::from_i32(50));
 /// ```
-/// CRUD methods require the matching operation type:
+/// Calls require the matching operation type:
 /// ```compile_fail
-/// use golemdb_api::{Api, BranchId, RecordKey, RecordOp};
-/// fn wrong_operation(api: &dyn Api, branch: BranchId) {
-///     api.create(branch, RecordOp::delete(RecordKey([1; 32])));
+/// use golemdb_api::{Api, BranchId, Budget, RecordKey, RecordOp};
+/// fn wrong(api: &dyn Api, branch: BranchId) {
+///     api.create(branch, RecordOp::delete(RecordKey([1; 32]), Budget::Limited(100)));
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct RecordOp<Op> {
     key: RecordKey,
+    budget: Budget,
     operation: Op,
 }
 
 impl<Op> RecordOp<Op> {
-    /// The caller-provided key, shared by all operation types.
+    fn new(key: RecordKey, budget: Budget, operation: Op) -> Self {
+        Self {
+            key,
+            budget,
+            operation,
+        }
+    }
     pub fn record_key(&self) -> RecordKey {
         self.key
+    }
+    pub fn budget(&self) -> Budget {
+        self.budget
+    }
+    pub fn max_cost(&self) -> Option<u64> {
+        match self.budget {
+            Budget::Limited(n) => Some(n),
+            Budget::Unlimited => None,
+        }
     }
 }
 
 impl RecordOp<op::Create> {
-    /// Create a record with its system identity and initially no user cells.
-    pub fn create(key: RecordKey) -> Self {
-        Self {
+    pub fn create(key: RecordKey, budget: Budget) -> Self {
+        Self::new(
             key,
-            operation: op::Create {
-                cells: RecordCells::new(),
+            budget,
+            op::Create {
+                entries: Vec::new(),
             },
-        }
-    }
-
-    /// Insert an already-constructed value, retaining its kind and type.
-    /// Repeated names are errors rather than implicit overwrites.
-    pub fn insert(self, name: &str, value: CellValue) -> Result<Self> {
-        self.write("insert", name, value)
-    }
-
-    fn write(mut self, step: &str, name: &str, value: CellValue) -> Result<Self> {
-        insert_named(&mut self.operation.cells, step, name.as_bytes(), value)?;
-        Ok(self)
-    }
-
-    pub fn attribute(self, name: &str, value: CellValue) -> Result<Self> {
-        self.write(
-            "attribute",
-            name,
-            value
-                .with_kind(CellKind::Attribute)
-                .map_err(|error| located("attribute", name.as_bytes(), error.into()))?,
         )
     }
-
-    pub fn field(self, name: &str, value: CellValue) -> Result<Self> {
-        self.write(
-            "field",
-            name,
-            value
-                .with_kind(CellKind::Field)
-                .map_err(|error| located("field", name.as_bytes(), error.into()))?,
-        )
+    pub fn attribute(self, name: &str, value: CellValue) -> Self {
+        self.write(name, value, CellKind::Attribute)
     }
-
-    /// Look up a supplied value without exposing the record layer's map type.
-    pub fn value(&self, name: impl AsRef<[u8]>) -> Option<&CellValue> {
-        self.operation.cells.get(name.as_ref())
+    pub fn field(self, name: &str, value: CellValue) -> Self {
+        self.write(name, value, CellKind::Field)
     }
-
-    /// Supplied cells in byte order, for API adapters and mocks.
-    pub fn cells(&self) -> impl ExactSizeIterator<Item = (&CellName, &CellValue)> {
-        self.operation.cells.iter()
+    fn write(mut self, name: &str, value: CellValue, kind: CellKind) -> Self {
+        self.operation.entries.push(CreateEntry {
+            name: CellNameRef::raw(name.as_bytes()).into(),
+            value,
+            kind,
+        });
+        self
     }
-
-    pub(crate) fn into_create(self) -> (RecordKey, RecordCells) {
-        (self.key, self.operation.cells)
+    /// Original entries in caller order, including invalid names and duplicates.
+    /// The requested kind is separate from the unchanged value's kind.
+    pub fn entries(&self) -> &[CreateEntry] {
+        &self.operation.entries
+    }
+    pub(crate) fn into_create(self) -> (RecordKey, Budget, Vec<CreateEntry>) {
+        (self.key, self.budget, self.operation.entries)
     }
 }
 
 impl RecordOp<op::Patch> {
-    /// Start an empty patch. Removing every user cell preserves record identity.
-    pub fn patch(key: RecordKey) -> Self {
-        Self {
+    pub fn patch(key: RecordKey, budget: Budget) -> Self {
+        Self::new(
             key,
-            operation: op::Patch {
-                patch: RecordPatch::new(),
+            budget,
+            op::Patch {
+                entries: Vec::new(),
             },
-        }
+        )
     }
-
-    /// Set a value while retaining its existing kind and type.
-    pub fn set(self, name: &str, value: CellValue) -> Result<Self> {
-        self.edit("set", name, CellPatch::Set(value))
+    /// Replace an existing value, preserving its stored kind, but not its type.
+    pub fn set(self, name: &str, value: CellValue) -> Self {
+        self.edit(name, PatchChange::Set(value))
     }
-
-    pub fn attribute(self, name: &str, value: CellValue) -> Result<Self> {
+    pub fn attribute(self, name: &str, value: CellValue) -> Self {
         self.edit(
-            "attribute",
             name,
-            CellPatch::Set(
-                value
-                    .with_kind(CellKind::Attribute)
-                    .map_err(|error| located("attribute", name.as_bytes(), error.into()))?,
-            ),
+            PatchChange::Write {
+                value,
+                kind: CellKind::Attribute,
+            },
         )
     }
-
-    pub fn field(self, name: &str, value: CellValue) -> Result<Self> {
+    pub fn field(self, name: &str, value: CellValue) -> Self {
         self.edit(
-            "field",
             name,
-            CellPatch::Set(
-                value
-                    .with_kind(CellKind::Field)
-                    .map_err(|error| located("field", name.as_bytes(), error.into()))?,
-            ),
+            PatchChange::Write {
+                value,
+                kind: CellKind::Field,
+            },
         )
     }
-
-    pub fn remove(self, name: &str) -> Result<Self> {
-        self.edit("remove", name, CellPatch::Remove)
+    pub fn remove(self, name: &str) -> Self {
+        self.edit(name, PatchChange::Remove)
     }
-
-    fn edit(mut self, step: &str, name: &str, change: CellPatch) -> Result<Self> {
-        insert_named(&mut self.operation.patch, step, name.as_bytes(), change)?;
-        Ok(self)
+    fn edit(mut self, name: &str, change: PatchChange) -> Self {
+        self.operation.entries.push(PatchEntry {
+            name: CellNameRef::raw(name.as_bytes()).into(),
+            change,
+        });
+        self
     }
-
-    /// A value supplied by this patch, absent for removals and unmentioned cells.
-    pub fn value(&self, name: impl AsRef<[u8]>) -> Option<&CellValue> {
-        match self.operation.patch.get(name.as_ref()) {
-            Some(CellPatch::Set(value)) => Some(value),
-            _ => None,
-        }
+    /// Original requested changes in caller order, including duplicates.
+    pub fn entries(&self) -> &[PatchEntry] {
+        &self.operation.entries
     }
-
-    /// Whether this patch explicitly removes the named cell.
-    pub fn removes(&self, name: impl AsRef<[u8]>) -> bool {
-        matches!(
-            self.operation.patch.get(name.as_ref()),
-            Some(CellPatch::Remove)
-        )
-    }
-
-    /// Changes in byte order. Some(value) sets a cell; None removes it.
-    pub fn changes(&self) -> impl ExactSizeIterator<Item = (&CellName, Option<&CellValue>)> {
-        self.operation.patch.iter().map(|(name, change)| {
-            (
-                name,
-                match change {
-                    CellPatch::Set(value) => Some(value),
-                    CellPatch::Remove => None,
-                },
-            )
-        })
-    }
-
-    pub(crate) fn into_patch(self) -> (RecordKey, RecordPatch) {
-        (self.key, self.operation.patch)
+    pub(crate) fn into_patch(self) -> (RecordKey, Budget, Vec<PatchEntry>) {
+        (self.key, self.budget, self.operation.entries)
     }
 }
 
 impl RecordOp<op::Get> {
-    /// Read the complete record, including #key.
-    pub fn get(key: RecordKey) -> Self {
-        Self {
-            key,
-            operation: op::Get { names: None },
-        }
+    pub fn get(key: RecordKey, budget: Budget) -> Self {
+        Self::new(key, budget, op::Get { names: None })
     }
-
-    /// Replace the projection with text or raw byte names, deduplicated in byte
-    /// order. Reserved and binary names are readable. An empty selection returns
-    /// no cells while still checking record existence.
+    /// Retain raw projection names in caller order, including duplicates.
+    /// Execution normalizes them after selecting the target. Empty means existence only.
     pub fn only<I, N>(mut self, names: I) -> Self
     where
         I: IntoIterator<Item = N>,
         N: AsRef<[u8]>,
     {
-        self.operation.names = Some(CellName::projection(names));
+        self.operation.names = Some(
+            names
+                .into_iter()
+                .map(|name| CellNameRef::raw(name.as_ref()).into())
+                .collect(),
+        );
         self
     }
-
-    /// None selects the full record; Some([]) selects no cells.
     pub fn names(&self) -> Option<&[CellName]> {
         self.operation.names.as_deref()
     }
 }
-
 impl RecordOp<op::Delete> {
-    /// Delete the record and its binding without reclaiming its internal ID.
-    pub fn delete(key: RecordKey) -> Self {
-        Self {
-            key,
-            operation: op::Delete,
-        }
-    }
-}
-
-fn validate_name(step: &str, name: &[u8]) -> Result<CellName> {
-    // The builder has no database configuration. Validate only grammar; record
-    // admission checks #maxCellNameLen against the deployment's actual value.
-    CellNameRef::parse_user(name, usize::MAX)
-        .map(Into::into)
-        .map_err(|error| located(step, name, error.into()))
-}
-
-fn insert_named<T>(
-    values: &mut BTreeMap<CellName, T>,
-    step: &str,
-    name: &[u8],
-    value: T,
-) -> Result<()> {
-    match values.entry(validate_name(step, name)?) {
-        Entry::Vacant(entry) => {
-            entry.insert(value);
-            Ok(())
-        }
-        Entry::Occupied(_) => Err(located(
-            step,
-            name,
-            ApiError::invalid_argument("duplicate cell name"),
-        )),
-    }
-}
-
-fn located(step: &str, name: &[u8], error: ApiError) -> ApiError {
-    match error {
-        ApiError::InvalidArgument { message, source } => {
-            let name = match std::str::from_utf8(name) {
-                Ok(text) => format!("{text:?}"),
-                Err(_) => format!("{name:?}"),
-            };
-            ApiError::InvalidArgument {
-                message: format!("{step}({name}): {message}"),
-                source,
-            }
-        }
-        error => error,
+    pub fn delete(key: RecordKey, budget: Budget) -> Self {
+        Self::new(key, budget, op::Delete)
     }
 }

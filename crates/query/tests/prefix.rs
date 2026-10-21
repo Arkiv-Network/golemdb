@@ -100,9 +100,7 @@ fn only_attributes_match_a_prefix() {
     let test = TestDb::default();
     test.create([
         record(key(1), &[("f", str("abc"))]),
-        RecordOp::create(key(2))
-            .field("f", str("abc"))
-            .expect("valid field"),
+        RecordOp::create(key(2), golemdb_api::Budget::Limited(u64::MAX)).field("f", str("abc")),
     ]);
     for start in ["", "a", "abc"] {
         assert_eq!(

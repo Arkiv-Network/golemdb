@@ -39,15 +39,15 @@ let branch = db.begin()?;
 let key = RecordKey([0x42; 32]);
 db.create(
     branch,
-    RecordOp::create(key)
-        .attribute("price", CellValue::from_i32(50))?
-        .field("description", CellValue::from_str("A product"))?,
-)?;
+    RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+        .attribute("price", CellValue::from_i32(50))
+        .field("description", CellValue::from_str("A product")),
+).into_result()?;
 let pending = db
     .clone()
-    .get(ReadTarget::Branch(branch), RecordOp::get(key))?;
+    .get(ReadTarget::Branch(branch), RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 db.commit(branch)?;
-assert_eq!(db.get(ReadTarget::Head, RecordOp::get(key))?, pending);
+assert_eq!(db.get(ReadTarget::Head, RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?, pending);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -62,13 +62,13 @@ use golemdb_api::{CellValue, RecordKey, RecordOp};
 
 let key = RecordKey([0x42; 32]);
 
-let record = RecordOp::create(key)
-    .attribute("price", CellValue::from_i32(50))?
-    .field("description", CellValue::from_str("A product"))?;
-let patch = RecordOp::patch(key)
-    .attribute("price", CellValue::from_i32(75))?
-    .remove("description")?;
-let read = RecordOp::get(key).only(["price", "#key"]);
+let record = RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+    .attribute("price", CellValue::from_i32(50))
+    .field("description", CellValue::from_str("A product"));
+let patch = RecordOp::patch(key, golemdb_api::Budget::Limited(u64::MAX))
+    .attribute("price", CellValue::from_i32(75))
+    .remove("description");
+let read = RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX)).only(["price", "#key"]);
 # Ok::<(), golemdb_api::ApiError>(())
 ```
 
@@ -76,29 +76,59 @@ let read = RecordOp::get(key).only(["price", "#key"]);
 `RecordOp<op::Delete>` bundle the key with that operation's inputs. Each CRUD method
 accepts only its matching type; branch or read target stays a separate argument.
 Caller-provided keys are required in every constructor. For deletion, use
-`db.delete(branch, RecordOp::delete(key))`.
+`db.delete(branch, RecordOp::delete(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()`.
 
-Explicit cell constructors own value encoding. The operation helpers choose field or
-attribute kind; create's `.insert()` and patch's `.set()` preserve the supplied
-value's kind. Builders reject invalid names, unindexable attributes, and duplicate
-names, including a set and removal for the same name. Errors are returned immediately
-and identify the step and cell, for example `attribute("payload"): invalid cell value`;
-the typed cause is available through `Error::source()`. Error messages provide context
-without repeating the cause. Deployment limits and record invariants remain
-execution-time checks in record.
+Explicit cell constructors own value encoding. `.attribute()` and `.field()` record
+an explicit requested kind without changing the supplied value. A patch's `.set()`
+preserves the stored kind and fails with `CellNotFound` if the cell is absent; a
+create has no `.set()` or `.insert()`.
 
-Operations implement `Clone`, `PartialEq`, and `Eq` for mocks and retry preparation.
-All expose `record_key()`. Creates expose `value()` and `cells()`; patches expose
-`value()`, `removes()`, and `changes()` (a value for sets, `None` for removals).
-Reads expose `names()`. The API no longer re-exports `RecordCells`, `RecordPatch`,
-or `CellPatch`; those types remain available in the lower-level record crate.
-Metering options and receipts will be designed in a later increment.
+Builder steps only collect input, preserving order, duplicates and malformed names.
+They perform no request validation or normalization and provide no `validate()`
+method. After handle/snapshot selection, record execution checks reserved keys,
+then admits entries in input order: name/value lengths, name grammar, requested
+kind and duplicate names. Admission errors retain their typed cause through
+`Error::source()` and return a receipt with zero write effects.
+
+Operations implement `Clone`, `PartialEq`, and `Eq`. All expose `record_key()`,
+`budget()` and `max_cost()`. Create and patch expose `entries()` as an ordered slice
+of `CreateEntry` or `PatchEntry`; these include invalid and duplicate entries.
+`CreateEntry.kind` and `PatchChange::Write { kind, value }` keep the requested kind
+separate from the original value. `PatchChange::Set` and `Remove` preserve the other
+patch actions. Reads expose the original projection through `names()`.
+
+The API transfers these record-owned entries and the budget to execution without
+building a second validated map. The private record admission module prepares that
+map. Metering will check each admission charge before the corresponding work;
+validation that rejects input must still record its charge before returning the
+error. Charging and total request-size/count caps remain planned work. Typed value
+construction, input allocation and transport decoding remain host responsibilities.
+
+## Receipts and budgets
+
+CRUD, query and count return `Metered<T> { result, receipt }` on both success and
+failure. Read the receipt before propagating an error; `.into_result()?` explicitly
+discards it. `map` and `map_err` preserve the receipt.
+
+`receipt.cost` is currently **zero**. `receipt.priced_at` is the branch origin or
+committed snapshot's head, including for rejected historical reads. Invalid handles
+and failures before selecting a snapshot have no pricing commit. `receipt.details`
+counts actual user-cell changes and encoded bytes; it excludes system cells,
+no-ops, failed writes and reads. Rollback does not revoke earlier receipts.
+
+Every request constructor requires `Budget::Limited(n)` or `Budget::Unlimited`:
+`RecordOp::create(key, budget)`, `patch(key, budget)`, `get(key, budget)`,
+`delete(key, budget)`, `QueryOp::from_filter(filter, budget)` and
+`CountOp::filter(filter, budget)`. Budgets are stored but **not enforced** yet,
+including a zero budget. `OutOfBudget { required }` is defined for later enforcement
+and is never returned in this increment. Unlimited use is an explicit host decision.
 
 `ReadTarget::Branch(id)` reads work in progress. `ReadTarget::Head` resolves head
 and reads the record in one storage snapshot. `ReadTarget::Commit(id)` currently
 accepts only that snapshot's head; historical reads are deferred.
-`RecordOp::get(key)` reads all cells. Its `.only(names)` helper accepts text or raw
-byte names for reserved records, deduplicated in byte order. Calling `.only()` again
+`RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))` reads all cells. Its `.only(names)` helper accepts text or raw
+byte names for reserved records. The builder preserves duplicates and input order;
+execution deduplicates and sorts after selecting the target. Calling `.only()` again
 replaces the projection; an empty projection still checks existence.
 
 `ApiError` exposes common failures directly and retains diagnostic sources for
@@ -120,7 +150,7 @@ or discard.
 A record may have zero user cells. A full read still contains its system `#key`;
 its binding and identity remain until `delete`. Removing the last user cell does
 not delete the record. An empty projection returns no cells but still verifies
-that the record exists. `#meta` and metering remain deferred.
+that the record exists. `#meta` and operation pricing remain deferred.
 
 ```rust
 use golemdb_api::{
@@ -141,23 +171,23 @@ let config = OpenConfig::new(Genesis::new(
 let db = Database::open("./golemdb-empty-records", &config)?;
 let branch = db.begin()?;
 let key = RecordKey([7; 32]);
-db.create(branch, RecordOp::create(key))?;
+db.create(branch, RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 db.patch(
     branch,
-    RecordOp::patch(key).attribute("price", CellValue::from_i32(50))?,
-)?;
-db.patch(branch, RecordOp::patch(key).remove("price")?)?;
+    RecordOp::patch(key, golemdb_api::Budget::Limited(u64::MAX)).attribute("price", CellValue::from_i32(50)),
+).into_result()?;
+db.patch(branch, RecordOp::patch(key, golemdb_api::Budget::Limited(u64::MAX)).remove("price")).into_result()?;
 db.commit(branch)?;
 
-let empty = db.get(ReadTarget::Head, RecordOp::get(key))?;
+let empty = db.get(ReadTarget::Head, RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 assert_eq!(empty.cells.len(), 1);
 assert_eq!(empty.cells[b"#key".as_slice()].as_bytes32(), Some(key.0));
 
 let branch = db.begin()?;
-db.delete(branch, RecordOp::delete(key))?;
+db.delete(branch, RecordOp::delete(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 db.commit(branch)?;
 assert!(matches!(
-    db.get(ReadTarget::Head, RecordOp::get(key)),
+    db.get(ReadTarget::Head, RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result(),
     Err(ApiError::NotFound)
 ));
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -211,11 +241,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ] {
         db.create(
             branch,
-            RecordOp::create(key)
-                .attribute("name", CellValue::from_str(name))?
-                .attribute("price_cents", CellValue::from_i32(price_cents))?
-                .field("description", CellValue::from_str(description))?,
-        )?;
+            RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+                .attribute("name", CellValue::from_str(name))
+                .attribute("price_cents", CellValue::from_i32(price_cents))
+                .field("description", CellValue::from_str(description)),
+        ).into_result()?;
     }
     // Seal computes roots and freezes the branch; nothing is published yet.
     let first_seal = db.seal(branch)?;
@@ -227,7 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(first_commit.get(), 1); // Opening created genesis at commit 0.
 
     // 2. Read a full record and a projection from committed state.
-    let saved_laptop = db.get(ReadTarget::Head, RecordOp::get(laptop))?;
+    let saved_laptop = db.get(ReadTarget::Head, RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
     assert_eq!(
         saved_laptop.cells[b"price_cents".as_slice()].as_i32(),
         Some(120_000)
@@ -240,8 +270,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An explicit commit target is supported while that commit is the head.
     let saved_keyboard = db.get(
         ReadTarget::Commit(first_commit),
-        RecordOp::get(keyboard).only(["name", "price_cents"]),
-    )?;
+        RecordOp::get(keyboard, golemdb_api::Budget::Limited(u64::MAX)).only(["name", "price_cents"]),
+    ).into_result()?;
     assert_eq!(saved_keyboard.cells.len(), 2);
     assert_eq!(
         saved_keyboard.cells[b"name".as_slice()].as_str(),
@@ -253,41 +283,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let branch = db.begin()?;
     db.patch(
         branch,
-        RecordOp::patch(laptop)
-            .attribute("price_cents", CellValue::from_i32(110_000))?
-            .field("stock", CellValue::from_u32(5))?
-            .remove("description")?,
-    )?;
+        RecordOp::patch(laptop, golemdb_api::Budget::Limited(u64::MAX))
+            .attribute("price_cents", CellValue::from_i32(110_000))
+            .field("stock", CellValue::from_u32(5))
+            .remove("description"),
+    ).into_result()?;
     db.create(
         branch,
-        RecordOp::create(monitor)
-            .attribute("name", CellValue::from_str("Monitor"))?
-            .attribute("price_cents", CellValue::from_i32(30_000))?
-            .field("description", CellValue::from_str("27-inch monitor"))?,
-    )?;
-    db.delete(branch, RecordOp::delete(mouse))?;
+        RecordOp::create(monitor, golemdb_api::Budget::Limited(u64::MAX))
+            .attribute("name", CellValue::from_str("Monitor"))
+            .attribute("price_cents", CellValue::from_i32(30_000))
+            .field("description", CellValue::from_str("27-inch monitor")),
+    ).into_result()?;
+    db.delete(branch, RecordOp::delete(mouse, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 
     // Branch reads see the changes immediately; head still contains commit 1.
-    let pending_laptop = db.get(ReadTarget::Branch(branch), RecordOp::get(laptop))?;
+    let pending_laptop = db.get(ReadTarget::Branch(branch), RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
     assert_eq!(
         pending_laptop.cells[b"price_cents".as_slice()].as_i32(),
         Some(110_000)
     );
     assert_eq!(
-        db.get(ReadTarget::Head, RecordOp::get(laptop))?,
+        db.get(ReadTarget::Head, RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?,
         saved_laptop
     );
     assert!(matches!(
-        db.get(ReadTarget::Branch(branch), RecordOp::get(mouse)),
+        db.get(ReadTarget::Branch(branch), RecordOp::get(mouse, golemdb_api::Budget::Limited(u64::MAX))).into_result(),
         Err(ApiError::NotFound)
     ));
-    assert!(db.get(ReadTarget::Head, RecordOp::get(mouse)).is_ok());
+    assert!(db.get(ReadTarget::Head, RecordOp::get(mouse, golemdb_api::Budget::Limited(u64::MAX))).into_result().is_ok());
 
     // Sealing preserves branch reads and rejects writes, checkpoints, and rollback.
     // The seal-added #roots cell becomes visible only after commit.
     let second_seal = db.seal(branch)?;
     assert_eq!(
-        db.get(ReadTarget::Branch(branch), RecordOp::get(laptop))?,
+        db.get(ReadTarget::Branch(branch), RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?,
         pending_laptop
     );
     println!("Candidate commit: {}", second_seal.commit_id);
@@ -295,7 +325,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Index root: {:02x?}", second_seal.index_root);
     assert_eq!(db.head()?, first_commit);
     assert_eq!(
-        db.get(ReadTarget::Head, RecordOp::get(laptop))?,
+        db.get(ReadTarget::Head, RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?,
         saved_laptop
     );
     assert_eq!(db.seal(branch)?, second_seal); // Repeated seal returns the same result.
@@ -308,18 +338,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Read again: laptop changed, keyboard stayed the same, monitor appeared,
     //    and mouse disappeared. Use Head now; historical commit 1 is deferred.
-    let updated_laptop = db.get(ReadTarget::Head, RecordOp::get(laptop))?;
+    let updated_laptop = db.get(ReadTarget::Head, RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
     assert_eq!(updated_laptop, pending_laptop);
     assert_eq!(updated_laptop.cells[b"stock".as_slice()].as_u32(), Some(5));
     assert!(!updated_laptop.cells.contains_key(b"description".as_slice()));
 
     let unchanged_keyboard = db.get(
         ReadTarget::Head,
-        RecordOp::get(keyboard).only(["name", "price_cents"]),
-    )?;
+        RecordOp::get(keyboard, golemdb_api::Budget::Limited(u64::MAX)).only(["name", "price_cents"]),
+    ).into_result()?;
     assert_eq!(unchanged_keyboard, saved_keyboard);
 
-    let new_monitor = db.get(ReadTarget::Head, RecordOp::get(monitor))?;
+    let new_monitor = db.get(ReadTarget::Head, RecordOp::get(monitor, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
     assert_eq!(
         new_monitor.cells[b"name".as_slice()].as_str(),
         Some("Monitor")
@@ -329,7 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(30_000)
     );
     assert!(matches!(
-        db.get(ReadTarget::Head, RecordOp::get(mouse)),
+        db.get(ReadTarget::Head, RecordOp::get(mouse, golemdb_api::Budget::Limited(u64::MAX))).into_result(),
         Err(ApiError::NotFound)
     ));
 

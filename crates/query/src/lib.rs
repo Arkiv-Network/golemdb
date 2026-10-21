@@ -5,13 +5,11 @@
 //! only the `i32` run of `amount`, so a cell of another type under the same
 //! name is treated as absent. Only attribute cells are indexed, so only they match.
 //!
-//! Queries read committed state: the head (`None`), or a named commit. The
-//! whole request is admitted before any state read. The filter's match set and
-//! the returned records are then read from one storage snapshot. Opening it
-//! reads the head, so a requested commit other than the head fails there,
-//! after admission. Filter
-//! evaluation itself never touches storage: it reads the index through a
-//! private seam, so it is unit-tested with a fake.
+//! Queries select the committed head (`None`) or a named commit before admission.
+//! The selected snapshot supplies the pricing head, index reads and materialized
+//! records, including on failure. Non-head historical reads remain unsupported.
+//! Report variants retain that context for API receipts. Explicit budgets are
+//! stored but not enforced yet. Filter evaluation uses a private index seam.
 //!
 //! Callers reach queries through `golemdb_api::Database`, which builds its
 //! [`Queries`] over the store its branch manager writes through:
@@ -33,16 +31,16 @@
 //! let branch = db.begin()?;
 //! db.create(
 //!     branch,
-//!     RecordOp::create(key).attribute("color", CellValue::from_str("blue"))?,
-//! )?;
+//!     RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX)).attribute("color", CellValue::from_str("blue")),
+//! ).into_result()?;
 //! db.commit(branch)?;
 //!
 //! let filter = Filter::Eq {
 //!     field: CellNameRef::parse_user(b"color", 32)?.into(),
 //!     value: EqValue::of(Str, "blue"),
 //! };
-//! let page = db.query(None, QueryOp::from_filter(filter))?;
-//! assert_eq!(page.records, [db.get(ReadTarget::Head, RecordOp::get(key))?]);
+//! let page = db.query(None, QueryOp::from_filter(filter, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
+//! assert_eq!(page.records, [db.get(ReadTarget::Head, RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?]);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -54,8 +52,8 @@ mod queries;
 mod query_op;
 
 pub use error::{QueryError, Result};
+pub use golemdb_metering::Budget;
 pub use queries::Queries;
 pub use query_op::{
-    Bounds, Budget, CountOp, Direction, EqValue, Filter, InValues, QueryOp, QueryPage, SortKey,
-    ValuesError,
+    Bounds, CountOp, Direction, EqValue, Filter, InValues, QueryOp, QueryPage, SortKey, ValuesError,
 };

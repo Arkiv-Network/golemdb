@@ -19,7 +19,8 @@
 //! No YAML loading, genesis writes, local parameter defaults, or parameter
 //! cache lives here.
 //!
-//! This iteration is unmetered: no budgets, receipts, debug options, or OCC.
+//! Report variants retain execution context and actual user effects for API receipts.
+//! Pricing and budget enforcement remain deferred; plain methods discard the report.
 //! [`ReadTarget::Head`] selects and reads the current head in one snapshot.
 //! Commit-targeted reads support the head only and explicitly reject other
 //! commits until history is available. Deletes enumerate and tombstone every
@@ -50,16 +51,22 @@
 //! }
 //! ```
 
+mod admission;
 mod committed;
 mod crud;
 mod error;
+mod outcome;
 mod state;
 mod types;
 
 pub use committed::{committed_snapshot, read_committed_by_id};
 pub use crud::Records;
 pub use error::{RecordError, Result};
-pub use types::{CellPatch, ReadTarget, Record, RecordCells, RecordKey, RecordPatch};
+pub use outcome::{Effects, Outcome, cell_size, index_size};
+pub use types::{
+    CellPatch, CreateEntry, PatchChange, PatchEntry, ReadTarget, Record, RecordCells, RecordKey,
+    RecordPatch,
+};
 
 #[cfg(test)]
 #[path = "tests/crud.rs"]

@@ -50,7 +50,7 @@ fn head_selection_and_record_read_share_one_snapshot() {
         .patch(
             next,
             KEY,
-            [(name(b"name"), CellPatch::Set(text("after", true)))].into(),
+            [(name(b"name"), CellPatch::Write(text("after", true)))].into(),
         )
         .unwrap();
     let reader_branches = Branches::new(
@@ -256,7 +256,7 @@ fn work_in_progress_is_isolated_and_projection_preserves_identity() {
         .patch(
             a,
             KEY,
-            [(name(b"name"), CellPatch::Set(text("Bob", false)))].into(),
+            [(name(b"name"), CellPatch::Write(text("Bob", false)))].into(),
         )
         .unwrap();
     assert_eq!(
@@ -332,11 +332,11 @@ fn invalid_operations_leave_cells_allocator_and_version_unchanged() {
     ] {
         assert!(matches!(
             records.create(b, OTHER, [(name(invalid), text("x", false))].into()),
-            Err(RecordError::InvalidArgument(_))
+            Err(RecordError::InvalidInput { .. })
         ));
         assert!(matches!(
             records.patch(b, KEY, [(name(invalid), CellPatch::Remove)].into()),
-            Err(RecordError::InvalidArgument(_))
+            Err(RecordError::InvalidInput { .. })
         ));
     }
     for value in [
@@ -345,11 +345,11 @@ fn invalid_operations_leave_cells_allocator_and_version_unchanged() {
     ] {
         assert!(matches!(
             records.create(b, OTHER, [(name(b"value"), value.clone())].into()),
-            Err(RecordError::InvalidArgument(_))
+            Err(RecordError::InvalidInput { .. })
         ));
         assert!(matches!(
-            records.patch(b, KEY, [(name(b"value"), CellPatch::Set(value))].into()),
-            Err(RecordError::InvalidArgument(_))
+            records.patch(b, KEY, [(name(b"value"), CellPatch::Write(value))].into()),
+            Err(RecordError::InvalidInput { .. })
         ));
     }
     assert!(matches!(
@@ -379,7 +379,7 @@ fn patches_update_cells_and_no_ops_add_no_journal_entries() {
             KEY,
             [
                 (name(b"missing"), CellPatch::Remove),
-                (name(b"name"), CellPatch::Set(text("Alice", true))),
+                (name(b"name"), CellPatch::Write(text("Alice", true))),
             ]
             .into(),
         )
@@ -391,7 +391,7 @@ fn patches_update_cells_and_no_ops_add_no_journal_entries() {
             KEY,
             [
                 (name(b"name"), CellPatch::Remove),
-                (name(b"replacement"), CellPatch::Set(u64_value(7))),
+                (name(b"replacement"), CellPatch::Write(u64_value(7))),
             ]
             .into(),
         )
@@ -537,7 +537,7 @@ fn committed_cell_reader_keeps_one_snapshot_when_head_advances() {
         .patch(
             b,
             KEY,
-            [(name(b"name"), CellPatch::Set(text("after", true)))].into(),
+            [(name(b"name"), CellPatch::Write(text("after", true)))].into(),
         )
         .unwrap();
     let tx = db.begin_read().unwrap();

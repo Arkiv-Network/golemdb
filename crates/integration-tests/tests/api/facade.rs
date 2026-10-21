@@ -20,16 +20,14 @@ fn config(hash_function: HashAlgorithm) -> OpenConfig {
 }
 
 fn input(key: RecordKey, price: i32) -> RecordOp<op::Create> {
-    RecordOp::create(key)
+    RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
         .attribute("price", CellValue::from_i32(price))
-        .unwrap()
         .field("description", CellValue::from_str("product"))
-        .unwrap()
 }
 
 // Every contract is exercised through the same public handle on both hashes
 // and both backends. A directory remains alive until all facade clones drop.
-fn each_backend(contract: fn(Database)) {
+pub(super) fn each_backend(contract: fn(Database)) {
     for hash in [HashAlgorithm::Keccak256, HashAlgorithm::Blake3] {
         contract(Database::open_memory(&config(hash).genesis).unwrap());
         {
@@ -40,14 +38,24 @@ fn each_backend(contract: fn(Database)) {
 }
 
 fn get(api: &dyn Api, target: ReadTarget) -> Record {
-    api.get(target, RecordOp::get(KEY)).unwrap()
+    api.get(
+        target,
+        RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX)),
+    )
+    .into_result()
+    .unwrap()
 }
 
 fn allocator(api: &dyn Api, target: ReadTarget) -> u64 {
     api.get(
         target,
-        RecordOp::get(RecordKey(system::ALLOC.key)).only(["#nextRecordID"]),
+        RecordOp::get(
+            RecordKey(system::ALLOC.key),
+            golemdb_api::Budget::Limited(u64::MAX),
+        )
+        .only(["#nextRecordID"]),
     )
+    .into_result()
     .unwrap()
     .cells[b"#nextRecordID".as_slice()]
     .as_u64()
@@ -61,9 +69,12 @@ fn crud_pending_reads_projections_and_recreation() {
         assert_eq!(api.head().unwrap(), golemdb_branch::CommitId::new(0));
         let branch = api.begin().unwrap();
         let other = api.begin().unwrap();
-        assert_eq!(api.create(branch, input(KEY, 50)).unwrap(), KEY);
+        assert_eq!(
+            api.create(branch, input(KEY, 50)).into_result().unwrap(),
+            KEY
+        );
         assert!(matches!(
-            api.create(branch, input(KEY, 60)),
+            api.create(branch, input(KEY, 60)).into_result(),
             Err(ApiError::AlreadyExists)
         ));
         for target in [
@@ -72,7 +83,11 @@ fn crud_pending_reads_projections_and_recreation() {
             ReadTarget::Branch(other),
         ] {
             assert!(matches!(
-                api.get(target, RecordOp::get(KEY)),
+                api.get(
+                    target,
+                    RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))
+                )
+                .into_result(),
                 Err(ApiError::NotFound)
             ));
         }
@@ -84,16 +99,19 @@ fn crud_pending_reads_projections_and_recreation() {
         let selected = api
             .get(
                 ReadTarget::Branch(branch),
-                RecordOp::get(KEY).only(["price", "missing", "price"]),
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))
+                    .only(["price", "missing", "price"]),
             )
+            .into_result()
             .unwrap();
         assert_eq!(selected.cells.len(), 1);
         assert_eq!(selected.cells[b"price".as_slice()].as_i32(), Some(50));
         assert!(
             api.get(
                 ReadTarget::Branch(branch),
-                RecordOp::get(KEY).only([] as [&str; 0])
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX)).only([] as [&str; 0])
             )
+            .into_result()
             .unwrap()
             .cells
             .is_empty()
@@ -101,33 +119,43 @@ fn crud_pending_reads_projections_and_recreation() {
         assert!(matches!(
             api.get(
                 ReadTarget::Branch(branch),
-                RecordOp::get(MISSING).only([] as [&str; 0])
-            ),
+                RecordOp::get(MISSING, golemdb_api::Budget::Limited(u64::MAX))
+                    .only([] as [&str; 0])
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
         let bindings = api
             .get(
                 ReadTarget::Branch(branch),
-                RecordOp::get(RecordKey(system::RECORD_KEYS.key)).only([KEY.0]),
+                RecordOp::get(
+                    RecordKey(system::RECORD_KEYS.key),
+                    golemdb_api::Budget::Limited(u64::MAX),
+                )
+                .only([KEY.0]),
             )
+            .into_result()
             .unwrap();
         assert_eq!(bindings.cells[KEY.0.as_slice()].as_u64(), Some(64));
 
         api.patch(
             branch,
-            RecordOp::patch(KEY)
+            RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX))
                 .field("price", CellValue::from_i32(75))
-                .unwrap()
-                .remove("description")
-                .unwrap(),
+                .remove("description"),
         )
+        .into_result()
         .unwrap();
         let edited = get(api.as_ref(), ReadTarget::Branch(branch));
         assert_eq!(edited.cells[b"price".as_slice()].as_i32(), Some(75));
         assert!(!edited.cells[b"price".as_slice()].is_indexable());
         let before = api.branch_info(branch).unwrap();
-        api.patch(branch, RecordOp::patch(KEY).remove("absent").unwrap())
-            .unwrap();
+        api.patch(
+            branch,
+            RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX)).remove("absent"),
+        )
+        .into_result()
+        .unwrap();
         assert_eq!(api.branch_info(branch).unwrap(), before);
         assert_eq!(
             api.commit(branch).unwrap(),
@@ -144,26 +172,41 @@ fn crud_pending_reads_projections_and_recreation() {
         assert_eq!(db.info().commit_id, golemdb_branch::CommitId::new(0)); // opening metadata is not a live head
         assert_eq!(db.head().unwrap(), golemdb_branch::CommitId::new(1));
         assert!(matches!(
-            api.get(ReadTarget::Commit(golemdb_branch::CommitId::new(0)), RecordOp::get(KEY)),
+            api.get(ReadTarget::Commit(golemdb_branch::CommitId::new(0)), RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))).into_result(),
             Err(ApiError::CommitUnavailable {
                 requested, head }) if requested.get() == 0 && head.get() == 1
         ));
         assert!(matches!(api.commit(other), Err(ApiError::Conflict)));
 
         let deleting = api.begin().unwrap();
-        api.delete(deleting, RecordOp::delete(KEY)).unwrap();
+        api.delete(
+            deleting,
+            RecordOp::delete(KEY, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
+        .unwrap();
         assert!(matches!(
-            api.get(ReadTarget::Branch(deleting), RecordOp::get(KEY)),
+            api.get(
+                ReadTarget::Branch(deleting),
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
         assert_eq!(get(api.as_ref(), ReadTarget::Head), edited);
         api.commit(deleting).unwrap();
         assert!(matches!(
-            api.get(ReadTarget::Head, RecordOp::get(KEY)),
+            api.get(
+                ReadTarget::Head,
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
         let recreated = api.begin().unwrap();
-        api.create(recreated, input(KEY, 100)).unwrap();
+        api.create(recreated, input(KEY, 100))
+            .into_result()
+            .unwrap();
         assert_eq!(allocator(api.as_ref(), ReadTarget::Branch(recreated)), 66);
         api.commit(recreated).unwrap();
         assert_eq!(
@@ -178,22 +221,26 @@ fn checkpoints_rollback_seal_and_discard_share_state_across_clones() {
     each_backend(|db| {
         let clone = db.clone();
         let branch = db.begin().unwrap();
-        clone.create(branch, input(KEY, 50)).unwrap();
+        clone.create(branch, input(KEY, 50)).into_result().unwrap();
         let before = get(&db, ReadTarget::Branch(branch));
         db.checkpoint(branch).unwrap();
         clone
             .patch(
                 branch,
-                RecordOp::patch(KEY)
-                    .attribute("price", CellValue::from_i32(90))
-                    .unwrap(),
+                RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX))
+                    .attribute("price", CellValue::from_i32(90)),
             )
+            .into_result()
             .unwrap();
         db.rollback(branch).unwrap();
         assert_eq!(get(&clone, ReadTarget::Branch(branch)), before);
         clone.rollback(branch).unwrap();
         assert!(matches!(
-            db.get(ReadTarget::Branch(branch), RecordOp::get(KEY)),
+            db.get(
+                ReadTarget::Branch(branch),
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
         assert_eq!(allocator(&db, ReadTarget::Branch(branch)), 64);
@@ -201,7 +248,7 @@ fn checkpoints_rollback_seal_and_discard_share_state_across_clones() {
             db.rollback(branch),
             Err(ApiError::NoFrameToRollback)
         ));
-        clone.create(branch, input(KEY, 50)).unwrap();
+        clone.create(branch, input(KEY, 50)).into_result().unwrap();
         let sealed = db.seal(branch).unwrap();
         assert_eq!(clone.seal(branch).unwrap(), sealed);
         assert_eq!(sealed.commit_id, golemdb_branch::CommitId::new(1));
@@ -210,21 +257,40 @@ fn checkpoints_rollback_seal_and_discard_share_state_across_clones() {
         assert_eq!(get(&db, ReadTarget::Branch(branch)), before);
         let roots_key = RecordKey(system::ROOTS.key);
         let roots = db
-            .get(ReadTarget::Branch(branch), RecordOp::get(roots_key))
+            .get(
+                ReadTarget::Branch(branch),
+                RecordOp::get(roots_key, golemdb_api::Budget::Limited(u64::MAX)),
+            )
+            .into_result()
             .unwrap();
         assert!(!roots.cells.contains_key(0u64.to_be_bytes().as_slice()));
         assert!(matches!(
-            db.patch(branch, RecordOp::patch(KEY)),
+            db.patch(
+                branch,
+                RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::Sealed)
         ));
         assert!(matches!(db.checkpoint(branch), Err(ApiError::Sealed)));
         assert!(matches!(db.rollback(branch), Err(ApiError::Sealed)));
         assert_eq!(clone.commit(branch).unwrap(), sealed.commit_id);
-        let roots = db.get(ReadTarget::Head, RecordOp::get(roots_key)).unwrap();
+        let roots = db
+            .get(
+                ReadTarget::Head,
+                RecordOp::get(roots_key, golemdb_api::Budget::Limited(u64::MAX)),
+            )
+            .into_result()
+            .unwrap();
         assert!(roots.cells.contains_key(0u64.to_be_bytes().as_slice()));
         assert!(matches!(db.commit(branch), Err(ApiError::HandleInvalid)));
         let discarded = db.begin().unwrap();
-        db.delete(discarded, RecordOp::delete(KEY)).unwrap();
+        db.delete(
+            discarded,
+            RecordOp::delete(KEY, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
+        .unwrap();
         db.seal(discarded).unwrap();
         clone.discard(discarded).unwrap();
         assert!(matches!(
@@ -242,57 +308,75 @@ fn reserved_records_limits_and_failed_mutations_preserve_state() {
         let original = db.branch_info(branch).unwrap();
         for system in system::ALL {
             let key = RecordKey(system.key);
-            assert!(db.get(ReadTarget::Head, RecordOp::get(key)).is_ok());
+            assert!(
+                db.get(
+                    ReadTarget::Head,
+                    RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))
+                )
+                .into_result()
+                .is_ok()
+            );
             assert!(matches!(
-                db.create(branch, input(key, 1)),
+                db.create(branch, input(key, 1)).into_result(),
                 Err(ApiError::Reserved)
             ));
             assert!(matches!(
-                db.patch(branch, RecordOp::patch(key)),
+                db.patch(
+                    branch,
+                    RecordOp::patch(key, golemdb_api::Budget::Limited(u64::MAX))
+                )
+                .into_result(),
                 Err(ApiError::Reserved)
             ));
             assert!(matches!(
-                db.delete(branch, RecordOp::delete(key)),
+                db.delete(
+                    branch,
+                    RecordOp::delete(key, golemdb_api::Budget::Limited(u64::MAX))
+                )
+                .into_result(),
                 Err(ApiError::Reserved)
             ));
         }
         assert_eq!(db.branch_info(branch).unwrap(), original);
         for bad in [
-            RecordOp::create(KEY)
-                .field(&"a".repeat(33), CellValue::from_bool(true))
-                .unwrap(),
-            RecordOp::create(KEY)
-                .field("long", CellValue::from_str(&"v".repeat(65)))
-                .unwrap(),
-            RecordOp::create(KEY)
-                .field("long", CellValue::from_bytes(&[0; 129]))
-                .unwrap(),
+            RecordOp::create(KEY, golemdb_api::Budget::Limited(u64::MAX))
+                .field(&"a".repeat(33), CellValue::from_bool(true)),
+            RecordOp::create(KEY, golemdb_api::Budget::Limited(u64::MAX))
+                .field("long", CellValue::from_str(&"v".repeat(65))),
+            RecordOp::create(KEY, golemdb_api::Budget::Limited(u64::MAX))
+                .field("long", CellValue::from_bytes(&[0; 129])),
         ] {
             assert!(matches!(
-                db.create(branch, bad),
+                db.create(branch, bad).into_result(),
                 Err(ApiError::InvalidArgument { .. })
             ));
             assert_eq!(db.branch_info(branch).unwrap(), original);
             assert_eq!(allocator(&db, ReadTarget::Branch(branch)), 64);
         }
         assert!(matches!(
-            db.patch(branch, RecordOp::patch(MISSING)),
+            db.patch(
+                branch,
+                RecordOp::patch(MISSING, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
         assert!(matches!(
-            db.delete(branch, RecordOp::delete(MISSING)),
+            db.delete(
+                branch,
+                RecordOp::delete(MISSING, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
-        db.create(branch, input(KEY, 50)).unwrap();
+        db.create(branch, input(KEY, 50)).into_result().unwrap();
         let before = get(&db, ReadTarget::Branch(branch));
         let info = db.branch_info(branch).unwrap();
-        let bad = RecordOp::patch(KEY)
+        let bad = RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX))
             .field("aaa", CellValue::from_bool(true))
-            .unwrap()
-            .field("zzz", CellValue::from_str(&"v".repeat(65)))
-            .unwrap();
+            .field("zzz", CellValue::from_str(&"v".repeat(65)));
         assert!(matches!(
-            db.patch(branch, bad),
+            db.patch(branch, bad).into_result(),
             Err(ApiError::InvalidArgument { .. })
         ));
         assert_eq!(get(&db, ReadTarget::Branch(branch)), before);
@@ -306,11 +390,11 @@ fn competing_commits_and_cross_thread_clones_use_one_registry() {
     each_backend(|db| {
         let first = db.begin().unwrap();
         let clone = db.clone();
-        std::thread::spawn(move || clone.create(first, input(KEY, 10)).unwrap())
+        std::thread::spawn(move || clone.create(first, input(KEY, 10)).into_result().unwrap())
             .join()
             .unwrap();
         let second = db.begin().unwrap();
-        db.create(second, input(KEY, 20)).unwrap();
+        db.create(second, input(KEY, 20)).into_result().unwrap();
         let gate = Arc::new(Barrier::new(2));
         let results = std::thread::scope(|scope| {
             let run = |branch| {
@@ -347,14 +431,19 @@ fn opening_setup_conversion_and_separate_engines_do_not_share_branch_handles() {
     let first = setup;
     assert_eq!(first.info(), &info);
     let branch = first.begin().unwrap();
-    first.create(branch, input(KEY, 50)).unwrap();
+    first.create(branch, input(KEY, 50)).into_result().unwrap();
     let second = Database::from_store(storage, &cfg).unwrap();
     assert!(matches!(
         second.branch_info(branch),
         Err(ApiError::HandleInvalid)
     ));
     assert!(matches!(
-        second.get(ReadTarget::Head, RecordOp::get(KEY)),
+        second
+            .get(
+                ReadTarget::Head,
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
         Err(ApiError::NotFound)
     ));
     first.commit(branch).unwrap();
@@ -372,11 +461,16 @@ fn durable_facade_reopens_committed_state_and_discards_pending_work() {
         let (sealed, pending, genesis_id) = {
             let db = Database::open_with_options(dir.path(), &cfg, MdbxOptions::default()).unwrap();
             let branch = db.begin().unwrap();
-            db.create(branch, input(KEY, 50)).unwrap();
+            db.create(branch, input(KEY, 50)).into_result().unwrap();
             let sealed = db.seal(branch).unwrap();
             db.commit(branch).unwrap();
             let pending = db.begin().unwrap();
-            db.delete(pending, RecordOp::delete(KEY)).unwrap();
+            db.delete(
+                pending,
+                RecordOp::delete(KEY, golemdb_api::Budget::Limited(u64::MAX)),
+            )
+            .into_result()
+            .unwrap();
             (sealed, pending, db.info().genesis_id)
         };
         let db = Database::open(dir.path(), &cfg.with_mode(OpenMode::ExistingOnly)).unwrap();
@@ -396,10 +490,10 @@ fn durable_facade_reopens_committed_state_and_discards_pending_work() {
         let branch = db.begin().unwrap();
         db.patch(
             branch,
-            RecordOp::patch(KEY)
-                .attribute("price", CellValue::from_i32(70))
-                .unwrap(),
+            RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX))
+                .attribute("price", CellValue::from_i32(70)),
         )
+        .into_result()
         .unwrap();
         assert_eq!(db.commit(branch).unwrap(), golemdb_branch::CommitId::new(2));
     }
@@ -409,27 +503,41 @@ fn durable_facade_reopens_committed_state_and_discards_pending_work() {
 fn empty_records_keep_identity_through_patch_rollback_commit_and_delete() {
     each_backend(|db| {
         let branch = db.begin().unwrap();
-        db.create(branch, RecordOp::create(KEY)).unwrap();
+        db.create(
+            branch,
+            RecordOp::create(KEY, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
+        .unwrap();
         let empty = get(&db, ReadTarget::Branch(branch));
         assert_eq!(empty.key, KEY);
         assert_eq!(empty.cells.len(), 1);
         assert_eq!(empty.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
         assert_eq!(allocator(&db, ReadTarget::Branch(branch)), 65);
         assert!(matches!(
-            db.create(branch, RecordOp::create(KEY)),
+            db.create(
+                branch,
+                RecordOp::create(KEY, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::AlreadyExists)
         ));
         assert!(
             db.get(
                 ReadTarget::Branch(branch),
-                RecordOp::get(KEY).only([] as [&str; 0])
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX)).only([] as [&str; 0])
             )
+            .into_result()
             .unwrap()
             .cells
             .is_empty()
         );
         assert!(matches!(
-            db.get(ReadTarget::Head, RecordOp::get(KEY)),
+            db.get(
+                ReadTarget::Head,
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
         db.commit(branch).unwrap();
@@ -437,30 +545,47 @@ fn empty_records_keep_identity_through_patch_rollback_commit_and_delete() {
 
         let branch = db.begin().unwrap();
         let info = db.branch_info(branch).unwrap();
-        db.patch(branch, RecordOp::patch(KEY)).unwrap();
-        db.patch(branch, RecordOp::patch(KEY).remove("missing").unwrap())
-            .unwrap();
+        db.patch(
+            branch,
+            RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
+        .unwrap();
+        db.patch(
+            branch,
+            RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX)).remove("missing"),
+        )
+        .into_result()
+        .unwrap();
         assert_eq!(db.branch_info(branch).unwrap(), info);
         db.patch(
             branch,
-            RecordOp::patch(KEY)
-                .attribute("price", CellValue::from_i32(50))
-                .unwrap(),
+            RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX))
+                .attribute("price", CellValue::from_i32(50)),
         )
+        .into_result()
         .unwrap();
         db.commit(branch).unwrap();
         let populated = get(&db, ReadTarget::Head);
 
         let branch = db.begin().unwrap();
         db.checkpoint(branch).unwrap();
-        db.patch(branch, RecordOp::patch(KEY).remove("price").unwrap())
-            .unwrap();
+        db.patch(
+            branch,
+            RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX)).remove("price"),
+        )
+        .into_result()
+        .unwrap();
         assert_eq!(get(&db, ReadTarget::Branch(branch)), empty);
         assert_eq!(get(&db, ReadTarget::Head), populated);
         db.rollback(branch).unwrap();
         assert_eq!(get(&db, ReadTarget::Branch(branch)), populated);
-        db.patch(branch, RecordOp::patch(KEY).remove("price").unwrap())
-            .unwrap();
+        db.patch(
+            branch,
+            RecordOp::patch(KEY, golemdb_api::Budget::Limited(u64::MAX)).remove("price"),
+        )
+        .into_result()
+        .unwrap();
         let seal = db.seal(branch).unwrap();
         assert_eq!(seal.index_root, db.info().index_root); // Removing the last attribute empties the index.
         assert_eq!(get(&db, ReadTarget::Branch(branch)), empty);
@@ -469,21 +594,44 @@ fn empty_records_keep_identity_through_patch_rollback_commit_and_delete() {
 
         let branch = db.begin().unwrap();
         db.checkpoint(branch).unwrap();
-        db.delete(branch, RecordOp::delete(KEY)).unwrap();
+        db.delete(
+            branch,
+            RecordOp::delete(KEY, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
+        .unwrap();
         assert!(matches!(
-            db.get(ReadTarget::Branch(branch), RecordOp::get(KEY)),
+            db.get(
+                ReadTarget::Branch(branch),
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
         db.rollback(branch).unwrap();
         assert_eq!(get(&db, ReadTarget::Branch(branch)), empty);
-        db.delete(branch, RecordOp::delete(KEY)).unwrap();
+        db.delete(
+            branch,
+            RecordOp::delete(KEY, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
+        .unwrap();
         db.commit(branch).unwrap();
         assert!(matches!(
-            db.get(ReadTarget::Head, RecordOp::get(KEY)),
+            db.get(
+                ReadTarget::Head,
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
         let branch = db.begin().unwrap();
-        db.create(branch, RecordOp::create(KEY)).unwrap();
+        db.create(
+            branch,
+            RecordOp::create(KEY, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
+        .unwrap();
         assert_eq!(allocator(&db, ReadTarget::Branch(branch)), 66);
         db.commit(branch).unwrap();
         assert_eq!(get(&db, ReadTarget::Head), empty);
@@ -498,24 +646,34 @@ fn mdbx_reopens_empty_records_created_directly_or_by_removing_all_cells() {
         {
             let db = Database::open(dir.path(), &cfg).unwrap();
             let branch = db.begin().unwrap();
-            db.create(branch, RecordOp::create(KEY)).unwrap();
-            db.create(branch, input(MISSING, 50)).unwrap();
+            db.create(
+                branch,
+                RecordOp::create(KEY, golemdb_api::Budget::Limited(u64::MAX)),
+            )
+            .into_result()
+            .unwrap();
+            db.create(branch, input(MISSING, 50)).into_result().unwrap();
             db.commit(branch).unwrap();
             let branch = db.begin().unwrap();
             db.patch(
                 branch,
-                RecordOp::patch(MISSING)
+                RecordOp::patch(MISSING, golemdb_api::Budget::Limited(u64::MAX))
                     .remove("price")
-                    .unwrap()
-                    .remove("description")
-                    .unwrap(),
+                    .remove("description"),
             )
+            .into_result()
             .unwrap();
             db.commit(branch).unwrap();
         }
         let db = Database::open(dir.path(), &cfg.with_mode(OpenMode::ExistingOnly)).unwrap();
         for key in [KEY, MISSING] {
-            let record = db.get(ReadTarget::Head, RecordOp::get(key)).unwrap();
+            let record = db
+                .get(
+                    ReadTarget::Head,
+                    RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX)),
+                )
+                .into_result()
+                .unwrap();
             assert_eq!(record.cells.len(), 1);
             assert_eq!(record.cells[b"#key".as_slice()].as_bytes32(), Some(key.0));
         }

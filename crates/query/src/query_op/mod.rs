@@ -2,7 +2,6 @@
 //! including the [`Filter`] tree, and the [`QueryPage`] a query returns.
 
 mod bounds;
-mod budget;
 mod eq_value;
 mod filter;
 mod in_values;
@@ -12,7 +11,6 @@ mod sort;
 mod values;
 
 pub use bounds::Bounds;
-pub use budget::Budget;
 pub use eq_value::EqValue;
 pub use filter::Filter;
 pub use in_values::InValues;

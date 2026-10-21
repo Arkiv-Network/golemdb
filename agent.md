@@ -13,6 +13,7 @@ and adapters.
 | Crate | Responsibility |
 | --- | --- |
 | `api` | Public `Api` trait, `Database` handle, typed CRUD requests, opening, genesis initialization and validation. |
+| `metering` | Shared `Budget` type, re-exported by API and query; pricing and budget accounting remain deferred. |
 | `record` | Record identity, key bindings, allocation, admission checks, and atomic CRUD over branch cell views. |
 | `branch` | Branch registry, overlays, undo frames, guarded reads and writes, sealing, and atomic publication. |
 | `cells` | Cell names, keys, types, canonical values, deployment limits, reserved-record constants, `Cell` storage and its commitment. |
@@ -275,18 +276,38 @@ Results own their data and expose no storage transactions or cell writers.
 
 | Call | Request | Result |
 | --- | --- | --- |
-| `create(branch, operation)` | `RecordOp<op::Create>` | `RecordKey` |
-| `get(target, operation)` | `RecordOp<op::Get>` | `Record` |
-| `patch(branch, operation)` | `RecordOp<op::Patch>` | `()` |
-| `delete(branch, operation)` | `RecordOp<op::Delete>` | `()` |
+| `create(branch, operation)` | `RecordOp<op::Create>` | `Metered<RecordKey>` |
+| `get(target, operation)` | `RecordOp<op::Get>` | `Metered<Record>` |
+| `patch(branch, operation)` | `RecordOp<op::Patch>` | `Metered<()>` |
+| `delete(branch, operation)` | `RecordOp<op::Delete>` | `Metered<()>` |
+| `query(commit, operation)` | `QueryOp` | `Metered<QueryPage>` |
+| `count(commit, operation)` | `CountOp` | `Metered<u64>` |
 
-Each constructor requires a key: `RecordOp::create(key)`, `get(key)`, `patch(key)`,
-or `delete(key)`. Write helpers accept explicit `CellValue`s and immediately return
-`Result<Self>` on invalid names, incompatible kinds, or duplicate names.
-`.attribute()` and `.field()` select kind; create's `.insert()` and patch's `.set()`
-preserve the supplied value's kind. Patch also has `.remove()`. Operations implement
-`Clone`, `PartialEq`, and `Eq` and provide inspection methods for mocks and adapters.
-Raw record maps and patch enums are not re-exported by the API.
+Record constructors require a key and explicit `Budget`: `RecordOp::create(key, budget)`,
+`get(key, budget)`, `patch(key, budget)` and `delete(key, budget)`. Query/count constructors
+likewise require a budget. Record builders only collect input, preserving caller order,
+duplicates, names and original values. They provide no `validate()` or saved error.
+The record-owned `CreateEntry` / `PatchEntry` slices are exposed by `entries()` and
+passed with the budget to record execution. Requested kinds remain separate from
+original value kinds until admission. The private record `admission` module checks
+reserved keys, then each entry's lengths, name grammar, requested kind and duplicate
+names before record lookup. Future metering must guard these actual checks; charging
+and total request-size/count caps remain deferred. Input errors retain typed causes.
+Patch `.set()` resolves the stored kind during execution and fails with `CellNotFound`
+for a missing cell. Reads retain raw projections until target selection, then normalize.
+There is no create `.insert()`. Patch also has `.remove()`. Operations implement
+`Clone`, `PartialEq`, and `Eq`.
+
+`Budget` is defined in `golemdb-metering` and re-exported by both `golemdb-api` and
+`golemdb-query`. Query/count builders remain in the query crate; moving them into
+the API crate is deferred.
+
+`Metered<T>` holds a result and a receipt on every outcome. Cost remains zero and
+budgets are not enforced yet. User effects exclude system cells, failed writes and
+no-ops. `priced_at` comes from the same validated branch origin or committed snapshot
+as execution; unavailable history uses the captured head. Unknown/stale handles and
+sealed writes have no pricing snapshot. `.into_result()` explicitly drops a receipt;
+`map` and `map_err` preserve it. `OutOfBudget { required }` is defined but not emitted yet.
 
 Get reads all cells, including `#key`, unless `.only(names)` selects a projection.
 Names may be text or raw bytes; selections are deduplicated and sorted. Missing

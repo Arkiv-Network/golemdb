@@ -181,8 +181,8 @@ fn lifecycle(db: impl Store + Clone) {
             b,
             KEY,
             [
-                (name(b"name"), CellPatch::Set(u64_value(9))),
-                (name(b"old"), CellPatch::Set(text("indexed", true))),
+                (name(b"name"), CellPatch::Write(u64_value(9))),
+                (name(b"old"), CellPatch::Write(text("indexed", true))),
             ]
             .into(),
         )

@@ -19,6 +19,11 @@ pub enum ApiError {
     NotImplemented { operation: &'static str },
     #[error("requested record, immutable segment or row not found")]
     NotFound,
+    #[error("cell {name} not found")]
+    CellNotFound { name: crate::CellName },
+    /// Reserved for metering; currently never returned. Spent is receipt.cost.
+    #[error("operation exceeds its budget (required: {required:?})")]
+    OutOfBudget { required: Option<u64> },
     #[error("key already exists")]
     AlreadyExists,
     #[error("reserved records cannot be modified through CRUD")]
@@ -102,6 +107,10 @@ impl From<RecordError> for ApiError {
     fn from(error: RecordError) -> Self {
         match error {
             RecordError::NotFound => Self::NotFound,
+            RecordError::CellNotFound { name } => Self::CellNotFound { name },
+            RecordError::InvalidInput { message, source } => {
+                Self::InvalidArgument { message, source }
+            }
             RecordError::AlreadyExists => Self::AlreadyExists,
             RecordError::Reserved => Self::Reserved,
             RecordError::InvalidArgument(message) => Self::invalid_argument(message),

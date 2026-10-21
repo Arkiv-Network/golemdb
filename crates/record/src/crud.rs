@@ -1,17 +1,18 @@
-use golemdb_branch::{BranchId, Branches, CellRead, CommitId};
-use golemdb_cells::{CellKey, CellLimits, CellName, CellReader, CellValue, reserved, system};
+use golemdb_branch::{BranchId, Branches, CellRead, CellWrite};
+use golemdb_cells::{CellKey, CellName, CellReader, CellValue, reserved};
 use golemdb_merkle::HashProvider;
+use golemdb_metering::Budget;
 use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{
-    CellPatch, ReadTarget, Record, RecordCells, RecordError, RecordKey, RecordPatch, Result,
+    CellPatch, CreateEntry, Effects, Outcome, PatchChange, PatchEntry, ReadTarget, Record,
+    RecordCells, RecordError, RecordKey, RecordPatch, Result, admission,
     committed::{committed_snapshot, read_committed_by_key},
     state,
 };
 
-/// Cloneable record facade; clones share the supplied branch manager.
-/// Failed mutations restore both the working cells and branch version. Successful
-/// mutations remain uncommitted until the branch manager commits them.
+/// Record semantics over guarded branch views. Reports retain the selected
+/// pricing commit and actual user effects, including on failed calls.
 pub struct Records<S, H> {
     branches: Branches<S, H>,
 }
@@ -29,172 +30,232 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         Self { branches }
     }
 
-    /// Read a full record (including `#key`) or an explicit projection. Missing
-    /// projected cells are omitted; an empty projection returns only the record's
-    /// key. Duplicate names collapse in the result. Names may be raw, including
-    /// reserved cells.
-    /// Record existence and identity are checked even for an empty projection.
-    /// Committed reads resolve the head, binding, identity, and cells within one
-    /// storage snapshot, so a concurrent commit cannot mix their states.
+    /// Read a full record or a projection from one validated snapshot.
     pub fn get(
         &self,
         target: ReadTarget,
         key: RecordKey,
         projection: Option<&[CellName]>,
     ) -> Result<Record> {
-        match target {
-            ReadTarget::Branch(branch) => self
-                .branches
-                .read(branch, |cell_reader| {
-                    read_branch_record(cell_reader, key, projection)
-                })
-                .map_err(Into::into),
-            ReadTarget::Head => self.read_committed(None, key, projection),
-            ReadTarget::Commit(commit) => self.read_committed(Some(commit), key, projection),
-        }
+        self.get_report(target, key, projection, Budget::Unlimited)
+            .result
     }
 
-    // Explicit storage path: cell storage owns decoding and scanning; record owns
-    // the binding/identity checks. No branch or empty overlay is created for reads.
-    fn read_committed(
+    pub fn get_report(
         &self,
-        commit: Option<CommitId>,
+        target: ReadTarget,
         key: RecordKey,
         projection: Option<&[CellName]>,
-    ) -> Result<Record> {
-        let (tx, _) = committed_snapshot(self.branches.store(), commit)?;
-        read_committed_by_key(&CellReader::new(&tx), key, projection)
+        _budget: Budget,
+    ) -> Outcome<Record, RecordError> {
+        let mut priced_at = None;
+        let result = match target {
+            ReadTarget::Branch(branch) => self
+                .branches
+                .read_with_origin(branch, |origin, reader| {
+                    priced_at = Some(origin);
+                    let projection = admission::projection(projection);
+                    read_branch_record(reader, key, projection.as_deref())
+                })
+                .map_err(Into::into),
+            target => {
+                let commit = match target {
+                    ReadTarget::Commit(c) => Some(c),
+                    _ => None,
+                };
+                match committed_snapshot(self.branches.store(), commit) {
+                    Ok((tx, head)) => {
+                        priced_at = Some(head);
+                        let projection = admission::projection(projection);
+                        read_committed_by_key(&CellReader::new(&tx), key, projection.as_deref())
+                    }
+                    Err(error) => {
+                        if let RecordError::CommitUnavailable { head, .. } = &error {
+                            priced_at = Some(*head);
+                        }
+                        Err(error)
+                    }
+                }
+            }
+        };
+        Outcome::new(result, priced_at, Effects::default())
     }
 
-    /// Create a record with zero or more user cells. Exact reserved keys are
-    /// rejected before branch access; all other validation follows handle checks.
-    /// Names and values are checked in byte order before identity/allocation reads.
+    /// Trusted convenience entrypoint. Uses the same admission path with an
+    /// unlimited budget and drops the report; hosts expose the budgeted API.
     pub fn create(
         &self,
         branch: BranchId,
         key: RecordKey,
         values: RecordCells,
     ) -> Result<RecordKey> {
-        reject_reserved(key)?;
-        self.branches
-            .write(branch, |cell_writer| {
-                let cell_reader = cell_writer.as_read();
-                let limits = state::limits(&cell_reader)?;
-                for (name, value) in &values {
-                    validate(&limits, name, Some(value))?;
-                }
-                if state::resolve(&cell_reader, key)?.is_some() {
-                    return Err(RecordError::AlreadyExists);
-                }
-                let (id, next) = state::next_id(&cell_reader)?;
-                if cell_writer
-                    .scan_prefix(&id.to_be_bytes())?
-                    .next()
-                    .transpose()?
-                    .is_some()
-                {
-                    return Err(RecordError::CorruptState(
-                        "allocator points to occupied record",
-                    ));
-                }
-                for (name, value) in values {
-                    cell_writer.put(CellKey::new(id, name), value);
-                }
-                cell_writer.put(
-                    CellKey::new(id, reserved::KEY),
-                    CellValue::from_bytes32(key.0),
-                );
-                cell_writer.put(state::binding(key), CellValue::from_u64(id));
-                cell_writer.put(state::allocator_key(), CellValue::from_u64(next));
-                Ok(key)
+        let entries = values
+            .into_iter()
+            .map(|(name, value)| CreateEntry {
+                name,
+                kind: value.kind(),
+                value,
             })
-            .map_err(Into::into)
+            .collect();
+        self.create_report(branch, key, entries, Budget::Unlimited)
+            .result
     }
 
-    /// Apply a partial mutation. Empty patches and removing absent cells are
-    /// no-ops on an existing record. Removing the last user cell preserves the
-    /// record's #key and binding; only delete removes the record.
-    /// A set may change both type and indexed status. Identical sets and other
-    /// no-ops add no journal entries and leave the branch version unchanged.
+    /// Admit original entries only after handle validation. Budgets are passed
+    /// into execution but charging and enforcement remain unimplemented.
+    pub fn create_report(
+        &self,
+        branch: BranchId,
+        key: RecordKey,
+        entries: Vec<CreateEntry>,
+        budget: Budget,
+    ) -> Outcome<RecordKey, RecordError> {
+        self.write_report(branch, budget, |writer, effects| {
+            admission::key(key)?;
+            let reader = writer.as_read();
+            let limits = state::limits(&reader)?;
+            let values = admission::create(&limits, entries)?;
+            if state::resolve(&reader, key)?.is_some() {
+                return Err(RecordError::AlreadyExists);
+            }
+            let (id, next) = state::next_id(&reader)?;
+            if reader
+                .scan_prefix(&id.to_be_bytes())?
+                .next()
+                .transpose()?
+                .is_some()
+            {
+                return Err(RecordError::CorruptState(
+                    "allocator points to occupied record",
+                ));
+            }
+            for (name, value) in values {
+                effects.change(&name, None, Some(&value))?;
+                writer.put(CellKey::new(id, name), value);
+            }
+            writer.put(
+                CellKey::new(id, reserved::KEY),
+                CellValue::from_bytes32(key.0),
+            );
+            writer.put(state::binding(key), CellValue::from_u64(id));
+            writer.put(state::allocator_key(), CellValue::from_u64(next));
+            Ok(key)
+        })
+    }
+
     pub fn patch(&self, branch: BranchId, key: RecordKey, changes: RecordPatch) -> Result<()> {
-        reject_reserved(key)?;
-        self.branches
-            .write(branch, |cell_writer| {
-                let cell_reader = cell_writer.as_read();
-                let id = state::resolve(&cell_reader, key)?.ok_or(RecordError::NotFound)?;
-                let limits = state::limits(&cell_reader)?;
-                for (name, change) in &changes {
-                    validate(
-                        &limits,
-                        name,
-                        match change {
-                            CellPatch::Set(value) => Some(value),
-                            CellPatch::Remove => None,
-                        },
-                    )?;
-                }
-                for (name, change) in changes {
-                    let address = CellKey::new(id, name);
-                    match change {
-                        CellPatch::Set(value) => {
-                            if cell_writer.get(&address)?.as_ref() != Some(&value) {
-                                cell_writer.put(address, value);
+        let entries = changes
+            .into_iter()
+            .map(|(name, change)| PatchEntry {
+                name,
+                change: match change {
+                    CellPatch::Write(value) => PatchChange::Write {
+                        kind: value.kind(),
+                        value,
+                    },
+                    CellPatch::Set(value) => PatchChange::Set(value),
+                    CellPatch::Remove => PatchChange::Remove,
+                },
+            })
+            .collect();
+        self.patch_report(branch, key, entries, Budget::Unlimited)
+            .result
+    }
+
+    /// Explicit writes may change kind; set preserves kind and requires a cell.
+    /// No-ops do not write, advance the journal, or contribute effects.
+    pub fn patch_report(
+        &self,
+        branch: BranchId,
+        key: RecordKey,
+        entries: Vec<PatchEntry>,
+        budget: Budget,
+    ) -> Outcome<(), RecordError> {
+        self.write_report(branch, budget, |writer, effects| {
+            admission::key(key)?;
+            let reader = writer.as_read();
+            let limits = state::limits(&reader)?;
+            let changes = admission::patch(&limits, entries)?;
+            let id = state::resolve(&reader, key)?.ok_or(RecordError::NotFound)?;
+            for (name, change) in changes {
+                let address = CellKey::new(id, name.clone());
+                let before = writer.get(&address)?;
+                let after = match change {
+                    CellPatch::Write(value) => Some(value),
+                    CellPatch::Set(value) => {
+                        let old = before
+                            .as_ref()
+                            .ok_or_else(|| RecordError::CellNotFound { name: name.clone() })?;
+                        Some(value.with_kind(old.kind()).map_err(|source| {
+                            RecordError::InvalidInput {
+                                message: format!(
+                                    "set({name:?}): invalid cell value for stored kind"
+                                ),
+                                source: Some(Box::new(source)),
                             }
-                        }
-                        CellPatch::Remove => {
-                            if cell_writer.get(&address)?.is_some() {
-                                cell_writer.delete(address);
-                            }
-                        }
+                        })?)
                     }
+                    CellPatch::Remove => None,
+                };
+                if before == after {
+                    continue;
                 }
-                Ok(())
-            })
-            .map_err(Into::into)
+                effects.change(&name, before.as_ref(), after.as_ref())?;
+                match after {
+                    Some(value) => writer.put(address, value),
+                    None => writer.delete(address),
+                }
+            }
+            Ok(())
+        })
     }
 
-    /// Remove the binding and every live cell, including #key. Successful
-    /// deletion never rewinds the allocator; recreation receives a fresh ID.
-    /// Branch rollback can still restore uncommitted records, bindings, and
-    /// allocations.
     pub fn delete(&self, branch: BranchId, key: RecordKey) -> Result<()> {
-        reject_reserved(key)?;
-        self.branches
-            .write(branch, |cell_writer| {
-                let cell_reader = cell_writer.as_read();
-                let id = state::resolve(&cell_reader, key)?.ok_or(RecordError::NotFound)?;
-                let addresses = cell_reader
-                    .scan_prefix(&id.to_be_bytes())?
-                    .map(|row| row.map(|(address, _)| address))
-                    .collect::<golemdb_branch::Result<Vec<_>>>()?;
-                for address in addresses {
-                    cell_writer.delete(address);
-                }
-                cell_writer.delete(state::binding(key));
-                Ok(())
+        self.delete_report(branch, key, Budget::Unlimited).result
+    }
+
+    /// Delete user cells, identity and binding; never rewind the allocator.
+    pub fn delete_report(
+        &self,
+        branch: BranchId,
+        key: RecordKey,
+        budget: Budget,
+    ) -> Outcome<(), RecordError> {
+        self.write_report(branch, budget, |writer, effects| {
+            admission::key(key)?;
+            let reader = writer.as_read();
+            let id = state::resolve(&reader, key)?.ok_or(RecordError::NotFound)?;
+            let rows = reader
+                .scan_prefix(&id.to_be_bytes())?
+                .collect::<golemdb_branch::Result<Vec<_>>>()?;
+            for (address, value) in rows {
+                effects.change(&address.name().into(), Some(&value), None)?;
+                writer.delete(address);
+            }
+            writer.delete(state::binding(key));
+            Ok(())
+        })
+    }
+
+    fn write_report<T>(
+        &self,
+        branch: BranchId,
+        _budget: Budget,
+        operation: impl FnOnce(&mut CellWrite<'_, S::Read<'_>>, &mut Effects) -> Result<T>,
+    ) -> Outcome<T, RecordError> {
+        let mut priced_at = None;
+        let mut effects = Effects::default();
+        let result = self
+            .branches
+            .write_with_origin(branch, |origin, writer| {
+                priced_at = Some(origin);
+                operation(writer, &mut effects)
             })
-            .map_err(Into::into)
+            .map_err(Into::into);
+        // Branches restores the overlay on error; partial effect counts must
+        // likewise never escape as successful changes.
+        Outcome::new(result, priced_at, effects)
     }
-}
-
-fn reject_reserved(key: RecordKey) -> Result<()> {
-    if system::by_key(&key.0).is_some() {
-        Err(RecordError::Reserved)
-    } else {
-        Ok(())
-    }
-}
-
-fn validate(limits: &CellLimits, name: &CellName, value: Option<&CellValue>) -> Result<()> {
-    limits
-        .parse_user_name(name.as_bytes())
-        .map_err(|error| RecordError::InvalidArgument(error.to_string()))?;
-    if let Some(value) = value {
-        limits
-            .validate_value(value.as_view())
-            .map_err(|error| RecordError::InvalidArgument(error.to_string()))?;
-    }
-    Ok(())
 }
 
 fn read_branch_record<R: ReadTransaction>(

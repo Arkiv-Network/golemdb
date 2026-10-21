@@ -124,7 +124,7 @@ fn late_patch_failure(remove: bool) {
                 if remove {
                     CellPatch::Remove
                 } else {
-                    CellPatch::Set(value(CellType::Str, bytes))
+                    CellPatch::Write(value(CellType::Str, bytes))
                 },
             )
         })

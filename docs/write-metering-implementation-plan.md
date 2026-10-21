@@ -1,6 +1,6 @@
 # Write metering implementation plan
 
-Implement the public receipt contract first, then per-record metadata, then budgeted write planning and execution. Metering orchestration belongs in `golemdb-record`; a new `golemdb-metering` crate owns pricing rules, weights and budget accounting. The branch crate continues to provide state access, isolation, rollback and commit.
+Implement the public receipt contract first, then per-record metadata, then budgeted write planning and execution. Metering orchestration belongs in `golemdb-record`; `golemdb-metering` owns the shared `Budget` type and will own pricing rules, weights and budget accounting. The branch crate continues to provide state access, isolation, rollback and commit.
 
 This plan covers `create`, `patch` and `delete`, including their planning reads. `get`, `query` and `count` receive the new result shape immediately, but their pricing remains deferred until the read-metering design is complete. Returning a receipt does not yet imply that a call enforces a work budget.
 
@@ -10,9 +10,11 @@ Sources: [metering specification](golemdb-metering.md), [API receipts](golemdb-a
 
 ## 1. Decisions and boundaries
 
+- Record builders only collect input. Admission validation and normalization belong in record execution, after handle/snapshot selection; there is no public unmetered validation shortcut. Pass raw ordered entries and budgets across the API/record boundary. Input allocation, typed value construction and transport decoding remain host responsibilities.
 - Change the API before introducing actual charges. All six operations return `Metered<T>`, including failures. Initially `cost = 0`; successful write effects and `priced_at` must already be correct.
 - Add `#meta` before enforcing write prices. Its four counters describe one record's user cells, not database-wide populations or accumulated operation charges.
 - The record crate builds and applies write plans. The metering crate prices logical steps and mutations; it does not discover old values, access storage or construct an executable plan.
+- Define `Budget` in the metering crate and re-export it from API and query. Keep `QueryOp` and `CountOp` in query for now; moving their public builders into API is deferred.
 - Planning reads are budgeted while the plan is being built. Building an unrestricted plan and pricing it afterward would not meet the specification.
 - Use index-term existence at the branch base for the initial creation surcharge. Do not implement a branch-aware index overlay for pricing in this work.
 - Keep actual index maintenance and global population counts exact. The pricing simplification does not change committed database contents.
@@ -22,12 +24,12 @@ Sources: [metering specification](golemdb-metering.md), [API receipts](golemdb-a
 
 | Layer | Responsibility |
 | --- | --- |
-| `api` | Public requests, budgets, `Metered<T>`, receipts and error conversion; genesis/admin integration and database construction. |
+| `api` | Public CRUD requests, query/count and `Budget` re-exports, `Metered<T>`, receipts and error conversion; genesis/admin integration and database construction. |
 | `record` | Admission, record semantics, metered planning reads, `WritePlan`, metadata and effect calculation, final approval and application. |
-| `metering` (new) | Typed schedules, supported model identifiers, checked cost arithmetic, modeled depths, logical operation prices and per-call budget accounting. |
+| `metering` | Shared `Budget` type now; typed schedules, supported model identifiers, checked cost arithmetic, modeled depths, logical operation prices and per-call budget accounting in iteration 3. |
 | `branch` | A stable state view while planning/applying, origin/head validation, overlay mutation, rollback, sealing and commit; access to base state needed by record planning. |
 | `cells` / `index` | Encodings and storage primitives, including a point lookup that checks whether a term exists without loading its posting list. Record calls using these primitives are charged through the meter; the storage crates neither choose prices nor track a caller's budget. |
-| `query` | Existing query planning/execution and receipt context now; its own metered execution later. |
+| `query` | Query/count request builders, existing query planning/execution and receipt context now; its own metered execution later. |
 
 ### The metering crate does not create plans
 
@@ -196,10 +198,11 @@ create(request, branch):
 
     PLAN — read state and prepare changes; do not write anything:
         charged_step(AdmissionBase, validate fixed request fields)
-        for each input entry in the defined admission order:
+        for each input entry in caller order:
             charged_step(AdmissionEntry, validate header and declared lengths)
             n = validation byte count from those lengths
-            charged_step(AdmissionBytes(n), validate name and value bytes)
+            charged_step(AdmissionBytes(n), validate bytes and requested kind,
+                         reject duplicates and prepare the validated entry)
 
         binding = charged_step(RecordBase(Create), read key binding)
         if binding exists: fail with AlreadyExists
@@ -237,7 +240,7 @@ On an early failure, completed cost comes from `meter.spent()`; a `finish` failu
 
 Allocator work is covered by `w_rec[create]`; the allocator is excluded from the priced cell creates. Persistence of its final value is host-funded. The planned index joins are charged now; sealing later applies the net index changes without charging again. Estimation follows the same flow through approval and skips application.
 
-Admission includes retained builder errors at their defined checkpoints. Its exact counting and limits are pinned in iteration 3. Missing weights and arithmetic overflow also stop planning with only completed work charged.
+Admission validates the original entries at their defined checkpoints; builders have done no request validation. Each failed validation check must complete its charge before its error is propagated. Process entries in input order, checking name/value lengths before name grammar, requested kind and duplicates; fixed target checks come first. Its exact counting and limits are pinned in iteration 3. Missing weights and arithmetic overflow also stop planning with only completed work charged.
 
 ### Concrete charges and receipts
 
@@ -290,6 +293,13 @@ Each iteration should leave the workspace compiling and have its own focused che
 
 **Priority:** 1 — Mumbai release.
 
+**Status:** implemented. CRUD, query and count return receipts; constructors require
+an explicit budget; builders only collect raw ordered input; patch `set` preserves stored kind.
+Record execution now owns admission and projection normalization. `first_error` and
+builder `validate()` have been removed; budgets and raw entries reach the record crate.
+Receipt effects and pricing context are populated, while costs remain zero and
+budgets remain unenforced. See the [Rust API guide](../crates/api/README.md).
+
 **Outcome:** callers can adopt the final result shape before the pricing implementation exists.
 
 1. Add public `Metered<T>`, `Receipt` and `Details`, with the fields and helpers in the API specification. Preserve receipts when mapping errors; dropping a receipt must be explicit through `into_result()` or equivalent.
@@ -297,15 +307,15 @@ Each iteration should leave the workspace compiling and have its own focused che
 3. Carry execution context and user effects out of the lower layers on success and failure. The API crate converts these internal reports to public receipts; lower layers must not depend on `api`.
 4. Capture `priced_at` from the same state selection used by execution. Branch calls use their validated origin; committed reads use the captured head even when reading an older commit. Query admission errors also need the captured head when snapshot selection succeeded. Do not perform a separate head lookup after execution.
 5. Compute accurate user effects for successful writes, including no-ops. Failures and reads report zero effects; system cells are excluded. Introduce one shared record-layer effect/byte-counting helper for later metadata and planning use.
-6. Change builders to retain invalid steps and report them when the call executes, with a receipt. Preserve enough input/order/count information to reproduce admission charges later, not merely an error string.
-7. Make budgets explicit in requests, selecting one construction convention for CRUD/query/count. A required constructor argument is the recommended default. Initially retain/re-export the existing query `Budget` type at the API boundary; do not make record depend on query. Move the type to the metering crate in iteration 3.
+6. Make record builders passive: retain original ordered entries, duplicates and requested kinds without validation, conversion or sorting. Remove saved builder errors and `validate()`. Pass record-owned raw inputs and budgets into execution; a private shared admission module checks fixed targets, entry lengths, name grammar, explicit kind compatibility and duplicates before record lookup. Only execution prepares validated maps and normalizes read projections. Preserve typed error causes and return failures with receipts.
+7. Make budgets explicit in requests, selecting one construction convention for CRUD/query/count. A required constructor argument is the recommended default. Define the shared `Budget` type in `golemdb-metering` and re-export it from API and query; do not make record depend on query.
 8. Align `set` with the documented preserved-kind behavior and `CellNotFound`, since these determine effects. Fix handle/admission/state validation order. Update API consumers, examples, mocks and error handling together.
 
 For reviewability, split this iteration into result/receipt plumbing and request/semantic alignment if needed. Both precede metering enforcement. Cost remains zero and budgets are explicitly documented as unenforced during this increment.
 
 **Likely areas:** `crates/api/src/{lib.rs,database.rs,record_op.rs}`, record outcomes and effect helpers, `crates/query/src/queries.rs`, API/integration tests.
 
-**Acceptance:** receipts survive ordinary success and error paths; historical failures report the head used for pricing; invalid handles have zero cost and no pricing snapshot; a concurrent head advance cannot mix receipt context with execution state; actual user effects match changes, including no-op and failed patches.
+**Acceptance:** builders preserve malformed input and duplicates without validation; submitted errors follow input order and leave state unchanged; projection normalization occurs only during execution; receipts survive ordinary success and error paths; historical failures report the head used for pricing; invalid handles have zero cost and no pricing snapshot; a concurrent head advance cannot mix receipt context with execution state; actual user effects match changes, including no-op and failed patches.
 
 ### Iteration 2 — `#meta`, shared sizes and record caps
 
@@ -326,13 +336,18 @@ For reviewability, split this iteration into result/receipt plumbing and request
 
 **Priority:** 1 — Mumbai release.
 
+**Preparation completed:** `golemdb-metering` exists with the shared `Budget` type,
+re-exported from API and query. The API passes budgets and raw record entries into
+execution, where a private admission module performs validation. Pricing, accounting
+and connecting those admission steps to the meter remain for this iteration.
+
 **Outcome:** deterministic pricing can be exercised without a database.
 
-1. Add `golemdb-metering` to the workspace. Move `Budget` there and re-export it from the public API and existing query path where useful. Thread it to record operations without adding a record-to-query dependency.
+1. Connect the shared `golemdb-metering::Budget` already passed into record execution to the per-call meter. The workspace crate, API/query re-exports and record dependency are in place. Budgets are currently unenforced.
 2. Implement typed weights, supported model identifiers, immutable schedules, depth selection and checked arithmetic. Keep host weights available in the schedule but unused by GolemDB's own write pricing.
 3. Implement the per-call meter interface described above, separating completed planning cost from prospective mutation cost. The meter owns the budget and all cost totals; the record layer does not duplicate them. Keep step approvals internal and single-use. Retain logical charge counts when diagnostic detail is requested, without changing the computed cost.
 4. Price system-cell mutations as required by D2 even though receipt effects omit them. Do not turn every system-cell cost into admission cost.
-5. Define the reference admission procedure: deterministic validation order, entry/byte counting, checkpoints, hard request-size/change-count limits and treatment of builder errors. Pin planning-read and mutation-evaluation order as part of the model too.
+5. Define the reference admission procedure: deterministic validation order, entry/byte counting, checkpoints, hard request-size/change-count limits and execution-time input failures. Guard entry validation, kind conversion, duplicate detection and map preparation before doing the work; do not restore a builder validation path. Charge completed checks even when they reject input. Bound error formatting on early length rejection. Pin planning-read and mutation-evaluation order as part of the model too.
 6. Add fixed test schedules and conformance vectors. These are test weights, not claims of calibrated production prices.
 
 **Acceptance:** exact-budget equality succeeds; a step exceeding the remaining budget is refused before work; final refusal reports planning `spent` and full `required`; missing weights and overflow fail under both budget variants; explicit zero weights remain valid; modeled-depth thresholds and byte charges match the specification.

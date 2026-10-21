@@ -25,8 +25,7 @@ fn colors() -> TestDb {
             key(1),
             &[("color", blue()), ("size", CellValue::from_u32(3))],
         )
-        .field("note", CellValue::from_str("first"))
-        .expect("valid field"),
+        .field("note", CellValue::from_str("first")),
         record(key(2), &[("color", CellValue::from_str("red"))]),
         record(key(3), &[("color", blue())]),
     ]);
@@ -38,11 +37,19 @@ fn records_are_returned_as_get_returns_them() {
     let test = colors();
     let page = test
         .db
-        .query(None, QueryOp::from_filter(eq("color", blue())))
+        .query(
+            None,
+            QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
         .unwrap();
     let get = |n| {
         test.db
-            .get(ReadTarget::Head, RecordOp::get(key(n)))
+            .get(
+                ReadTarget::Head,
+                RecordOp::get(key(n), golemdb_api::Budget::Limited(u64::MAX)),
+            )
+            .into_result()
             .unwrap()
     };
     assert_eq!(page.records, [get(1), get(3)]);
@@ -61,16 +68,19 @@ fn records_come_in_creation_order() {
 #[test]
 fn projection_selects_cells_as_get_does() {
     let test = colors();
-    let op = QueryOp::from_filter(eq("color", blue())).only(["size", "note", "missing"]);
-    let page = test.db.query(None, op).unwrap();
+    let op = QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX))
+        .only(["size", "note", "missing"]);
+    let page = test.db.query(None, op).into_result().unwrap();
     let get = |n| {
-        let op = RecordOp::get(key(n)).only(["size", "note", "missing"]);
-        test.db.get(ReadTarget::Head, op).unwrap()
+        let op = RecordOp::get(key(n), golemdb_api::Budget::Limited(u64::MAX))
+            .only(["size", "note", "missing"]);
+        test.db.get(ReadTarget::Head, op).into_result().unwrap()
     };
     assert_eq!(page.records, [get(1), get(3)]);
 
-    let empty = QueryOp::from_filter(eq("color", blue())).only(Vec::<&str>::new());
-    let page = test.db.query(None, empty).unwrap();
+    let empty = QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX))
+        .only(Vec::<&str>::new());
+    let page = test.db.query(None, empty).into_result().unwrap();
     assert!(page.records.iter().all(|record| record.cells.is_empty()));
     assert_eq!(page.records.len(), 2);
 }
@@ -78,12 +88,17 @@ fn projection_selects_cells_as_get_does() {
 #[test]
 fn total_matched_only_when_asked() {
     let test = colors();
-    let query = |op| test.db.query(None, op).unwrap();
+    let query = |op| test.db.query(None, op).into_result().unwrap();
     assert_eq!(
-        query(QueryOp::from_filter(eq("color", blue()))).total_matched,
+        query(QueryOp::from_filter(
+            eq("color", blue()),
+            golemdb_api::Budget::Limited(u64::MAX)
+        ))
+        .total_matched,
         None
     );
-    let op = QueryOp::from_filter(eq("color", blue())).with_total();
+    let op = QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX))
+        .with_total();
     assert_eq!(query(op).total_matched, Some(2));
 }
 
@@ -94,7 +109,11 @@ fn pages_report_the_commit_they_read() {
     let head = test.db.head().unwrap();
     let page = test
         .db
-        .query(None, QueryOp::from_filter(eq("color", blue())))
+        .query(
+            None,
+            QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
         .unwrap();
     assert_eq!(page.evaluated_at, head);
     assert_eq!(page.records.len(), 3);
@@ -104,12 +123,16 @@ fn pages_report_the_commit_they_read() {
 fn the_head_commit_can_be_named() {
     let test = colors();
     let head = test.db.head().unwrap();
-    let op = QueryOp::from_filter(eq("color", blue()));
-    let page = test.db.query(Some(head), op).unwrap();
+    let op = QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX));
+    let page = test.db.query(Some(head), op).into_result().unwrap();
     assert_eq!(page.evaluated_at, head);
     let count = test
         .db
-        .count(Some(head), CountOp::filter(eq("color", blue())))
+        .count(
+            Some(head),
+            CountOp::filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
         .unwrap();
     assert_eq!(count, 2);
 }
@@ -121,7 +144,11 @@ fn other_commits_are_unavailable() {
     let older = CommitId::new(head.get() - 1);
     let result = test
         .db
-        .query(Some(older), QueryOp::from_filter(eq("color", blue())));
+        .query(
+            Some(older),
+            QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result();
     assert!(matches!(
         result,
         Err(ApiError::CommitUnavailable { requested, head: got }) if requested == older && got == head
@@ -134,6 +161,7 @@ fn pending_branch_work_is_invisible() {
     let branch = test.db.begin().unwrap();
     test.db
         .create(branch, record(key(7), &[("color", blue())]))
+        .into_result()
         .unwrap();
     assert_eq!(test.keys(eq("color", blue())).unwrap(), [key(1), key(3)]);
     test.db.commit(branch).unwrap();
@@ -146,7 +174,8 @@ fn pending_branch_work_is_invisible() {
 #[test]
 fn unbuilt_parts_are_not_implemented() {
     let test = colors();
-    let filter = || QueryOp::from_filter(eq("color", blue()));
+    let filter =
+        || QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX));
     for (op, part) in [
         (
             filter().sort([SortKey::asc("size", CellType::Uint(Width::W4))]),
@@ -155,7 +184,7 @@ fn unbuilt_parts_are_not_implemented() {
         (filter().limit(1), "query: limit"),
         (filter().offset(1), "query: offset"),
     ] {
-        let result = test.db.query(None, op);
+        let result = test.db.query(None, op).into_result();
         assert!(
             matches!(result, Err(ApiError::NotImplemented { operation }) if operation == part),
             "{part}"
@@ -166,11 +195,13 @@ fn unbuilt_parts_are_not_implemented() {
 #[test]
 fn the_budget_is_accepted_but_not_enforced_yet() {
     let test = colors();
-    let op = QueryOp::from_filter(eq("color", blue())).budget(Budget::Limited(0));
-    let page = test.db.query(None, op).unwrap();
+    let op = QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX))
+        .budget(Budget::Limited(0));
+    let page = test.db.query(None, op).into_result().unwrap();
     assert_eq!(page.records.len(), 2);
-    let op = CountOp::filter(eq("color", blue())).budget(Budget::Limited(0));
-    assert_eq!(test.db.count(None, op).unwrap(), 2);
+    let op = CountOp::filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX))
+        .budget(Budget::Limited(0));
+    assert_eq!(test.db.count(None, op).into_result().unwrap(), 2);
 }
 
 #[test]
@@ -190,15 +221,27 @@ fn count_is_the_size_of_the_match_set() {
 }
 
 #[test]
-fn a_non_head_commit_is_checked_after_admission() {
+fn snapshot_selection_precedes_admission() {
     let test = colors();
     let head = test.db.head().unwrap();
     let older = Some(CommitId::new(head.get() - 1));
     let invalid = || eq("not valid", blue());
-    let query = test.db.query(older, QueryOp::from_filter(invalid()));
-    assert!(matches!(query, Err(ApiError::InvalidArgument { .. })));
-    let count = test.db.count(older, CountOp::filter(invalid()));
-    assert!(matches!(count, Err(ApiError::InvalidArgument { .. })));
+    let query = test
+        .db
+        .query(
+            older,
+            QueryOp::from_filter(invalid(), golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result();
+    assert!(matches!(query, Err(ApiError::CommitUnavailable { .. })));
+    let count = test
+        .db
+        .count(
+            older,
+            CountOp::filter(invalid(), golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result();
+    assert!(matches!(count, Err(ApiError::CommitUnavailable { .. })));
 }
 
 #[test]
@@ -213,6 +256,7 @@ fn an_indexed_record_without_its_key_is_internal_corruption() {
     let db = Database::from_store(store.clone(), &config).unwrap();
     let branch = db.begin().unwrap();
     db.create(branch, record(key(1), &[("color", blue())]))
+        .into_result()
         .unwrap();
     db.commit(branch).unwrap();
 
@@ -228,7 +272,12 @@ fn an_indexed_record_without_its_key_is_internal_corruption() {
         .unwrap();
     branches.commit(corrupt).unwrap();
 
-    let result = db.query(None, QueryOp::from_filter(eq("color", blue())));
+    let result = db
+        .query(
+            None,
+            QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result();
     let Err(ApiError::Internal { source }) = result else {
         panic!("expected Internal, got {result:?}");
     };
