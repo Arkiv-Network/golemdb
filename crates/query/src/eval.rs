@@ -15,7 +15,11 @@ pub(crate) fn match_set(source: &impl PostingSource, plan: Plan) -> Result<Bitma
         Plan::TermReads(terms) => union(terms.iter().map(|term| source.postings(term))),
         Plan::Scan(range) => union(source.scan(range)?),
         Plan::Empty => Ok(Bitmap::default()),
-        Plan::And { first, rest } => intersection(source, *first, rest),
+        Plan::And { first, rest } => intersection(
+            iter::once(*first)
+                .chain(rest)
+                .map(|child| match_set(source, child)),
+        ),
         Plan::Or { first, rest } => union(
             iter::once(*first)
                 .chain(rest)
@@ -24,16 +28,18 @@ pub(crate) fn match_set(source: &impl PostingSource, plan: Plan) -> Result<Bitma
     }
 }
 
-/// The intersection of `first`'s match set with each of `rest`'s, in the
-/// order given. Once the running set is empty, the remaining children are
-/// skipped: nothing of theirs is read.
-fn intersection(source: &impl PostingSource, first: Plan, rest: Vec<Plan>) -> Result<Bitmap> {
-    let mut running = match_set(source, first)?;
-    for child in rest {
-        if running.treemap().is_empty() {
-            break;
-        }
-        running &= match_set(source, child)?;
+/// The intersection of `sets`, taken one after another in the order given:
+/// an `And`'s children as they are evaluated. Once the running set is
+/// empty, the remaining sets are not pulled: nothing of theirs is read. No
+/// sets at all intersect to the empty set; an `And` always has one.
+fn intersection<E>(mut sets: impl Iterator<Item = std::result::Result<Bitmap, E>>) -> Result<Bitmap>
+where
+    QueryError: From<E>,
+{
+    let mut running = sets.next().transpose()?.unwrap_or_default();
+    while !running.treemap().is_empty() {
+        let Some(set) = sets.next() else { break };
+        running &= set?;
     }
     Ok(running)
 }
