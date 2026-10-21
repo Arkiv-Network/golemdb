@@ -26,8 +26,8 @@ pub enum ReadTarget {
 }
 
 pub type RecordCells = BTreeMap<CellName, CellValue>;
-/// Prepared edits keyed by cell name. API requests retain ordered `PatchEntry`
-/// values until admission; trusted callers may also supply this map directly.
+/// Prepared edits keyed by cell name, produced by execution-time admission.
+/// Callers supply ordered [`PatchEntry`] values to [`crate::Records::patch`].
 pub type RecordPatch = BTreeMap<CellName, CellPatch>;
 
 /// One unvalidated create entry. `kind` is the requested kind; `value` retains

@@ -129,7 +129,10 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
             .with_kind(CellKind::Attribute)
             .unwrap(),
     )]);
-    records.create(branch, KEY, cells).unwrap();
+    records
+        .create(branch, KEY, create_entries(cells), Budget::Unlimited)
+        .result
+        .unwrap();
     assert_eq!(
         branches.commit(branch).unwrap(),
         golemdb_branch::CommitId::new(1)
@@ -146,7 +149,12 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
     assert_eq!(snapshot(&db), before);
     let fresh = Records::new(Branches::new(db.clone(), hasher, None).unwrap());
     assert_eq!(
-        fresh.get(ReadTarget::Head, KEY, None).unwrap().cells[b"price".as_slice()].as_i32(),
+        fresh
+            .get(ReadTarget::Head, KEY, None, Budget::Unlimited)
+            .result
+            .unwrap()
+            .cells[b"price".as_slice()]
+        .as_i32(),
         Some(50)
     );
     let tx = db.begin_read().unwrap();
@@ -421,11 +429,13 @@ fn mdbx_genesis_matches_memory_and_reopens_from_disk_after_commit() {
                     .create(
                         branch,
                         KEY,
-                        golemdb_record::RecordCells::from([(
+                        create_entries(golemdb_record::RecordCells::from([(
                             CellNameRef::raw(b"price").into(),
                             CellValue::from_i32(50),
-                        )]),
+                        )])),
+                        Budget::Unlimited,
                     )
+                    .result
                     .unwrap();
                 branches.commit(branch).unwrap()
             }
@@ -437,11 +447,13 @@ fn mdbx_genesis_matches_memory_and_reopens_from_disk_after_commit() {
                     .create(
                         branch,
                         KEY,
-                        golemdb_record::RecordCells::from([(
+                        create_entries(golemdb_record::RecordCells::from([(
                             CellNameRef::raw(b"price").into(),
                             CellValue::from_i32(50),
-                        )]),
+                        )])),
+                        Budget::Unlimited,
                     )
+                    .result
                     .unwrap();
                 branches.commit(branch).unwrap()
             }
@@ -507,7 +519,10 @@ fn mdbx_modes_limits_and_shared_environment_concurrent_opening() {
         .unwrap();
     let cells =
         golemdb_record::RecordCells::from([(CellNameRef::raw(name.as_bytes()).into(), value)]);
-    records.create(branch, KEY, cells).unwrap();
+    records
+        .create(branch, KEY, create_entries(cells), Budget::Unlimited)
+        .result
+        .unwrap();
     branches.commit(branch).unwrap();
 }
 
@@ -535,4 +550,15 @@ fn mdbx_existing_empty_tables_prevent_initialization() {
             (!delete).then(|| b"value".to_vec())
         );
     }
+}
+
+fn create_entries(cells: golemdb_record::RecordCells) -> Vec<golemdb_record::CreateEntry> {
+    cells
+        .into_iter()
+        .map(|(name, value)| golemdb_record::CreateEntry {
+            name,
+            kind: value.kind(),
+            value,
+        })
+        .collect()
 }

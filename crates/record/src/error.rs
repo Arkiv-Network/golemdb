@@ -10,8 +10,6 @@ pub enum RecordError {
     AlreadyExists,
     #[error("reserved records cannot be modified through CRUD")]
     Reserved,
-    #[error("invalid argument: {0}")]
-    InvalidArgument(String),
     #[error("invalid argument: {message}")]
     InvalidInput {
         message: String,

@@ -248,13 +248,11 @@ impl<S: Store, H: HashProvider> Inner<S, H> {
 impl<S: Store, H: HashProvider> Api for Inner<S, H> {
     fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Metered<RecordKey> {
         let (key, budget, entries) = operation.into_create();
-        self.records
-            .create_report(branch, key, entries, budget)
-            .into()
+        self.records.create(branch, key, entries, budget).into()
     }
     fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Metered<Record> {
         self.records
-            .get_report(
+            .get(
                 target,
                 operation.record_key(),
                 operation.names(),
@@ -264,13 +262,11 @@ impl<S: Store, H: HashProvider> Api for Inner<S, H> {
     }
     fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Metered<()> {
         let (key, budget, entries) = operation.into_patch();
-        self.records
-            .patch_report(branch, key, entries, budget)
-            .into()
+        self.records.patch(branch, key, entries, budget).into()
     }
     fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Metered<()> {
         self.records
-            .delete_report(branch, operation.record_key(), operation.budget())
+            .delete(branch, operation.record_key(), operation.budget())
             .into()
     }
     fn query(&self, commit: Option<CommitId>, operation: QueryOp) -> Metered<QueryPage> {

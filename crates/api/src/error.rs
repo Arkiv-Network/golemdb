@@ -113,7 +113,6 @@ impl From<RecordError> for ApiError {
             }
             RecordError::AlreadyExists => Self::AlreadyExists,
             RecordError::Reserved => Self::Reserved,
-            RecordError::InvalidArgument(message) => Self::invalid_argument(message),
             RecordError::CommitUnavailable { requested, head } => {
                 Self::CommitUnavailable { requested, head }
             }

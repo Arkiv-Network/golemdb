@@ -1,5 +1,16 @@
-//! Queries select one committed snapshot before admission. Its head is retained
-//! on every outcome, including unavailable history and invalid requests.
+//! [`Queries`]: `query` and `count` over committed state.
+//!
+//! Checks run in this order:
+//!
+//! 1. Open one storage snapshot and select its head. A requested commit other
+//!    than that head is rejected; historical reads are not implemented yet.
+//! 2. `query` only: reject unsupported sort, limit and offset options.
+//! 3. Admit the filter, then evaluate it and materialize records from the same
+//!    snapshot. Explicit budgets are not enforced yet.
+//!
+//! Report variants retain the selected snapshot's head even on failure,
+//! including unavailable history and invalid requests. If snapshot/head
+//! selection itself fails, there is no pricing commit to report.
 
 use golemdb_branch::CommitId;
 use golemdb_cells::CellReader;
@@ -13,6 +24,9 @@ use crate::{
     posting_source::IndexSource,
 };
 
+/// Query facade over the committed state of a store. Pending branch work is
+/// never visible to a query. To see what a branch manager commits, pass a
+/// clone of the store handle it writes, sharing its state, and its hasher.
 #[derive(Clone)]
 pub struct Queries<S, H> {
     store: S,
@@ -33,11 +47,15 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
         }
     }
 
+    /// The records matching `op`'s filter at `commit` (`None` for the head),
+    /// in record ID order, projected as `get` projects. Sort, limit and offset
+    /// return `NotImplemented` for now, and the budget is not enforced yet.
+    /// Use [`Self::query_report`] to retain the execution context on failure.
     pub fn query(&self, commit: Option<CommitId>, op: QueryOp) -> Result<QueryPage> {
         self.query_report(commit, op).result
     }
 
-    /// Sort/paging remain unsupported and explicit budgets are not enforced yet.
+    /// Execute [`Self::query`] while retaining its pricing commit for receipts.
     pub fn query_report(
         &self,
         commit: Option<CommitId>,
@@ -76,10 +94,14 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
         })
     }
 
+    /// The size of the filter's match set at `commit` (`None` for the head).
+    /// The budget is not enforced yet. Use [`Self::count_report`] to retain
+    /// the execution context on failure.
     pub fn count(&self, commit: Option<CommitId>, op: CountOp) -> Result<u64> {
         self.count_report(commit, op).result
     }
 
+    /// Execute [`Self::count`] while retaining its pricing commit for receipts.
     pub fn count_report(&self, commit: Option<CommitId>, op: CountOp) -> Outcome<u64, QueryError> {
         self.read_report(commit, |snapshot, _| {
             let plan = Plan::admit(&op.filter, self.max_query_depth)?;

@@ -104,3 +104,7 @@ impl Effects {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "tests/outcome.rs"]
+mod tests;

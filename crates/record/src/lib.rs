@@ -19,8 +19,9 @@
 //! No YAML loading, genesis writes, local parameter defaults, or parameter
 //! cache lives here.
 //!
-//! Report variants retain execution context and actual user effects for API receipts.
-//! Pricing and budget enforcement remain deferred; plain methods discard the report.
+//! Every CRUD operation requires an explicit [`golemdb_metering::Budget`] and
+//! returns an [`Outcome`] with execution context and actual user effects for
+//! API receipts. Pricing and budget enforcement remain deferred.
 //! [`ReadTarget::Head`] selects and reads the current head in one snapshot.
 //! Commit-targeted reads support the head only and explicitly reject other
 //! commits until history is available. Deletes enumerate and tombstone every
@@ -28,9 +29,10 @@
 //!
 //! ```
 //! use golemdb_branch::Branches;
-//! use golemdb_cells::{CellNameRef, CellType, CellValueRef};
+//! use golemdb_cells::{CellKind, CellNameRef, CellValue};
 //! use golemdb_merkle::HashProvider;
-//! use golemdb_record::{ReadTarget, RecordKey, Records};
+//! use golemdb_metering::Budget;
+//! use golemdb_record::{CreateEntry, ReadTarget, RecordKey, Records};
 //! use golemdb_storage::Store;
 //!
 //! // The connection layer has already initialized the store and parameters.
@@ -40,12 +42,15 @@
 //!     let records = Records::new(branches.clone());
 //!     let branch = branches.begin()?;
 //!     let key = RecordKey([7; 32]);
-//!     let name = CellNameRef::parse_user(b"status", 32)?.into();
-//!     let value = CellValueRef::new(CellType::Str, b"ready", true)?.into();
-//!     records.create(branch, key, [(name, value)].into())?;
-//!     let pending = records.get(ReadTarget::Branch(branch), key, None)?;
+//!     let entries = vec![CreateEntry {
+//!         name: CellNameRef::raw(b"status").into(),
+//!         value: CellValue::from_str("ready"),
+//!         kind: CellKind::Attribute,
+//!     }];
+//!     records.create(branch, key, entries, Budget::Unlimited).result?;
+//!     let pending = records.get(ReadTarget::Branch(branch), key, None, Budget::Unlimited).result?;
 //!     let commit = branches.commit(branch)?;
-//!     let stored = records.get(ReadTarget::Commit(commit), key, None)?;
+//!     let stored = records.get(ReadTarget::Commit(commit), key, None, Budget::Unlimited).result?;
 //!     assert_eq!(pending, stored);
 //!     Ok(())
 //! }

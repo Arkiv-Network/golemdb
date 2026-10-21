@@ -5,14 +5,15 @@ use golemdb_metering::Budget;
 use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{
-    CellPatch, CreateEntry, Effects, Outcome, PatchChange, PatchEntry, ReadTarget, Record,
-    RecordCells, RecordError, RecordKey, RecordPatch, Result, admission,
+    CellPatch, CreateEntry, Effects, Outcome, PatchEntry, ReadTarget, Record, RecordCells,
+    RecordError, RecordKey, Result, admission,
     committed::{committed_snapshot, read_committed_by_key},
     state,
 };
 
-/// Record semantics over guarded branch views. Reports retain the selected
-/// pricing commit and actual user effects, including on failed calls.
+/// Record semantics over guarded branch views. Every operation requires an
+/// explicit budget and returns an outcome with the selected pricing commit.
+/// Failed writes retain no effects. Charging and enforcement remain deferred.
 pub struct Records<S, H> {
     branches: Branches<S, H>,
 }
@@ -32,16 +33,6 @@ impl<S: Store, H: HashProvider> Records<S, H> {
 
     /// Read a full record or a projection from one validated snapshot.
     pub fn get(
-        &self,
-        target: ReadTarget,
-        key: RecordKey,
-        projection: Option<&[CellName]>,
-    ) -> Result<Record> {
-        self.get_report(target, key, projection, Budget::Unlimited)
-            .result
-    }
-
-    pub fn get_report(
         &self,
         target: ReadTarget,
         key: RecordKey,
@@ -81,36 +72,17 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         Outcome::new(result, priced_at, Effects::default())
     }
 
-    /// Trusted convenience entrypoint. Uses the same admission path with an
-    /// unlimited budget and drops the report; hosts expose the budgeted API.
-    pub fn create(
-        &self,
-        branch: BranchId,
-        key: RecordKey,
-        values: RecordCells,
-    ) -> Result<RecordKey> {
-        let entries = values
-            .into_iter()
-            .map(|(name, value)| CreateEntry {
-                name,
-                kind: value.kind(),
-                value,
-            })
-            .collect();
-        self.create_report(branch, key, entries, Budget::Unlimited)
-            .result
-    }
-
     /// Admit original entries only after handle validation. Budgets are passed
     /// into execution but charging and enforcement remain unimplemented.
-    pub fn create_report(
+    /// Entries preserve caller order and duplicates until admission.
+    pub fn create(
         &self,
         branch: BranchId,
         key: RecordKey,
         entries: Vec<CreateEntry>,
         budget: Budget,
     ) -> Outcome<RecordKey, RecordError> {
-        self.write_report(branch, budget, |writer, effects| {
+        self.execute_write(branch, budget, |writer, effects| {
             admission::key(key)?;
             let reader = writer.as_read();
             let limits = state::limits(&reader)?;
@@ -143,35 +115,17 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         })
     }
 
-    pub fn patch(&self, branch: BranchId, key: RecordKey, changes: RecordPatch) -> Result<()> {
-        let entries = changes
-            .into_iter()
-            .map(|(name, change)| PatchEntry {
-                name,
-                change: match change {
-                    CellPatch::Write(value) => PatchChange::Write {
-                        kind: value.kind(),
-                        value,
-                    },
-                    CellPatch::Set(value) => PatchChange::Set(value),
-                    CellPatch::Remove => PatchChange::Remove,
-                },
-            })
-            .collect();
-        self.patch_report(branch, key, entries, Budget::Unlimited)
-            .result
-    }
-
     /// Explicit writes may change kind; set preserves kind and requires a cell.
+    /// Entries preserve caller order and duplicates until admission.
     /// No-ops do not write, advance the journal, or contribute effects.
-    pub fn patch_report(
+    pub fn patch(
         &self,
         branch: BranchId,
         key: RecordKey,
         entries: Vec<PatchEntry>,
         budget: Budget,
     ) -> Outcome<(), RecordError> {
-        self.write_report(branch, budget, |writer, effects| {
+        self.execute_write(branch, budget, |writer, effects| {
             admission::key(key)?;
             let reader = writer.as_read();
             let limits = state::limits(&reader)?;
@@ -210,26 +164,26 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         })
     }
 
-    pub fn delete(&self, branch: BranchId, key: RecordKey) -> Result<()> {
-        self.delete_report(branch, key, Budget::Unlimited).result
-    }
-
     /// Delete user cells, identity and binding; never rewind the allocator.
-    pub fn delete_report(
+    pub fn delete(
         &self,
         branch: BranchId,
         key: RecordKey,
         budget: Budget,
     ) -> Outcome<(), RecordError> {
-        self.write_report(branch, budget, |writer, effects| {
+        self.execute_write(branch, budget, |writer, effects| {
             admission::key(key)?;
             let reader = writer.as_read();
             let id = state::resolve(&reader, key)?.ok_or(RecordError::NotFound)?;
-            let rows = reader
-                .scan_prefix(&id.to_be_bytes())?
-                .collect::<golemdb_branch::Result<Vec<_>>>()?;
-            for (address, value) in rows {
+            // Finish the read-only scan before mutating the overlay. Retain
+            // keys for deletion, but release each scanned value immediately.
+            let mut keys = Vec::new();
+            for row in reader.scan_prefix(&id.to_be_bytes())? {
+                let (address, value) = row?;
                 effects.change(&address.name().into(), Some(&value), None)?;
+                keys.push(address);
+            }
+            for address in keys {
                 writer.delete(address);
             }
             writer.delete(state::binding(key));
@@ -237,7 +191,7 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         })
     }
 
-    fn write_report<T>(
+    fn execute_write<T>(
         &self,
         branch: BranchId,
         _budget: Budget,

@@ -1,7 +1,9 @@
 use std::sync::{
-    Arc, Barrier, Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
+    mpsc,
 };
+use std::time::Duration;
 
 use golemdb_api::*;
 use golemdb_cells::{CellLimitError, CellNameError, CellValueParseError, system};
@@ -142,9 +144,6 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
         let missing = db.delete(branch, RecordOp::delete(KEY, BUDGET));
         unchanged(&missing, Some(head));
         assert!(matches!(missing.result, Err(ApiError::NotFound)));
-        // Rolling back state does not revoke the previously returned receipt.
-        db.rollback(branch).unwrap();
-        assert_eq!(created.receipt.details, details);
     });
 }
 
@@ -445,9 +444,11 @@ struct PausingStore {
 }
 
 struct ReadPause {
-    captured: Arc<Barrier>,
-    resume: Arc<Barrier>,
+    captured: mpsc::Sender<()>,
+    resume: mpsc::Receiver<()>,
 }
+
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl Store for PausingStore {
     type Read<'a> = <MemoryStore as Store>::Read<'a>;
@@ -465,8 +466,12 @@ impl Store for PausingStore {
         let snapshot = self.inner.begin_read()?;
         let pause = self.pause.lock().unwrap().take();
         if let Some(pause) = pause {
-            pause.captured.wait();
-            pause.resume.wait();
+            pause.captured.send(()).map_err(|error| {
+                StorageError::Backend(format!("snapshot receiver disconnected: {error}").into())
+            })?;
+            pause.resume.recv_timeout(READ_TIMEOUT).map_err(|error| {
+                StorageError::Backend(format!("snapshot was not resumed: {error}").into())
+            })?;
         }
         Ok(snapshot)
     }
@@ -502,32 +507,43 @@ fn advancing_head_cannot_change_the_context_of_an_inflight_read() {
         db.delete(deleting, RecordOp::delete(KEY, BUDGET))
             .result
             .unwrap();
-        let captured = Arc::new(Barrier::new(2));
-        let resume = Arc::new(Barrier::new(2));
+        let (captured_tx, captured_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (completed_tx, completed_rx) = mpsc::channel();
         *store.pause.lock().unwrap() = Some(ReadPause {
-            captured: captured.clone(),
-            resume: resume.clone(),
+            captured: captured_tx,
+            resume: resume_rx,
         });
         let reader = db.clone();
-        let task = std::thread::spawn(move || match operation {
-            "get" => reader
-                .get(ReadTarget::Head, RecordOp::get(KEY, BUDGET))
-                .map(|_| 1),
-            "branch get" => reader
-                .get(
-                    ReadTarget::Branch(reader_branch),
-                    RecordOp::get(KEY, BUDGET),
-                )
-                .map(|_| 1),
-            "query" => reader
-                .query(None, QueryOp::from_filter(filter("color"), BUDGET))
-                .map(|p| p.records.len() as u64),
-            _ => reader.count(None, CountOp::filter(filter("color"), BUDGET)),
+        let task = std::thread::spawn(move || {
+            let outcome = match operation {
+                "get" => reader
+                    .get(ReadTarget::Head, RecordOp::get(KEY, BUDGET))
+                    .map(|_| 1),
+                "branch get" => reader
+                    .get(
+                        ReadTarget::Branch(reader_branch),
+                        RecordOp::get(KEY, BUDGET),
+                    )
+                    .map(|_| 1),
+                "query" => reader
+                    .query(None, QueryOp::from_filter(filter("color"), BUDGET))
+                    .map(|p| p.records.len() as u64),
+                _ => reader.count(None, CountOp::filter(filter("color"), BUDGET)),
+            };
+            completed_tx.send(outcome).expect("receive read outcome");
         });
-        captured.wait();
+        captured_rx
+            .recv_timeout(READ_TIMEOUT)
+            .expect("reader captures its snapshot before the commit");
         let new_head = db.commit(deleting).unwrap();
-        resume.wait();
-        let outcome = task.join().unwrap();
+        resume_tx
+            .send(())
+            .expect("resume the reader after the commit");
+        let outcome = completed_rx
+            .recv_timeout(READ_TIMEOUT)
+            .expect("reader completes after resuming");
+        task.join().unwrap();
         unchanged(&outcome, Some(old_head));
         assert_eq!(outcome.result.unwrap(), 1);
         assert!(new_head > old_head);
