@@ -29,9 +29,13 @@ pub enum ApiError {
         #[source]
         source: Option<Box<dyn Error + Send + Sync>>,
     },
-    /// A query that cannot run as written, e.g. one targeting a branch.
+    /// A query that cannot run as written, e.g. an `And` or `Or` with no child.
     #[error("invalid query: {reason}")]
     InvalidQuery { reason: &'static str },
+    /// A request over a cap, named by `limit`, whose value is `max`, e.g. a
+    /// query's filter nested deeper than the query depth cap.
+    #[error("limit exceeded: {limit} is capped at {max}")]
+    LimitExceeded { limit: &'static str, max: u32 },
     #[error("branch handle is unknown, consumed, or invalidated")]
     HandleInvalid,
     #[error("commit lost the publication race")]
@@ -118,6 +122,7 @@ impl From<QueryError> for ApiError {
                 source: Some(Box::new(source)),
             },
             QueryError::InvalidQuery { reason } => Self::InvalidQuery { reason },
+            QueryError::LimitExceeded { limit, max } => Self::LimitExceeded { limit, max },
             QueryError::NotImplemented { operation } => Self::NotImplemented { operation },
             QueryError::CommitUnavailable { requested, head } => {
                 Self::CommitUnavailable { requested, head }
@@ -242,6 +247,25 @@ mod tests {
                 expected: CellType::Uint(Width::W4),
                 found: CellType::Uint(Width::W8),
             })
+        );
+    }
+
+    #[test]
+    fn a_query_over_a_cap_keeps_the_cap() {
+        let error = ApiError::from(QueryError::LimitExceeded {
+            limit: "filter depth",
+            max: 64,
+        });
+        assert!(matches!(
+            &error,
+            ApiError::LimitExceeded {
+                limit: "filter depth",
+                max: 64
+            }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "limit exceeded: filter depth is capped at 64"
         );
     }
 }

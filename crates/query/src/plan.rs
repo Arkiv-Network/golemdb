@@ -1,6 +1,6 @@
-//! [`Plan`]: a filter after admission. Building it validates the whole filter
-//! before any state read and resolves its leaves to the index work they need.
-//! Pure; no storage access.
+//! [`Plan`]: a filter after admission. Building it validates the whole filter,
+//! its depth included, before any state read and resolves its leaves to the
+//! index work they need. Pure; no storage access.
 
 use std::collections::BTreeSet;
 
@@ -24,28 +24,87 @@ pub(crate) enum Plan {
     /// A leaf no record can match, an `In` with no value or a `Range` whose
     /// bounds admit none: nothing is read.
     Empty,
+    /// The intersection of the children's match sets, evaluated in the
+    /// written order, `first` then `rest`, until the running set is empty.
+    And { first: Box<Plan>, rest: Vec<Plan> },
+    /// The union of every child's match set, in the written order.
+    Or { first: Box<Plan>, rest: Vec<Plan> },
 }
 
-impl TryFrom<&Filter> for Plan {
-    type Error = QueryError;
+impl Plan {
+    /// Admission, depth-first and children left to right, so the first error
+    /// in the written order is the one reported. Fails with
+    /// [`QueryError::LimitExceeded`] on a node more than `max_depth` `And` /
+    /// `Or` levels deep (a leaf adds no level; `None` sets no cap), with
+    /// [`QueryError::InvalidQuery`] on an `And` or `Or` with no child, and
+    /// with [`QueryError::InvalidArgument`] on a leaf with a bad field name.
+    /// A leaf that admits no value is [`Plan::Empty`]. `Eq` values, `In`
+    /// values and `Range` bounds are of one indexable type by construction.
+    pub(crate) fn admit(filter: &Filter, max_depth: Option<u32>) -> Result<Self> {
+        Admission { max_depth }.plan(filter, 0)
+    }
+}
 
-    /// Admission: fails with [`QueryError::InvalidArgument`] on a leaf with a
-    /// bad field name. A leaf that admits no value is [`Plan::Empty`]. `Eq`
-    /// values, `In` values and `Range` bounds are of one indexable type by
-    /// construction.
-    fn try_from(filter: &Filter) -> Result<Self> {
+/// One filter's admission, under its depth cap. Admission and evaluation
+/// recurse once per `And` / `Or` level, so the cap bounds their stack too: a
+/// node over it fails before admission goes any deeper.
+struct Admission {
+    max_depth: Option<u32>,
+}
+
+impl Admission {
+    /// The plan of `filter`, with `depth` `And` / `Or` levels above it.
+    fn plan(&self, filter: &Filter, depth: u32) -> Result<Plan> {
         match filter {
-            Filter::Eq { field, value } => Ok(Self::TermRead(term(field, value.as_cell())?)),
+            Filter::Eq { field, value } => Ok(Plan::TermRead(term(field, value.as_cell())?)),
             Filter::In { field, values } => {
-                Ok(terms(field, values)?.map_or(Self::Empty, Self::TermReads))
+                Ok(terms(field, values)?.map_or(Plan::Empty, Plan::TermReads))
             }
             Filter::Range { field, bounds } => {
-                Ok(range(field, bounds)?.map_or(Self::Empty, Self::Scan))
+                Ok(range(field, bounds)?.map_or(Plan::Empty, Plan::Scan))
             }
             Filter::Prefix { field, prefix } => TermRange::with_prefix(field.as_view(), prefix)
-                .map(Self::Scan)
+                .map(Plan::Scan)
                 .map_err(|source| invalid_argument(field, source)),
+            Filter::And(children) => {
+                let (first, rest) =
+                    self.children(children, depth, "`And` needs at least one child")?;
+                Ok(Plan::And { first, rest })
+            }
+            Filter::Or(children) => {
+                let (first, rest) =
+                    self.children(children, depth, "`Or` needs at least one child")?;
+                Ok(Plan::Or { first, rest })
+            }
         }
+    }
+
+    /// The plans of a node's `children`, in the written order: the first, and
+    /// the rest. The node adds one level to `depth`: over the cap, it fails
+    /// before anything else; with no child, it is an invalid query, reported
+    /// as `empty`.
+    fn children(
+        &self,
+        children: &[Filter],
+        depth: u32,
+        empty: &'static str,
+    ) -> Result<(Box<Plan>, Vec<Plan>)> {
+        let depth = depth + 1;
+        if let Some(max) = self.max_depth.filter(|&max| depth > max) {
+            return Err(QueryError::LimitExceeded {
+                limit: "filter depth",
+                max,
+            });
+        }
+        let [first, rest @ ..] = children else {
+            return Err(QueryError::InvalidQuery { reason: empty });
+        };
+        let first = Box::new(self.plan(first, depth)?);
+        let rest = rest
+            .iter()
+            .map(|child| self.plan(child, depth))
+            .collect::<Result<_>>()?;
+        Ok((first, rest))
     }
 }
 
@@ -109,6 +168,12 @@ mod tests {
     };
 
     use super::*;
+    use crate::EqValue;
+
+    /// Admission with no depth cap; the depth tests set one.
+    fn admit(filter: &Filter) -> Result<Plan> {
+        Plan::admit(filter, None)
+    }
 
     #[test]
     fn valid_leaf_resolves_to_its_index_term() {
@@ -209,7 +274,7 @@ mod tests {
     #[test]
     fn an_in_with_no_value_is_empty_once_its_name_is_checked() {
         let plan = |field: &[u8]| {
-            Plan::try_from(&Filter::In {
+            admit(&Filter::In {
                 field: CellNameRef::raw(field).into(),
                 values: InValues::of(U32, []),
             })
@@ -244,7 +309,7 @@ mod tests {
 
     /// Admission of a `Range` on `field`.
     fn range_plan(field: &[u8], bounds: &Bounds) -> Result<Plan> {
-        Plan::try_from(&Filter::Range {
+        admit(&Filter::Range {
             field: CellNameRef::raw(field).into(),
             bounds: bounds.clone(),
         })
@@ -340,7 +405,7 @@ mod tests {
     /// Admission of `field` starting with `prefix`. Raw, so tests can also
     /// pass names the grammar rejects.
     fn prefix(field: &[u8], prefix: &str) -> Result<Plan> {
-        Plan::try_from(&Filter::Prefix {
+        admit(&Filter::Prefix {
             field: CellNameRef::raw(field).into(),
             prefix: prefix.to_owned(),
         })
@@ -373,5 +438,194 @@ mod tests {
                 "{field:?}"
             );
         }
+    }
+
+    /// An `Eq` leaf on `field`, valid or not.
+    fn eq_u32(field: &[u8], value: u32) -> Filter {
+        Filter::Eq {
+            field: CellNameRef::raw(field).into(),
+            value: EqValue::of(U32, value),
+        }
+    }
+
+    fn plan_of(filter: &Filter) -> Plan {
+        admit(filter).expect("valid filter")
+    }
+
+    #[test]
+    fn and_and_or_keep_their_children_in_the_written_order() {
+        let (a, b, c) = (eq_u32(b"a", 1), eq_u32(b"b", 2), eq_u32(b"c", 3));
+        let (plan_a, plan_b, plan_c) = (plan_of(&a), plan_of(&b), plan_of(&c));
+        let and = Filter::And(vec![a.clone(), b.clone(), c.clone()]);
+        assert_eq!(
+            plan_of(&and),
+            Plan::And {
+                first: Box::new(plan_a.clone()),
+                rest: vec![plan_b.clone(), plan_c.clone()],
+            }
+        );
+        let or = Filter::Or(vec![c, a]);
+        assert_eq!(
+            plan_of(&or),
+            Plan::Or {
+                first: Box::new(plan_c),
+                rest: vec![plan_a],
+            }
+        );
+    }
+
+    #[test]
+    fn a_node_with_one_child_keeps_its_shape() {
+        let leaf = eq_u32(b"a", 1);
+        assert_eq!(
+            plan_of(&Filter::And(vec![leaf.clone()])),
+            Plan::And {
+                first: Box::new(plan_of(&leaf)),
+                rest: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn nodes_nest() {
+        let (a, b, c) = (eq_u32(b"a", 1), eq_u32(b"b", 2), eq_u32(b"c", 3));
+        let filter = Filter::And(vec![Filter::Or(vec![a.clone(), b.clone()]), c.clone()]);
+        assert_eq!(
+            plan_of(&filter),
+            Plan::And {
+                first: Box::new(Plan::Or {
+                    first: Box::new(plan_of(&a)),
+                    rest: vec![plan_of(&b)],
+                }),
+                rest: vec![plan_of(&c)],
+            }
+        );
+    }
+
+    #[test]
+    fn an_and_or_an_or_with_no_child_is_an_invalid_query() {
+        for filter in [
+            Filter::And(vec![]),
+            Filter::Or(vec![]),
+            Filter::And(vec![eq_u32(b"a", 1), Filter::Or(vec![])]),
+            Filter::Or(vec![Filter::And(vec![Filter::And(vec![])])]),
+        ] {
+            assert!(
+                matches!(admit(&filter), Err(QueryError::InvalidQuery { .. })),
+                "{filter:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_error_in_the_written_order_is_reported() {
+        let bad_name = |field: &[u8]| eq_u32(field, 1);
+        let filter = Filter::And(vec![
+            eq_u32(b"a", 1),
+            Filter::Or(vec![bad_name(b"1first"), Filter::And(vec![])]),
+            bad_name(b"2second"),
+        ]);
+        assert!(matches!(
+            admit(&filter),
+            Err(QueryError::InvalidArgument { field, .. }) if field.as_bytes() == b"1first"
+        ));
+        let filter = Filter::Or(vec![Filter::And(vec![]), bad_name(b"1first")]);
+        assert!(matches!(
+            admit(&filter),
+            Err(QueryError::InvalidQuery { .. })
+        ));
+    }
+
+    /// `levels` `And` / `Or` levels over one leaf, alternating: the nested
+    /// node is the last child of each `And` and the only one of each `Or`, so
+    /// both ways a child is admitted are taken.
+    fn nested(levels: u32) -> Filter {
+        (0..levels).fold(eq_u32(b"a", 1), |filter, level| {
+            if level % 2 == 0 {
+                Filter::And(vec![eq_u32(b"b", 2), filter])
+            } else {
+                Filter::Or(vec![filter])
+            }
+        })
+    }
+
+    /// Whether `result` is the failure of a node over a depth cap of `cap`.
+    fn over_the_cap(result: &Result<Plan>, cap: u32) -> bool {
+        matches!(
+            result,
+            Err(QueryError::LimitExceeded { limit: "filter depth", max }) if *max == cap
+        )
+    }
+
+    #[test]
+    fn a_filter_nests_up_to_its_depth_cap() {
+        for cap in [1, 2, 3, 64] {
+            let at_the_cap = nested(cap);
+            assert_eq!(
+                Plan::admit(&at_the_cap, Some(cap)).expect("nests within the cap"),
+                plan_of(&at_the_cap),
+                "{cap}"
+            );
+            assert!(
+                over_the_cap(&Plan::admit(&nested(cap + 1), Some(cap)), cap),
+                "{cap}"
+            );
+        }
+    }
+
+    #[test]
+    fn depth_counts_the_levels_of_the_longest_path() {
+        // A leaf adds no level: it is admitted under a cap of 0, a node is not.
+        let leaf = eq_u32(b"a", 1);
+        Plan::admit(&leaf, Some(0)).expect("a leaf has no depth");
+        assert!(over_the_cap(
+            &Plan::admit(&Filter::Or(vec![leaf]), Some(0)),
+            0
+        ));
+        // Siblings add no level, however many.
+        let wide = Filter::Or((0..1000).map(|n| eq_u32(b"a", n)).collect());
+        Plan::admit(&wide, Some(1)).expect("one level");
+        // The deepest child sets the depth, wherever it is written.
+        for uneven in [
+            Filter::And(vec![nested(3), eq_u32(b"b", 1), nested(1)]),
+            Filter::Or(vec![nested(1), nested(3)]),
+        ] {
+            Plan::admit(&uneven, Some(4)).expect("four levels");
+            assert!(
+                over_the_cap(&Plan::admit(&uneven, Some(3)), 3),
+                "{uneven:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_no_cap_the_depth_is_not_checked() {
+        Plan::admit(&nested(100), None).expect("no cap");
+    }
+
+    #[test]
+    fn the_depth_is_checked_in_the_written_order() {
+        let too_deep = nested(3);
+        let bad_name = eq_u32(b"1bad", 1);
+        // Whichever error is written first is the one reported.
+        let filter = Filter::And(vec![bad_name.clone(), too_deep.clone()]);
+        assert!(matches!(
+            Plan::admit(&filter, Some(2)),
+            Err(QueryError::InvalidArgument { .. })
+        ));
+        let filter = Filter::And(vec![too_deep, bad_name]);
+        assert!(over_the_cap(&Plan::admit(&filter, Some(2)), 2));
+        // A node over the cap fails before its children are looked at, so
+        // before it is found to have none.
+        let filter = Filter::And(vec![Filter::Or(vec![])]);
+        assert!(over_the_cap(&Plan::admit(&filter, Some(1)), 1));
+    }
+
+    #[test]
+    fn admission_stops_at_the_cap_however_deep_the_tree() {
+        // Admitted in full, 5,000 levels would overflow a test thread's stack
+        // in either build; under a cap, admission goes one level past it.
+        let deep = nested(5_000);
+        assert!(over_the_cap(&Plan::admit(&deep, Some(64)), 64));
     }
 }

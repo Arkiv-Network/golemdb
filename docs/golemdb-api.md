@@ -981,7 +981,7 @@ Queries run against **committed state only**, never against a branch.
 ```
 query = {
     projection? : [cell name]
-    filter      : ordered DNF: OR of AND-groups, negated literals allowed
+    filter      : tree of And / Or / Not nodes over typed leaves, evaluated as written
     sort?       : [ (name, type, direction) ]      ordered list of terms
     page        : { limit, offset? }
 }
@@ -992,18 +992,23 @@ at, a cursor for the next page, and a receipt.
 
 #### Filtering
 
-The `filter` is an **ordered** DNF, and the database never reorders it:
+The `filter` is a **tree** of `And`, `Or` and `Not` nodes over typed leaves. The written tree is
+the plan, and the database never reorders it: nodes evaluate depth-first, children left to
+right, so a condition shared by several branches is written, and read, once.
 
-- **AND-order:** predicates intersect in submitted order, carrying a running intermediate; a group
-  stops early when that intermediate is empty. This is the caller's main optimization lever.
-- **OR-order:** groups evaluate in submitted order and union. The order is pinned so that the
-  abort point, and so `OutOfBudget`, is deterministic.
+- **`And`:** children intersect in written order, carrying a running set; the node stops early
+  when that set is empty, and its remaining children are not read. This is the caller's main
+  optimization lever. A `Not` child subtracts from the running set; a standalone `Not`, or one
+  under an `Or`, needs the set of all live records and waits on product decision
+  [P08](CHANGES.md).
+- **`Or`:** children evaluate in written order and union, with no early exit. The order is pinned
+  so that the abort point, and so `OutOfBudget`, is deterministic.
 - **Early exit applies to unsorted queries only.** A sorted query costs O(N) whatever page was
   asked for. An unsorted query may stop once `offset + limit` records are collected, unless
   `total_matched` is required.
-- A record matching several groups is returned **once**.
+- A record matching several children of an `Or` is returned **once**.
 - **Predicates are typed:** a cell of another type under the same name is treated as absent.
-- `LimitExceeded` caps the group count, predicates per group and nesting.
+- `LimitExceeded` caps the nesting depth.
 
 **The database performs no statistics-based planning**: work is a pure function of
 `(state, ordered filter, page)`, and query optimization is the caller's job. So the _outcome_
@@ -1083,7 +1088,7 @@ Two normative rules for implementations that keep a warm sequence:
 | Input | Meaning |
 | --- | --- |
 | `at?` | `CommitId`; absent = the current head; must lie within retention |
-| `filter` | ordered DNF, as in `query` |
+| `filter` | a filter tree, as in `query` |
 | `budget` | `Limited(u64)` or host-authorized `Unlimited` |
 
 **Output:** a `u64` count and a receipt.
@@ -1197,7 +1202,7 @@ rules, not who may call the API.
 | Error | Raised when |
 | --- | --- |
 | `InvalidQuery` | a predicate the type's index class does not support, or a cursor whose fingerprint does not match |
-| `LimitExceeded` | a filter exceeds the caps: group count, predicates per group, nesting |
+| `LimitExceeded` | a filter nests deeper than its depth cap |
 | `Pruned` | an immutable-data ordinal existed but is beyond the retention window; a pruned key gives `NotFound` |
 
 ### Open items
