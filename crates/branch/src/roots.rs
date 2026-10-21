@@ -9,6 +9,8 @@ use crate::{BranchError, CommitId, Head, Result};
 /// make old tries walkable. `#roots` commits only their hashes.
 pub const ROOTS: Table = Table("Roots");
 
+/// One commit's two roots, as locators: hash, commit and, for a singleton, its
+/// path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Roots {
     pub state: RootRef<CELL_TRIE_PATH_BYTES>,

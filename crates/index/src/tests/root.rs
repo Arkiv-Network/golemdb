@@ -1,6 +1,6 @@
 use crate::index_trie::decode_root;
 use crate::{BITMAP_TRIE_PATH_BYTES, IndexError};
-use golemdb_merkle::{BranchRef, Keccak256Hasher, LeafRef, RootRef};
+use golemdb_merkle::{BRANCH_ROOT_BYTES, BranchRef, HASH_BYTES, Keccak256Hasher, LeafRef, RootRef};
 
 const HASH: Keccak256Hasher = Keccak256Hasher;
 
@@ -16,14 +16,14 @@ fn index_row_locates_branch_and_singleton_roots() {
         commit: 42,
     });
     let bytes = branch.encode();
-    assert_eq!(bytes.len(), 40);
-    assert_eq!(bytes[32..], 0x0102_0304_0506_0708u64.to_be_bytes());
+    assert_eq!(bytes.len(), BRANCH_ROOT_BYTES);
+    assert_eq!(bytes[HASH_BYTES..], 0x0102_0304_0506_0708u64.to_be_bytes());
     assert_eq!(decode_root(&bytes).unwrap(), branch);
     let bytes = singleton.encode();
-    assert_eq!(bytes.len(), 46);
-    assert_eq!(bytes[40..], [9, 8, 7, 6, 5, 4]);
+    assert_eq!(bytes.len(), BRANCH_ROOT_BYTES + BITMAP_TRIE_PATH_BYTES);
+    assert_eq!(bytes[BRANCH_ROOT_BYTES..], [9, 8, 7, 6, 5, 4]);
     assert_eq!(decode_root(&bytes).unwrap(), singleton);
-    // The committed hash is the first 32 bytes, whatever the location says.
+    // The committed hash comes first, whatever the location says.
     assert_eq!(decode_root(&bytes).unwrap().hash(&HASH), [2; 32]);
 }
 

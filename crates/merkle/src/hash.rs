@@ -3,6 +3,9 @@ use sha3::{Digest, Keccak256};
 
 pub type Hash = [u8; 32];
 
+/// Bytes of a [`Hash`](type@Hash).
+pub const HASH_BYTES: usize = size_of::<Hash>();
+
 /// Hash the concatenation of byte slices, with no implicit framing or domain.
 /// Callers define canonical preimages and supply domain bytes explicitly.
 /// Use the same provider for routing, leaf hashes, and branch hashes.

@@ -6,7 +6,7 @@ use golemdb_storage::{Store, WriteTransaction};
 
 use crate::{
     BranchError, CommitId, Result, SealedCommit,
-    head::{Head, read_head, read_head_state, write_head},
+    head::{Head, advance_head, read_head, read_head_state},
     immutable::{ImmutableSegments, ImmutableStaging},
     manager::ImmutableWriter,
     roots::Roots,
@@ -39,6 +39,8 @@ pub(crate) fn stage(
     sealed: &SealedCommit,
     hasher: &impl HashProvider,
 ) -> Result<()> {
+    // Checked before replaying, so a lost race does no work; `advance_head`
+    // checks again with the head it publishes.
     if read_head(tx)? != origin {
         return Err(BranchError::Conflict);
     }
@@ -62,7 +64,8 @@ pub(crate) fn stage(
         state: sealed.cells.root,
         index: sealed.index.root,
     };
-    write_head(tx, sealed.commit_id, &roots, hasher)?;
+    // Publishes `origin + 1`, the commit seal wrote these rows under.
+    advance_head(tx, origin, &roots, hasher)?;
     Ok(())
 }
 

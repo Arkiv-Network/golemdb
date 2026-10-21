@@ -1,9 +1,11 @@
-use golemdb_branch::{BranchError, Branches, OperationError, SealedCommit};
+use golemdb_branch::{BranchError, Branches, OperationError, SealedCommit, read_head_state};
 use golemdb_cells::{
     CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, tables,
 };
 use golemdb_index::{Index, IndexTerm, PostingChange};
-use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher, RootRef};
+use golemdb_merkle::{
+    BRANCH_ROOT_BYTES, Blake3Hasher, HASH_BYTES, HashProvider, Keccak256Hasher, RootRef,
+};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 use std::{
     collections::BTreeMap,
@@ -243,9 +245,9 @@ fn verify_rebuild(
 ) {
     seed(expected, hash, 7, &rows.into_iter().collect::<Vec<_>>());
     let tx = expected.begin_read().unwrap();
-    let roots = tx.get(SUPERBLOCK, b"head").unwrap().unwrap();
-    assert_eq!(sealed.state_root.as_slice(), &roots[8..40]);
-    assert_eq!(sealed.index_root.as_slice(), &roots[40..72]);
+    let head = read_head_state(&tx).unwrap();
+    assert_eq!(sealed.state_root, head.state_root);
+    assert_eq!(sealed.index_root, head.index_root);
     let tx = db.begin_read().unwrap();
     Cells::new(hash)
         .validate_root(&tx, sealed.cells.root)
@@ -266,9 +268,10 @@ fn verify_rebuild(
             .map(|row| {
                 let (key, mut value) = row.unwrap();
                 if table == golemdb_index::tables::INDEX {
-                    let stored = u64::from_be_bytes(value[32..40].try_into().unwrap());
+                    let field = HASH_BYTES..BRANCH_ROOT_BYTES;
+                    let stored = u64::from_be_bytes(value[field.clone()].try_into().unwrap());
                     assert!(stored <= commit);
-                    value.drain(32..40);
+                    value.drain(field);
                 }
                 (key, value)
             })

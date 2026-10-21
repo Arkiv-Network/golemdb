@@ -1,5 +1,5 @@
 use crate::{BITMAP_BRANCH_DOMAIN, BITMAP_LEAF_DOMAIN};
-use golemdb_merkle::{Hash, HashProvider, LeafRef, RootRef, Trie};
+use golemdb_merkle::{Hash, HashProvider, LeafPayload, LeafRef, PayloadTrie, RootRef};
 use golemdb_storage::{ReadTransaction, WriteTransaction};
 
 use crate::{
@@ -7,9 +7,9 @@ use crate::{
 };
 
 /// One term's bitmap trie, namespaced by the term's routing path. Containers
-/// are its leaves, stored as rows under `commit ‖ term ‖ container path`.
+/// are its leaves' payloads, stored under `commit ‖ term ‖ container path`.
 pub(crate) struct BitmapTrie<'a, H: HashProvider> {
-    trie: Trie<'a, H, BITMAP_TRIE_PATH_BYTES>,
+    trie: PayloadTrie<'a, H, BITMAP_TRIE_PATH_BYTES>,
     hasher: &'a H,
 }
 
@@ -17,9 +17,13 @@ impl<'a, H: HashProvider> BitmapTrie<'a, H> {
     /// The bitmap trie of the term whose routing path is `term`.
     pub(crate) fn new(hasher: &'a H, term: &'a Hash) -> Self {
         Self {
-            trie: Trie::new(tables::BITMAP_TRIE, BITMAP_BRANCH_DOMAIN, hasher)
-                .in_namespace(term)
-                .with_leaf_rows(),
+            trie: PayloadTrie::new(
+                tables::BITMAP_TRIE,
+                tables::BITMAP_CONTAINER,
+                BITMAP_BRANCH_DOMAIN,
+                hasher,
+            )
+            .in_namespace(term),
             hasher,
         }
     }
@@ -36,12 +40,8 @@ impl<'a, H: HashProvider> BitmapTrie<'a, H> {
         tx: &impl ReadTransaction,
         leaf: LeafRef<BITMAP_TRIE_PATH_BYTES>,
     ) -> Result<BitmapContainer> {
-        let bytes = tx
-            .get(
-                tables::BITMAP_CONTAINER,
-                &self.trie.leaf_key(leaf.commit, &leaf.path),
-            )?
-            .ok_or(IndexError::Corruption("missing container"))?;
+        let bytes =
+            (self.trie.payload(tx, leaf)?).ok_or(IndexError::Corruption("missing container"))?;
         let container = self.decode(leaf.hash, &bytes)?;
         if path::path_bytes(container.path())? != leaf.path {
             return Err(IndexError::Corruption(
@@ -107,12 +107,7 @@ impl<'a, H: HashProvider> BitmapTrie<'a, H> {
             } else {
                 let bytes = container.canonical_bytes()?;
                 let hash = self.hasher.hash_parts(&[&[BITMAP_LEAF_DOMAIN], &bytes]);
-                tx.put(
-                    tables::BITMAP_CONTAINER,
-                    &self.trie.leaf_key(commit, &path),
-                    &bytes,
-                )?;
-                edits.push((path, Some(hash)));
+                edits.push((path, Some(LeafPayload { hash, bytes })));
             }
         }
         let root = self.trie.apply(tx, commit, root, edits)?;

@@ -1,9 +1,9 @@
-use crate::{BranchNodeCompact, Hash, HashProvider, MerkleError, Result, path};
+use crate::{BranchNodeCompact, HASH_BYTES, Hash, HashProvider, MerkleError, Result, path};
 use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
 /// The owner supplies a hash binding the complete path and its leaf payload.
 /// `N` is the full routing path width in bytes, not the trie depth.
-/// `commit` locates a leaf stored as its own row ([`Trie::with_leaf_rows`]).
+/// `commit` locates a leaf stored as its own row ([`crate::PayloadTrie`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LeafRef<const N: usize> {
     pub path: [u8; N],
@@ -29,6 +29,13 @@ pub struct BranchRef {
     pub commit: u64,
 }
 
+/// Bytes of a big-endian commit number: the start of every row key, and the
+/// field after the hash in an encoded root.
+pub const COMMIT_BYTES: usize = size_of::<u64>();
+
+/// An encoded branch root, `hash ‖ commit`; a leaf root appends its path.
+pub const BRANCH_ROOT_BYTES: usize = HASH_BYTES + COMMIT_BYTES;
+
 /// Row key: the writing commit first, so each commit's rows are contiguous.
 fn version_key(commit: u64, namespace: &[u8], position: &[u8]) -> Vec<u8> {
     [&commit.to_be_bytes()[..], namespace, position].concat()
@@ -40,7 +47,7 @@ pub fn node_key(commit: u64, namespace: &[u8], route: &[u8]) -> Vec<u8> {
     version_key(commit, namespace, &position)
 }
 
-/// Row key of a leaf stored as its own row ([`Trie::with_leaf_rows`]): the
+/// Row key of a leaf stored as its own row ([`crate::PayloadTrie`]): the
 /// leaf's full path written at `commit`.
 pub fn leaf_key<const N: usize>(commit: u64, namespace: &[u8], path: &[u8; N]) -> Vec<u8> {
     version_key(commit, namespace, path)
@@ -77,17 +84,21 @@ impl<const N: usize> RootRef<N> {
         }
     }
 
+    /// Reverse [`RootRef::encode`]: empty bytes are the empty root, exactly
+    /// [`BRANCH_ROOT_BYTES`] a branch, and `N` more bytes a leaf with its path.
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.is_empty() {
             return Ok(Self::Empty);
         }
         let invalid = MerkleError::InvalidNode("invalid root encoding");
-        let (Some(hash), Some(commit)) = (bytes.get(..32), bytes.get(32..40)) else {
+        let Some((hash, rest)) = bytes.split_first_chunk::<HASH_BYTES>() else {
             return Err(invalid);
         };
-        let hash = hash.try_into().unwrap();
-        let commit = u64::from_be_bytes(commit.try_into().unwrap());
-        match &bytes[40..] {
+        let Some((commit, path)) = rest.split_first_chunk::<COMMIT_BYTES>() else {
+            return Err(invalid);
+        };
+        let (hash, commit) = (*hash, u64::from_be_bytes(*commit));
+        match path {
             [] => Ok(Self::Branch(BranchRef { hash, commit })),
             path => Ok(Self::Leaf(LeafRef {
                 path: path.try_into().map_err(|_| invalid)?,
@@ -147,14 +158,17 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         }
     }
 
-    /// Key rows under `namespace`, for several tries sharing one table.
-    pub fn in_namespace(mut self, namespace: &'h [u8]) -> Self {
+    /// Key rows under `namespace`, for several tries sharing one table. The
+    /// fixed width keeps keys of different namespaces apart; tries sharing a
+    /// table must all be namespaced.
+    pub fn in_namespace(mut self, namespace: &'h Hash) -> Self {
         self.namespace = namespace;
         self
     }
 
     /// Leaves are rows of their own, so branches record their commits too.
-    pub fn with_leaf_rows(mut self) -> Self {
+    /// [`crate::PayloadTrie`] writes those rows.
+    pub(crate) fn with_leaf_rows(mut self) -> Self {
         self.leaf_rows = true;
         self
     }
@@ -164,7 +178,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     }
 
     /// [`leaf_key`] in this trie's namespace.
-    pub fn leaf_key(&self, commit: u64, path: &[u8; N]) -> Vec<u8> {
+    pub(crate) fn leaf_key(&self, commit: u64, path: &[u8; N]) -> Vec<u8> {
         leaf_key(commit, self.namespace, path)
     }
 
@@ -224,6 +238,8 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         self.edit(tx, commit, root, path, Some(leaf), &[])
     }
 
+    /// Remove the leaf at `path`, if present, merging a branch left with one
+    /// child into its parent. New rows belong to `commit`.
     pub fn remove(
         &self,
         tx: &mut impl WriteTransaction,
@@ -245,6 +261,18 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         root: RootRef<N>,
         edits: impl IntoIterator<Item = ([u8; N], Option<Hash>)>,
     ) -> Result<RootRef<N>> {
+        Ok(self.apply_leaves(tx, commit, root, edits)?.0)
+    }
+
+    /// As [`Trie::apply`], also returning the paths of the leaves it created:
+    /// an edit setting a leaf's current hash keeps the leaf and its commit.
+    pub(crate) fn apply_leaves(
+        &self,
+        tx: &mut impl WriteTransaction,
+        commit: u64,
+        root: RootRef<N>,
+        edits: impl IntoIterator<Item = ([u8; N], Option<Hash>)>,
+    ) -> Result<(RootRef<N>, Vec<[u8; N]>)> {
         let mut edits: Vec<_> = edits.into_iter().collect();
         // Stable sorting preserves input order for each path: the last edit wins.
         edits.sort_by_key(|edit| edit.0);
@@ -257,8 +285,9 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
                 false
             }
         });
-        let edited = self.apply_at(tx, commit, Edited::Stored(root), &edits, &[])?;
-        self.store_edited(tx, commit, edited, &[])
+        let mut created = Vec::new();
+        let edited = self.apply_at(tx, commit, Edited::Stored(root), &edits, &[], &mut created)?;
+        Ok((self.store_edited(tx, commit, edited, &[])?, created))
     }
 
     /// Lazy ascending path traversal. Storage/corruption errors are yielded once
@@ -468,11 +497,14 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         subtrie: Edited<N>,
         edits: &[Edit<N>],
         route: &[u8],
+        created: &mut Vec<[u8; N]>,
     ) -> Result<Edited<N>> {
         let (stored, mut prefix, children) = match subtrie {
-            Edited::Stored(RootRef::Empty) => return self.rebuild(tx, commit, None, edits, route),
+            Edited::Stored(RootRef::Empty) => {
+                return self.rebuild(tx, commit, None, edits, route, created);
+            }
             Edited::Stored(RootRef::Leaf(leaf)) => {
-                return self.rebuild(tx, commit, Some(leaf), edits, route);
+                return self.rebuild(tx, commit, Some(leaf), edits, route, created);
             }
             Edited::Stored(RootRef::Branch(branch)) => {
                 let node = self.load(tx, branch, route)?;
@@ -491,7 +523,8 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
             child_route.push(slot as u8);
             let child =
                 std::mem::replace(&mut edited_children[slot], Edited::Stored(RootRef::Empty));
-            edited_children[slot] = self.apply_at(tx, commit, child, group, &child_route)?;
+            edited_children[slot] =
+                self.apply_at(tx, commit, child, group, &child_route, created)?;
             child_route.pop();
         }
         let unchanged = !was_split
@@ -559,10 +592,19 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         old: Option<LeafRef<N>>,
         edits: &[Edit<N>],
         route: &[u8],
+        created: &mut Vec<[u8; N]>,
     ) -> Result<Edited<N>> {
-        let mut leaves = (edits.iter())
-            .filter_map(|&(path, hash)| hash.map(|hash| self.leaf(commit, path, hash)))
-            .collect::<Vec<_>>();
+        let mut leaves = Vec::new();
+        for &(path, hash) in edits {
+            let Some(hash) = hash else { continue };
+            leaves.push(match old {
+                Some(old) if old.path == path && old.hash == hash => old,
+                _ => {
+                    created.push(path);
+                    self.leaf(commit, path, hash)
+                }
+            });
+        }
         if let Some(old) = old.filter(|old| edits.iter().all(|(path, _)| *path != old.path)) {
             leaves.push(old);
             leaves.sort_by_key(|leaf| leaf.path);

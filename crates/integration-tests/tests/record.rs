@@ -75,7 +75,7 @@ fn initialize(db: &impl Store) {
         state: update.root,
         index: RootRef::Empty,
     };
-    golemdb_branch::write_head(&mut tx, golemdb_branch::CommitId::new(0), &roots, &hash).unwrap();
+    golemdb_branch::init_head(&mut tx, &roots, &hash).unwrap();
     tx.commit().unwrap();
 }
 

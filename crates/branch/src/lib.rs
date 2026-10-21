@@ -192,7 +192,7 @@ mod seal;
 mod types;
 
 pub use error::{BranchError, OperationError, Result};
-pub use head::{Head, read_head, read_head_state, write_head};
+pub use head::{Head, advance_head, init_head, read_head, read_head_state, write_head};
 pub use manager::Branches;
 pub use overlay::{CellRead, CellWrite};
 pub use roots::{ROOTS, Roots, head_roots, read_roots};

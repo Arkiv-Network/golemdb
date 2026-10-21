@@ -89,8 +89,8 @@ struct Inner<S, H> {
 /// authenticate entire tries, maintain history, or rewind the store. The supplied hash
 /// provider must match the deployment and is shared by all branch seals. External writers
 /// must publish cells, the head's `Roots` row (optional for an empty head) and a strictly
-/// increasing head atomically; changing cells under an unchanged head or rewinding it violates
-/// this manager's contract.
+/// increasing head atomically ([`crate::advance_head`] writes both); changing cells under an
+/// unchanged head or rewinding it violates this manager's contract.
 /// When physical immutable storage is attached, only this manager and its clones
 /// may publish head or immutable metadata; independent publishers are unsupported.
 ///

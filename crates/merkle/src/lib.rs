@@ -39,13 +39,17 @@ mod error;
 mod hash;
 mod node;
 mod path;
+mod payload_trie;
 mod trie;
 
 pub use config::{ConfigError, HashConfig};
 pub use error::{MerkleError, Result};
-pub use hash::{Blake3Hasher, Hash, HashAlgorithm, HashProvider, Keccak256Hasher};
+pub use hash::{Blake3Hasher, HASH_BYTES, Hash, HashAlgorithm, HashProvider, Keccak256Hasher};
 pub use node::BranchNodeCompact;
-pub use trie::{BranchRef, LeafRef, RootRef, Trie, Walk, leaf_key, node_key};
+pub use payload_trie::{LeafPayload, PayloadTrie};
+pub use trie::{
+    BRANCH_ROOT_BYTES, BranchRef, COMMIT_BYTES, LeafRef, RootRef, Trie, Walk, leaf_key, node_key,
+};
 
 #[cfg(test)]
 mod tests;

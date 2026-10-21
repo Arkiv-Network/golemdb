@@ -484,7 +484,7 @@ fn every_row_a_commit_writes_is_keyed_by_its_commit_number() {
             let added: Vec<_> = after.difference(&before).cloned().collect();
             assert!(!added.is_empty());
             for key in added {
-                assert_eq!(key[..8], commit.to_be_bytes());
+                assert_eq!(key[..golemdb_merkle::COMMIT_BYTES], commit.to_be_bytes());
             }
         }
     }
@@ -586,4 +586,88 @@ fn head_roots_must_exist_and_match_the_head() {
         check(head([7; 32]), Some(roots(RootRef::Empty))),
         Err(BranchError::InvalidRoots(5))
     ));
+}
+
+#[test]
+fn malformed_roots_rows_are_invalid() {
+    let db = MemoryStore::new();
+    let mut tx = db.begin_write().unwrap();
+    let commit = crate::CommitId::new(3);
+    // Empty; a state length past the end; an index root too short; a leaf
+    // root whose path has the wrong width.
+    let short_path = [&[0][..], &[1; golemdb_merkle::BRANCH_ROOT_BYTES + 3]].concat();
+    for bytes in [&[][..], &[5, 1, 2], &[0, 9], &short_path] {
+        tx.put(crate::ROOTS, &commit.get().to_be_bytes(), bytes)
+            .unwrap();
+        assert!(matches!(
+            crate::read_roots(&tx, commit),
+            Err(BranchError::InvalidRoots(3))
+        ));
+    }
+}
+
+#[test]
+fn a_failed_append_keeps_the_sealed_branch_retryable() {
+    let db = MemoryStore::new();
+    seed(&db, &Keccak256Hasher, 0, &[]);
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+    let branch = stage(&branches, "Alice");
+    let sealed = branches.seal(branch).unwrap();
+    // Occupy the sealed root's row, so commit's append of it fails.
+    let RootRef::Branch(root) = sealed.cells.root else {
+        panic!("two cells make a branch root");
+    };
+    let row = golemdb_merkle::node_key(root.commit, &[], &[]);
+    let mut tx = db.begin_write().unwrap();
+    tx.put(tables::CELL_TRIE, &row, b"taken").unwrap();
+    tx.commit().unwrap();
+    assert!(matches!(
+        branches.commit(branch),
+        Err(BranchError::Storage(
+            golemdb_storage::StorageError::AlreadyExists
+        ))
+    ));
+    assert!(branches.branch_info(branch).unwrap().sealed);
+    assert_eq!(branches.head().unwrap().get(), 0);
+    let mut tx = db.begin_write().unwrap();
+    tx.delete(tables::CELL_TRIE, &row).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(branches.commit(branch).unwrap().get(), 1);
+}
+
+#[test]
+fn heads_are_published_once_and_in_order() {
+    let hasher = Keccak256Hasher;
+    let empty = crate::Roots {
+        state: RootRef::Empty,
+        index: RootRef::Empty,
+    };
+    let db = MemoryStore::new();
+    let mut tx = db.begin_write().unwrap();
+    assert_eq!(
+        crate::init_head(&mut tx, &empty, &hasher)
+            .unwrap()
+            .commit_id
+            .get(),
+        0
+    );
+    assert!(matches!(
+        crate::init_head(&mut tx, &empty, &hasher),
+        Err(BranchError::HeadExists)
+    ));
+    let head = crate::advance_head(&mut tx, crate::CommitId::GENESIS, &empty, &hasher).unwrap();
+    assert_eq!(head.commit_id.get(), 1);
+    // An outdated head, as after a lost race or a retry.
+    assert!(matches!(
+        crate::advance_head(&mut tx, crate::CommitId::GENESIS, &empty, &hasher),
+        Err(BranchError::Conflict)
+    ));
+    // The low-level writer still refuses a commit that is not newer.
+    for commit in [0, 1] {
+        assert!(matches!(
+            crate::write_head(&mut tx, crate::CommitId::new(commit), &empty, &hasher),
+            Err(BranchError::CommitNotNewer { commit: c, latest: 1 }) if c == commit
+        ));
+    }
+    assert_eq!(crate::read_head(&tx).unwrap().get(), 1);
 }

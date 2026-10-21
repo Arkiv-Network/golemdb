@@ -10,7 +10,9 @@ use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
 use golemdb_index::{
     INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, TermRange, tables,
 };
-use golemdb_merkle::{Hash, Keccak256Hasher, LeafRef, RootRef, Trie, leaf_key, node_key};
+use golemdb_merkle::{
+    HASH_BYTES, Hash, Keccak256Hasher, LeafRef, RootRef, Trie, leaf_key, node_key,
+};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
 
@@ -54,7 +56,7 @@ fn rows(tx: &impl ReadTransaction, table: golemdb_storage::Table) -> Vec<golemdb
 fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Hash> {
     tx.get(tables::INDEX, t.as_bytes())
         .unwrap()
-        .map(|b| b[..32].try_into().unwrap())
+        .map(|b| b[..HASH_BYTES].try_into().unwrap())
 }
 
 /// The row of a term's bitmap root: the container of a single-container root,
@@ -62,14 +64,14 @@ fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Hash> {
 /// path for a single-container root; rows are namespaced by the term.
 fn bitmap_root_row(tx: &impl ReadTransaction, t: &IndexTerm) -> (golemdb_storage::Table, Vec<u8>) {
     let value = tx.get(tables::INDEX, t.as_bytes()).unwrap().unwrap();
-    let commit = u64::from_be_bytes(value[32..40].try_into().unwrap());
     let ns = t.routing_path(&HASH);
-    match &value[40..] {
-        [] => (tables::BITMAP_TRIE, node_key(commit, &ns, &[])),
-        path => (
+    match RootRef::<6>::decode(&value).unwrap() {
+        RootRef::Branch(branch) => (tables::BITMAP_TRIE, node_key(branch.commit, &ns, &[])),
+        RootRef::Leaf(leaf) => (
             tables::BITMAP_CONTAINER,
-            leaf_key::<6>(commit, &ns, path.try_into().unwrap()),
+            leaf_key(leaf.commit, &ns, &leaf.path),
         ),
+        RootRef::Empty => unreachable!("Index rows hold nonempty roots"),
     }
 }
 

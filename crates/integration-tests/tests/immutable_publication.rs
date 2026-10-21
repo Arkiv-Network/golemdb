@@ -1,4 +1,4 @@
-use golemdb_branch::{BranchError, Branches, CommitId, Roots, read_head, write_head};
+use golemdb_branch::{BranchError, Branches, CommitId, Roots, init_head, read_head, write_head};
 use golemdb_cells::{CellKey, CellNameRef, CellType, CellValue, Width, tables};
 use golemdb_immutable_data::{metadata, *};
 use golemdb_merkle::{Keccak256Hasher, RootRef};
@@ -49,7 +49,7 @@ fn seed(store: &impl Store) {
         state: RootRef::Empty,
         index: RootRef::Empty,
     };
-    write_head(&mut tx, CommitId::GENESIS, &empty, &Keccak256Hasher).unwrap();
+    init_head(&mut tx, &empty, &Keccak256Hasher).unwrap();
     tx.commit().unwrap();
 }
 fn read(

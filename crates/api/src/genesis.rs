@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use golemdb_branch::{CommitId, Head, Roots, head_roots, read_head_state, write_head};
+use golemdb_branch::{CommitId, Head, Roots, head_roots, init_head, read_head_state};
 use golemdb_cells::{CellChange, CellKey, CellNameRef, CellValue, Cells, reserved, system, tables};
 use golemdb_index::Index;
 use golemdb_merkle::{Hash, HashAlgorithm, HashProvider, RootRef};
@@ -128,7 +128,7 @@ pub(crate) fn prepare(
             state: update.root,
             index: RootRef::Empty,
         };
-        let head = write_head(tx, commit_id, &roots, hasher)?;
+        let head = init_head(tx, &roots, hasher)?;
         return Ok(OpenInfo::new(true, head, genesis_id));
     }
 

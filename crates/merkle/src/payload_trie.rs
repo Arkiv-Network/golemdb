@@ -1,0 +1,99 @@
+use std::collections::BTreeMap;
+
+use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
+
+use crate::{Hash, HashProvider, LeafRef, Result, RootRef, Trie, Walk};
+
+/// A new leaf for a [`PayloadTrie`]: its hash, and the bytes of its row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeafPayload {
+    pub hash: Hash,
+    pub bytes: Vec<u8>,
+}
+
+/// A trie whose leaves carry payloads, each stored as a row of its own in
+/// `leaf_table` under `commit ‖ namespace ‖ path`. Branches record each leaf's
+/// commit, so old roots keep reading the payloads they were built with. The
+/// trie writes and reads the rows itself; callers pass payloads, not keys.
+pub struct PayloadTrie<'h, H: HashProvider, const N: usize> {
+    trie: Trie<'h, H, N>,
+    leaf_table: Table,
+}
+
+impl<'h, H: HashProvider, const N: usize> PayloadTrie<'h, H, N> {
+    /// Branches go to `branch_table` and payloads to `leaf_table`, which must
+    /// differ: a leaf's key can equal a branch's.
+    pub fn new(branch_table: Table, leaf_table: Table, domain: u8, hasher: &'h H) -> Self {
+        assert!(
+            leaf_table != branch_table,
+            "leaf rows need a table of their own"
+        );
+        Self {
+            trie: Trie::new(branch_table, domain, hasher).with_leaf_rows(),
+            leaf_table,
+        }
+    }
+
+    /// As [`Trie::in_namespace`], for branches and payloads alike.
+    pub fn in_namespace(mut self, namespace: &'h Hash) -> Self {
+        self.trie = self.trie.in_namespace(namespace);
+        self
+    }
+
+    /// As [`Trie::get`].
+    pub fn get(
+        &self,
+        tx: &impl ReadTransaction,
+        root: RootRef<N>,
+        path: &[u8; N],
+    ) -> Result<Option<LeafRef<N>>> {
+        self.trie.get(tx, root, path)
+    }
+
+    /// As [`Trie::walk`].
+    pub fn walk<'a, T: ReadTransaction>(
+        &'a self,
+        tx: &'a T,
+        root: RootRef<N>,
+    ) -> Walk<'a, T, H, N> {
+        self.trie.walk(tx, root)
+    }
+
+    /// The payload `leaf` was stored with, or `None` if its row is missing.
+    pub fn payload(&self, tx: &impl ReadTransaction, leaf: LeafRef<N>) -> Result<Option<Vec<u8>>> {
+        Ok(tx.get(
+            self.leaf_table,
+            &self.trie.leaf_key(leaf.commit, &leaf.path),
+        )?)
+    }
+
+    /// As [`Trie::apply`], storing each new leaf's payload under `commit` in
+    /// `tx`. A leaf whose hash is unchanged keeps its row and commit. Call once
+    /// per commit for each namespace: a leaf removed by a later call in the same
+    /// commit leaves its row behind for good, unreached and never reclaimed.
+    pub fn apply(
+        &self,
+        tx: &mut impl WriteTransaction,
+        commit: u64,
+        root: RootRef<N>,
+        edits: impl IntoIterator<Item = ([u8; N], Option<LeafPayload>)>,
+    ) -> Result<RootRef<N>> {
+        // Keyed by path to find each created leaf's payload; the last edit of a
+        // path wins, as in the trie.
+        let edits: BTreeMap<_, _> = edits.into_iter().collect();
+        let hashes =
+            (edits.iter()).map(|(path, payload)| (*path, payload.as_ref().map(|p| p.hash)));
+        let (root, created) = self.trie.apply_leaves(tx, commit, root, hashes)?;
+        for path in created {
+            // Always `Some`: only edits with a payload create leaves.
+            if let Some(Some(payload)) = edits.get(&path) {
+                tx.put(
+                    self.leaf_table,
+                    &self.trie.leaf_key(commit, &path),
+                    &payload.bytes,
+                )?;
+            }
+        }
+        Ok(root)
+    }
+}

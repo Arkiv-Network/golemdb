@@ -4,7 +4,7 @@ use golemdb_index::{
     BITMAP_TRIE_PATH_BYTES, BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexTerm,
     PostingChange, tables,
 };
-use golemdb_merkle::{BranchRef, Hash, Keccak256Hasher, LeafRef, RootRef, Trie, leaf_key};
+use golemdb_merkle::{BranchRef, Keccak256Hasher, LeafRef, PayloadTrie, RootRef, Trie};
 use golemdb_storage::{ReadTransaction, Store, Table, WriteTransaction};
 use golemdb_storage_mdbx::MdbxStore;
 
@@ -122,30 +122,26 @@ fn persistence_worker() {
     // Each term's bitmap trie is namespaced by its routing path; the Index row
     // holds the root's hash and commit, and containers are keyed by commit too.
     let ns = term(b"a").routing_path(&HASH);
-    let bitmap_trie =
-        Trie::<_, BITMAP_TRIE_PATH_BYTES>::new(tables::BITMAP_TRIE, BITMAP_BRANCH_DOMAIN, &HASH)
-            .in_namespace(&ns)
-            .with_leaf_rows();
+    let bitmap_trie = PayloadTrie::<_, BITMAP_TRIE_PATH_BYTES>::new(
+        tables::BITMAP_TRIE,
+        tables::BITMAP_CONTAINER,
+        BITMAP_BRANCH_DOMAIN,
+        &HASH,
+    )
+    .in_namespace(&ns);
     let old_row = read.get(HEAD, b"old_bitmap").unwrap().unwrap();
-    let old_bitmap: Hash = old_row[..32].try_into().unwrap();
-    let old_commit = u64::from_be_bytes(old_row[32..40].try_into().unwrap());
     let mut ids = Vec::new();
-    let old_root = RootRef::Branch(BranchRef {
-        hash: old_bitmap,
-        commit: old_commit,
-    });
+    let old_root = RootRef::<BITMAP_TRIE_PATH_BYTES>::decode(&old_row).unwrap();
+    let RootRef::Branch(BranchRef {
+        hash: old_bitmap, ..
+    }) = old_root
+    else {
+        panic!("the old bitmap root is a branch");
+    };
     for leaf in bitmap_trie.walk(&read, old_root) {
         let leaf = leaf.unwrap();
-        let container = BitmapContainer::decode(
-            &read
-                .get(
-                    tables::BITMAP_CONTAINER,
-                    &leaf_key(leaf.commit, &ns, &leaf.path),
-                )
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap();
+        let container =
+            BitmapContainer::decode(&bitmap_trie.payload(&read, leaf).unwrap().unwrap()).unwrap();
         assert_eq!(container.leaf_hash(&HASH).unwrap(), leaf.hash);
         ids.extend(container.iter());
     }
