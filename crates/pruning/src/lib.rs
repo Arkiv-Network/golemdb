@@ -14,28 +14,21 @@ pub use gc::STALE;
 
 use golemdb_storage::{Table, WriteTransaction};
 
+/// Most commits whose superseded rows one sweep deletes, each in full. Normally
+/// one is due per commit; after the window shrinks, the backlog drains over
+/// several commits.
+pub const MAX_SWEPT_COMMITS: usize = 10;
+
 /// Node-local pruning settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PruningConfig {
     window: u64,
-    max_deletes: usize,
 }
 
 impl PruningConfig {
     /// Keep every root of the last `window` commits, and the head, readable.
     pub const fn new(window: u64) -> Self {
-        Self {
-            window,
-            max_deletes: 100_000,
-        }
-    }
-
-    /// Most rows one commit deletes, bounding a backlog after the window
-    /// shrinks; at least 1. Keep it above the rows one commit supersedes, or
-    /// `Stale` grows without bound.
-    pub const fn with_max_deletes(mut self, max_deletes: usize) -> Self {
-        self.max_deletes = if max_deletes == 0 { 1 } else { max_deletes };
-        self
+        Self { window }
     }
 
     /// Commits whose roots stay readable.
@@ -66,10 +59,11 @@ impl Pruner {
         gc::record(tx, commit, superseded)
     }
 
-    /// Delete recorded rows superseded at or before `head − window`, up to
-    /// `max_deletes`.
+    /// Delete recorded rows superseded at or before `head − window`, those of
+    /// at most [`MAX_SWEPT_COMMITS`] commits, so a shrunk window drains
+    /// gradually.
     pub fn sweep(&self, tx: &mut impl WriteTransaction, head: u64) -> Result<()> {
-        gc::sweep(tx, self.cutoff(head), self.config.max_deletes)
+        gc::sweep(tx, self.cutoff(head), MAX_SWEPT_COMMITS)
     }
 
     /// Commits before this may be pruned: `head − window`. Not the earliest

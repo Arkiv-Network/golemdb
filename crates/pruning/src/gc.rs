@@ -31,18 +31,23 @@ pub(crate) fn record<'a>(
     Ok(())
 }
 
-/// Delete up to `max_deletes` rows superseded at or before `cutoff`, oldest
-/// first. A due `Stale` row that does not parse is dropped, never failing the
-/// commit.
-pub(crate) fn sweep(tx: &mut impl WriteTransaction, cutoff: u64, max_deletes: usize) -> Result<()> {
-    let mut due = Vec::new();
+/// Delete the rows superseded at or before `cutoff` by the oldest
+/// `max_commits` commits that listed any. A due `Stale` row that does not
+/// parse is dropped, never failing the commit.
+pub(crate) fn sweep(tx: &mut impl WriteTransaction, cutoff: u64, max_commits: usize) -> Result<()> {
+    let (mut due, mut taken, mut last) = (Vec::new(), 0, None);
     let mut cursor = tx.cursor(STALE, b"")?;
-    while due.len() < max_deletes {
-        let Some((key, _)) = cursor.next()? else {
-            break;
-        };
-        if commit(&key).is_some_and(|commit| commit > cutoff) {
-            break;
+    while let Some((key, _)) = cursor.next()? {
+        if let Some(commit) = commit(&key) {
+            if commit > cutoff {
+                break;
+            }
+            if last != Some(commit) {
+                if taken == max_commits {
+                    break;
+                }
+                (taken, last) = (taken + 1, Some(commit));
+            }
         }
         due.push(key);
     }
@@ -81,11 +86,10 @@ mod tests {
     use crate::{Pruner, PruningConfig};
 
     /// Commit `c` writes a few rows and supersedes those of `c − 1`. After every
-    /// commit, a row is gone only once it left the window, and (when the cap
-    /// allows) every such row is gone.
-    fn run(window: u64, max_deletes: usize) {
+    /// commit, a row is gone exactly once it left the window.
+    fn run(window: u64) {
         let db = MemoryStore::new();
-        let pruner = Pruner::new(PruningConfig::new(window).with_max_deletes(max_deletes));
+        let pruner = Pruner::new(PruningConfig::new(window));
         let (mut written, mut superseded) = (Vec::new(), Vec::new());
         for commit in 1..=200u64 {
             let mut tx = db.begin_write().unwrap();
@@ -109,14 +113,11 @@ mod tests {
             let tx = db.begin_read().unwrap();
             for (at, row) in &superseded {
                 let stored = tx.get(CELL_TRIE, row).unwrap().is_some();
-                if at + window > commit {
-                    assert!(stored, "row superseded at {at} deleted at head {commit}");
-                } else if max_deletes >= 5 {
-                    assert!(
-                        !stored,
-                        "row superseded at {at} still stored at head {commit}"
-                    );
-                }
+                assert_eq!(
+                    stored,
+                    at + window > commit,
+                    "row superseded at {at}, head {commit}"
+                );
             }
             for row in &written {
                 assert!(tx.get(CELL_TRIE, row).unwrap().is_some());
@@ -155,9 +156,43 @@ mod tests {
     #[test]
     fn rows_are_deleted_once_they_leave_the_window() {
         for window in [0, 1, 3, 10] {
-            run(window, 100_000);
-            run(window, 1);
+            run(window);
         }
+    }
+
+    /// A backlog drains `max_commits` commits per sweep, counting only commits
+    /// that listed rows, each in full.
+    #[test]
+    fn a_sweep_drains_at_most_max_commits() {
+        let db = MemoryStore::new();
+        let pruner = Pruner::new(PruningConfig::new(0));
+        let mut tx = db.begin_write().unwrap();
+        // Commit 3 supersedes nothing.
+        let listed = [(1, 2), (2, 1), (4, 3), (5, 1)];
+        for (commit, rows) in listed {
+            let keys: Vec<_> = (0..rows).map(|i| [commit, i]).collect();
+            for key in &keys {
+                tx.put(CELL_TRIE, key, b"node").unwrap();
+            }
+            let superseded = keys.iter().map(|key| (CELL_TRIE, &key[..]));
+            pruner.record(&mut tx, commit.into(), superseded).unwrap();
+        }
+        let left = |tx: &_| keys_of(tx, CELL_TRIE);
+        // Three listing commits are 1, 2 and 4, not 1, 2 and 3.
+        super::sweep(&mut tx, 5, 3).unwrap();
+        assert_eq!(left(&tx), [[5, 0]]);
+        // Commit 5 is not due yet.
+        super::sweep(&mut tx, 4, 3).unwrap();
+        assert_eq!(left(&tx), [[5, 0]]);
+        super::sweep(&mut tx, 5, 1).unwrap();
+        assert!(left(&tx).is_empty());
+        assert!(keys_of(&tx, STALE).is_empty());
+    }
+
+    fn keys_of(tx: &impl ReadTransaction, table: golemdb_storage::Table) -> Vec<Vec<u8>> {
+        (scan_prefix(tx, table, vec![]).unwrap())
+            .map(|row| row.unwrap().0)
+            .collect()
     }
 
     /// Recording alone deletes nothing, even of rows already due.
