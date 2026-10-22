@@ -2,7 +2,7 @@
 
 use golemdb_cells::CellName;
 
-use super::{Bounds, EqValue, InValues};
+use super::{Bounds, EqValue, ExistsType, InValues};
 
 /// A query's filter: plain data the caller builds, validated at admission.
 ///
@@ -16,9 +16,11 @@ use super::{Bounds, EqValue, InValues};
 /// Leaves are typed by their values, the same `CellValue`s records are
 /// written with: a cell of another type under the same name is treated as
 /// absent. The value's kind (field or attribute) plays no part in a lookup.
-/// An `Eq`'s value, an `In`'s values and a `Range`'s bounds are of one
-/// indexable type by construction ([`EqValue`], [`InValues`], [`Bounds`]),
-/// so only a field name is checked at admission.
+/// An `Eq`'s value, an `In`'s values, a `Range`'s bounds and an `Exists`'
+/// type are of one indexable type by construction ([`EqValue`],
+/// [`InValues`], [`Bounds`], [`ExistsType`]), so only a field name is
+/// checked at admission. An `Exists` with no type is the one leaf that
+/// matches a cell of any type.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Filter {
@@ -36,6 +38,13 @@ pub enum Filter {
     /// UTF-8, which is also char by char. A cell of another type never
     /// matches. The empty string matches every `str` cell.
     Prefix { field: CellName, prefix: String },
+    /// The record has the cell, of type `ty`; with no type, of any type.
+    /// Like every leaf, it sees attribute cells only: a field is not
+    /// indexed.
+    Exists {
+        field: CellName,
+        ty: Option<ExistsType>,
+    },
     /// Every child matches: the intersection of the children's match sets.
     /// Children are evaluated in the written order, and once no record is
     /// left, the remaining children are skipped and not read. At least one
@@ -44,6 +53,5 @@ pub enum Filter {
     /// Some child matches: the union of the children's match sets. Every
     /// child is evaluated, in the written order. At least one child.
     Or(Vec<Filter>),
-    // Exists { field: CellName, ty: CellType },
     // Not(Box<Filter>),
 }

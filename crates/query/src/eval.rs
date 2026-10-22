@@ -65,11 +65,11 @@ mod tests {
         ops::{Bound, RangeBounds},
     };
 
-    use golemdb_cells::{CellKind, CellName, CellNameRef, CellValue, marker::I32};
+    use golemdb_cells::{CellKind, CellName, CellNameRef, CellType, CellValue, Width, marker::I32};
     use golemdb_index::{BitmapContainer, IndexError, IndexTerm, TermError, TermRange, path};
 
     use super::*;
-    use crate::{Bounds, EqValue, Filter, InValues, QueryError};
+    use crate::{Bounds, EqValue, ExistsType, Filter, InValues, QueryError};
 
     /// Posting lists in a `BTreeMap`: byte-ordered like the `Index` table.
     #[derive(Default)]
@@ -249,6 +249,14 @@ mod tests {
         Filter::Prefix {
             field: name(field.as_bytes()),
             prefix: prefix.to_owned(),
+        }
+    }
+
+    /// Through the runtime path: `ty`, when given, must be indexable.
+    fn exists(field: &str, ty: Option<CellType>) -> Filter {
+        Filter::Exists {
+            field: name(field.as_bytes()),
+            ty: ty.map(|ty| ExistsType::try_from(ty).expect("an indexable type")),
         }
     }
 
@@ -551,6 +559,70 @@ mod tests {
         assert_eq!(*source.reads.borrow(), [term(i32::MIN), term(1)]);
     }
 
+    const I32_TYPE: CellType = CellType::Int(Width::W4);
+
+    #[test]
+    fn exists_matches_the_records_with_a_cell_of_its_field() {
+        // One cell per record under a name, as records hold them.
+        let source = FakeSource::default()
+            .with("a", CellValue::from_i32(1), [1, 40])
+            .with("a", CellValue::from_i32(2), [2])
+            .with("a", str("x"), [3])
+            .with("a", CellValue::from_bool(false), [4, 1 << 40])
+            .with("ab", CellValue::from_i32(1), [5])
+            .with("b", str("x"), [6]);
+        for (filter, expected) in [
+            (exists("a", None), &[1, 2, 3, 4, 40, 1 << 40][..]),
+            (exists("a", Some(I32_TYPE)), &[1, 2, 40]),
+            (exists("a", Some(CellType::Str)), &[3]),
+            (exists("a", Some(CellType::Bool)), &[4, 1 << 40]),
+            (exists("a", Some(CellType::Int(Width::W8))), &[]),
+            (exists("c", None), &[]),
+        ] {
+            assert_eq!(ids(&source, filter.clone()), expected, "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn exists_reads_only_the_terms_of_its_field_in_key_order() {
+        let inner = FakeSource::default()
+            .with("n", CellValue::from_i32(1), [1])
+            .with("n", str(""), [2])
+            .with("n", CellValue::from_i32(i32::MIN), [3])
+            .with("n", CellValue::from_bool(true), [4])
+            .with("m", CellValue::from_i32(0), [5])
+            .with("n-", CellValue::from_i32(0), [6])
+            .with("nn", CellValue::from_bool(false), [7]);
+        let source = RecordingSource {
+            inner,
+            reads: RefCell::default(),
+        };
+        let term = |value: CellValue| IndexTerm::from_str_name("n", value.as_view()).expect("term");
+        let (min, one) = (CellValue::from_i32(i32::MIN), CellValue::from_i32(1));
+
+        // Of one type: that type's run only.
+        let matches = evaluate(&source, &exists("n", Some(I32_TYPE))).expect("filter evaluates");
+        assert_eq!(matches.treemap().iter().collect::<Vec<_>>(), [1, 3]);
+        assert_eq!(
+            *source.reads.borrow(),
+            [term(min.clone()), term(one.clone())]
+        );
+
+        // Of no type: every term of the field, run by run in type tag order.
+        source.reads.borrow_mut().clear();
+        let matches = evaluate(&source, &exists("n", None)).expect("filter evaluates");
+        assert_eq!(matches.treemap().iter().collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert_eq!(
+            *source.reads.borrow(),
+            [
+                term(CellValue::from_bool(true)),
+                term(str("")),
+                term(min),
+                term(one)
+            ]
+        );
+    }
+
     #[test]
     fn an_empty_leaf_matches_nothing_without_reading() {
         use Bound::{Excluded, Included};
@@ -611,6 +683,12 @@ mod tests {
             // Two unbounded sides have no value, but the name is still checked.
             (whole_run, name(b"1bad"), TermError::InvalidName),
             (prefix("1bad", "a"), name(b"1bad"), TermError::InvalidName),
+            (exists("1bad", None), name(b"1bad"), TermError::InvalidName),
+            (
+                exists("1bad", Some(CellType::Str)),
+                name(b"1bad"),
+                TermError::InvalidName,
+            ),
         ] {
             match evaluate(&FailingSource, &filter) {
                 Err(QueryError::InvalidArgument { field: got, source }) => {
@@ -633,6 +711,8 @@ mod tests {
                 Bound::Unbounded,
             ),
             prefix("a", ""),
+            exists("a", None),
+            exists("a", Some(I32_TYPE)),
         ] {
             let result = evaluate(&FailingSource, &filter);
             assert!(is_injected_failure(&result), "{filter:?}: {result:?}");

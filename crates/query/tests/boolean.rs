@@ -10,8 +10,8 @@ use golemdb_cells::CellValue;
 use golemdb_index::TermError;
 use proptest::prelude::*;
 use support::{
-    TestDb, eq, is_between, is_in, key, prefix, range, range_of, record, small_bounds_of_one_type,
-    small_value, small_values_of_one_type,
+    TestDb, eq, exists, indexable_type, is_between, is_in, key, prefix, range, range_of, record,
+    small_bounds_of_one_type, small_value, small_values_of_one_type,
 };
 
 fn str(value: &str) -> CellValue {
@@ -96,6 +96,12 @@ fn every_kind_of_leaf_combines() {
         eq("name", str("bob")),
     ]);
     assert_eq!(test.keys(filter).unwrap(), [key(2), key(4)]);
+    // Adults with a color, of any type.
+    let filter = Filter::And(vec![
+        range("age", Bound::Included(u32(18)), Bound::Unbounded),
+        exists("color", None),
+    ]);
+    assert_eq!(test.keys(filter).unwrap(), [key(1), key(3)]);
 }
 
 #[test]
@@ -194,6 +200,7 @@ enum Tree {
     In(&'static str, Vec<CellValue>),
     Range(&'static str, CellType, Bound<CellValue>, Bound<CellValue>),
     Prefix(&'static str, &'static str),
+    Exists(&'static str, Option<CellType>),
     And(Vec<Tree>),
     Or(Vec<Tree>),
 }
@@ -207,6 +214,7 @@ impl Tree {
                 range_of(field, *ty, lower.clone(), upper.clone())
             }
             Self::Prefix(field, start) => prefix(field, start),
+            Self::Exists(field, ty) => exists(field, *ty),
             Self::And(children) => Filter::And(children.iter().map(Self::filter).collect()),
             Self::Or(children) => Filter::Or(children.iter().map(Self::filter).collect()),
         }
@@ -225,6 +233,9 @@ impl Tree {
                 .get(field)
                 .and_then(CellValue::as_str)
                 .is_some_and(|value| value.starts_with(start)),
+            Self::Exists(field, ty) => cells
+                .get(field)
+                .is_some_and(|cell| ty.is_none_or(|ty| cell.cell_type() == ty)),
             Self::And(children) => children.iter().all(|child| child.matches(cells)),
             Self::Or(children) => children.iter().any(|child| child.matches(cells)),
         }
@@ -242,6 +253,8 @@ fn leaf() -> impl Strategy<Value = Tree> {
             .prop_map(|(field, (ty, lower, upper))| Tree::Range(field, ty, lower, upper)),
         (field(), prop::sample::select(&["", "a", "ab", "é"][..]))
             .prop_map(|(field, start)| Tree::Prefix(field, start)),
+        (field(), prop::option::of(indexable_type()))
+            .prop_map(|(field, ty)| Tree::Exists(field, ty)),
     ]
 }
 

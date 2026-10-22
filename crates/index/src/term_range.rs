@@ -2,14 +2,20 @@ use std::ops::Bound;
 
 use golemdb_cells::{CellNameRef, CellType, CellValue, CellValueRef};
 
-use crate::{IndexTerm, TermError, term::name_str};
+use crate::{
+    IndexTerm, TermError,
+    term::{name_prefix, name_str},
+};
 
-/// A range of index keys inside one name/type run, for an ordered scan with
-/// [`crate::Index::terms`].
+/// A range of index keys inside one name/type run, or over every run of one
+/// name, for an ordered scan with [`crate::Index::terms`].
 ///
 /// Every key in the range starts with the run's prefix, so a scan never
 /// leaks into another type under the same name, nor into a longer name
-/// (`ab` when scanning `a`). Within the run, key order is value order.
+/// (`ab` when scanning `a`). Within the run, key order is value order. In a
+/// range over every run of a name ([`TermRange::of_name`] with no type),
+/// every key starts with the name and its separator instead: the range holds
+/// each of the name's runs, in type tag order, and still no longer name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TermRange {
     lower: Bound<Vec<u8>>,
@@ -93,10 +99,31 @@ impl TermRange {
     pub fn with_prefix(name: CellNameRef<'_>, prefix: &str) -> Result<Self, TermError> {
         let prefix = CellValue::from_str(prefix);
         let start = IndexTerm::from_cell_name(name, prefix.as_view())?.into_bytes();
-        Ok(Self {
+        Ok(Self::starting_with(start))
+    }
+
+    /// Every term of `name` of type `ty`, the whole run; with no type, every
+    /// term of `name`, each of its runs in type tag order. Terms are
+    /// `name ‖ 0x00 ‖ tag ‖ value`, and a name holds no `0x00` byte, so the
+    /// terms of `name` are exactly the keys starting with `name ‖ 0x00`.
+    ///
+    /// The name and the type are checked as [`IndexTerm::from_cell_name`]
+    /// checks them. Such a range is never empty, so it always needs a scan.
+    pub fn of_name(name: CellNameRef<'_>, ty: Option<CellType>) -> Result<Self, TermError> {
+        let name = name_str(name)?;
+        let start = match ty {
+            Some(ty) => IndexTerm::prefix(name, ty)?,
+            None => name_prefix(name)?,
+        };
+        Ok(Self::starting_with(start))
+    }
+
+    /// The keys that start with `start`.
+    fn starting_with(start: Vec<u8>) -> Self {
+        Self {
             upper: past(start.clone()),
             lower: Bound::Included(start),
-        })
+        }
     }
 
     /// The key bounds, usable as a `RangeBounds<[u8]>`.
@@ -486,5 +513,78 @@ mod tests {
     fn a_prefix_name_outside_the_grammar_is_invalid() {
         let result = with_prefix(b"1a", "a");
         assert_eq!(result, Err(TermError::InvalidName));
+    }
+
+    /// Raw, so tests can also pass names the grammar rejects.
+    fn of_name(name: &[u8], ty: Option<CellType>) -> Result<TermRange, TermError> {
+        TermRange::of_name(CellNameRef::raw(name), ty)
+    }
+
+    // Keys of every term of `a`, whatever its type: the name, then 0x00.
+    const NAME_START: &[u8] = &[b'a', 0];
+    /// The separator incremented: past every term of `a`, and before every
+    /// longer name, whose next byte is a name char.
+    const NAME_END: &[u8] = &[b'a', 1];
+
+    #[test]
+    fn a_name_range_of_one_type_is_the_whole_run() {
+        let range = of_name(b"a", Some(U32)).expect("valid name");
+        assert_eq!(range.bounds(), (Included(RUN_START), Excluded(RUN_END)));
+    }
+
+    #[test]
+    fn a_name_range_of_one_type_is_a_range_with_two_unbounded_sides() {
+        let whole_run = range("a", U32, Unbounded, Unbounded);
+        assert_eq!(of_name(b"a", Some(U32)), Ok(whole_run));
+    }
+
+    #[test]
+    fn a_name_range_of_no_type_starts_at_the_name_and_ends_past_its_separator() {
+        let range = of_name(b"a", None).expect("valid name");
+        assert_eq!(range.bounds(), (Included(NAME_START), Excluded(NAME_END)));
+    }
+
+    #[test]
+    fn a_name_range_of_no_type_holds_every_term_of_the_name() {
+        // Terms of `a` of several types, in key order: by type tag, then by
+        // value.
+        let of_a = [
+            term("a", &CellValue::from_bool(false)),
+            term("a", &str("")),
+            term("a", &str("\u{10FFFF}")),
+            term("a", &CellValue::from_bytes4([0xff; 4])),
+            term("a", &u32(0)),
+            term("a", &u32(u32::MAX)),
+            term("a", &CellValue::from_i32(i32::MIN)),
+            term("a", &CellValue::from_timestamp64(i64::MAX)),
+        ];
+        // A name that sorts before `a`, one after it, and longer names that
+        // `a` is a prefix of: `-` is the least byte a name continues with.
+        let neighbours = [
+            term("A", &u32(1)),
+            term("a-", &str("")),
+            term("a0", &u32(7)),
+            term("ab", &u32(0)),
+            term("b", &CellValue::from_bool(false)),
+        ];
+        let all = [&of_a[..], &neighbours].concat();
+        let range = of_name(b"a", None).expect("valid name");
+        assert!(within(&range, &all).into_iter().eq(&of_a));
+    }
+
+    #[test]
+    fn a_name_that_is_not_utf8_has_no_name_range() {
+        assert_eq!(of_name(&[0xff], None), Err(TermError::InvalidName));
+    }
+
+    #[test]
+    fn a_name_outside_the_grammar_has_no_name_range() {
+        assert_eq!(of_name(b"1a", None), Err(TermError::InvalidName));
+    }
+
+    #[test]
+    fn bytes_has_no_name_range() {
+        let unsupported = Err(TermError::UnsupportedType(CellType::Bytes));
+        assert_eq!(of_name(b"a", Some(CellType::Bytes)), unsupported);
     }
 }

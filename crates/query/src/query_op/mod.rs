@@ -3,6 +3,7 @@
 
 mod bounds;
 mod eq_value;
+mod exists_type;
 mod filter;
 mod in_values;
 mod op;
@@ -12,6 +13,7 @@ mod values;
 
 pub use bounds::Bounds;
 pub use eq_value::EqValue;
+pub use exists_type::ExistsType;
 pub use filter::Filter;
 pub use in_values::InValues;
 pub use op::{CountOp, QueryOp};

@@ -109,7 +109,7 @@ pub enum Filter {
     In     { field: CellName, values: InValues },        // one indexable type
     Range  { field: CellName, bounds: Bounds },          // one indexable type
     Prefix { field: CellName, prefix: String },          // str only
-    Exists { field: CellName, ty: CellType },
+    Exists { field: CellName, ty: Option<ExistsType> },  // one indexable type, or any
     And(Vec<Filter>),
     Or(Vec<Filter>),
     Not(Box<Filter>),
@@ -118,17 +118,20 @@ pub enum Filter {
 
 - **Leaves are typed,** as in `golemdb-query`: a value carries its type, and a cell of another
   type under the same name is absent. `bytes` cannot be queried, being field-only.
-- **Operands are valid by construction.** `EqValue`, `InValues` and `Bounds` are built from a
-  cell-type marker (`EqValue::of(marker::Str, "blue")`, `Bounds::new(marker::I64, ..)`), so mixed
-  types and `bytes` do not compile. Their runtime constructors (`try_from` / `Bounds::try_new`)
-  check `CellValue`s and fail with `ValuesError` before a query exists. A `Range` keeps its type
-  even with two unbounded sides, which match every cell of that type.
+- **Operands are valid by construction.** `EqValue`, `InValues`, `Bounds` and `ExistsType` are
+  built from a cell-type marker (`EqValue::of(marker::Str, "blue")`,
+  `Bounds::new(marker::I64, ..)`, `ExistsType::of(marker::U32)`), so mixed types and `bytes` do
+  not compile. Their runtime constructors (`try_from` / `Bounds::try_new`) check `CellValue`s, or
+  a `CellType`, and fail with `ValuesError` before a query exists. A `Range` keeps its type even
+  with two unbounded sides, which match every cell of that type.
 - **`Prefix` is `str` only.** It matches the strings that start with the prefix, byte by byte in
   UTF-8. A prefix over `bytesN` is left out for now; it can be added as a separate leaf if a
   use case appears.
 - **`Ne`, `!=` and "not in" are `Not(...)`.** Absent and other-typed cells match a `Not`
   (MongoDB-style, D01 1.5).
-- **`Exists` needs no extra index:** it is a scan over all terms of one `(field, type)` run.
+- **`Exists` needs no extra index:** with a type, it is a scan over all terms of one
+  `(field, type)` run; with no type, over all terms of the field, every type's run in turn, so it
+  matches a cell of any type. As for every leaf, only attribute cells are indexed.
 
 ### Range bounds
 
@@ -198,9 +201,9 @@ The written order of the tree is the execution order. Cost and stopping point ar
 
 1. **Validate everything first** (admission, no state reads; QR5). Admission is charged per node
    and per byte inspected (metering D2). It checks names and NaN; that `And` and `Or` are not
-   empty; and the [caps](#caps). An operand's type is fixed when its `EqValue`, `InValues` or
-   `Bounds` is built, before any query exists. Bounds that admit no value (inverted, or equal
-   with a side excluded) are valid and match nothing.
+   empty; and the [caps](#caps). An operand's type is fixed when its `EqValue`, `InValues`,
+   `Bounds` or `ExistsType` is built, before any query exists. Bounds that admit no value
+   (inverted, or equal with a side excluded) are valid and match nothing.
 2. **Evaluate depth-first, children left to right.**
 3. **`And`:** the running set starts with the first positive child; each further positive child
    intersects it, each `Not` child subtracts from it. When the running set becomes empty, the
@@ -215,7 +218,8 @@ The written order of the tree is the execution order. Cost and stopping point ar
 7. **Leaves.** `Eq`: one term read. `In`: values given in strictly ascending order, in the
    type's order as for `Range`, which is also term key order; one term read each. Admission checks
    the order in one pass, so its cost is linear in the number of values. `Range`, `Prefix`, `Exists`: step through the run's terms in ascending key order from the
-   lower bound, charging every term stepped.
+   lower bound, charging every term stepped; an `Exists` with no type steps through every run of
+   the field, in type tag order.
 8. **Order.** With `sort`: per level, fetch each matched record's sort value in ascending record ID
    order and charge `⌈N log₂ N⌉ × S` comparisons (D14 14.1); ties fall to the next key, then to
    record ID ascending; absent values sort last. Without `sort`: record ID ascending, which is

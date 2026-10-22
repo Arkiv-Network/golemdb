@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use golemdb_cells::{CellName, CellValue};
 use golemdb_index::{IndexTerm, RangeError, TermError, TermRange};
 
-use crate::{Bounds, Filter, InValues, QueryError, Result};
+use crate::{Bounds, ExistsType, Filter, InValues, QueryError, Result};
 
 /// The written filter with its terms resolved: same shape, same order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,7 +19,8 @@ pub(crate) enum Plan {
     /// once: the union of their postings.
     TermReads(BTreeSet<IndexTerm>),
     /// A scan of the range's terms in ascending key order, one term read
-    /// each: the union of their postings. `Range` and `Prefix` leaves.
+    /// each: the union of their postings. `Range`, `Prefix` and `Exists`
+    /// leaves.
     Scan(TermRange),
     /// A leaf no record can match, an `In` with no value or a `Range` whose
     /// bounds admit none: nothing is read.
@@ -39,7 +40,8 @@ impl Plan {
     /// [`QueryError::InvalidQuery`] on an `And` or `Or` with no child, and
     /// with [`QueryError::InvalidArgument`] on a leaf with a bad field name.
     /// A leaf that admits no value is [`Plan::Empty`]. `Eq` values, `In`
-    /// values and `Range` bounds are of one indexable type by construction.
+    /// values, `Range` bounds and `Exists` types are of one indexable type
+    /// by construction.
     pub(crate) fn admit(filter: &Filter, max_depth: Option<u32>) -> Result<Self> {
         Admission { max_depth }.plan(filter, 0)
     }
@@ -66,6 +68,11 @@ impl Admission {
             Filter::Prefix { field, prefix } => TermRange::with_prefix(field.as_view(), prefix)
                 .map(Plan::Scan)
                 .map_err(|source| invalid_argument(field, source)),
+            Filter::Exists { field, ty } => {
+                TermRange::of_name(field.as_view(), ty.map(ExistsType::cell_type))
+                    .map(Plan::Scan)
+                    .map_err(|source| invalid_argument(field, source))
+            }
             Filter::And(children) => {
                 let (first, rest) =
                     self.children(children, depth, "`And` needs at least one child")?;
@@ -437,6 +444,58 @@ mod tests {
                 ),
                 "{field:?}"
             );
+        }
+    }
+
+    /// Admission of an `Exists` on `field`. Raw, so tests can also pass
+    /// names the grammar rejects.
+    fn exists(field: &[u8], ty: Option<ExistsType>) -> Result<Plan> {
+        admit(&Filter::Exists {
+            field: CellNameRef::raw(field).into(),
+            ty,
+        })
+    }
+
+    #[test]
+    fn an_exists_of_one_type_scans_what_two_unbounded_sides_scan() {
+        let whole_run = TermRange::between(
+            CellNameRef::raw(b"f"),
+            CellType::Int(Width::W8),
+            Unbounded,
+            Unbounded,
+        )
+        .expect("valid range")
+        .expect("non-empty range");
+        assert_eq!(
+            exists(b"f", Some(ExistsType::of(I64))).expect("valid Exists"),
+            Plan::Scan(whole_run)
+        );
+    }
+
+    #[test]
+    fn an_exists_of_no_type_scans_every_term_of_its_field() {
+        let every_run = TermRange::of_name(CellNameRef::raw(b"f"), None).expect("valid name");
+        assert_eq!(
+            exists(b"f", None).expect("valid Exists"),
+            Plan::Scan(every_run)
+        );
+    }
+
+    #[test]
+    fn an_exists_field_is_checked_like_any_leaf_field() {
+        for ty in [None, Some(ExistsType::of(Str))] {
+            for field in [&b"1bad"[..], &[0xff]] {
+                assert!(
+                    matches!(
+                        exists(field, ty),
+                        Err(QueryError::InvalidArgument {
+                            source: TermError::InvalidName,
+                            ..
+                        })
+                    ),
+                    "{field:?}, {ty:?}"
+                );
+            }
         }
     }
 
