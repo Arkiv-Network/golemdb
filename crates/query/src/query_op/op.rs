@@ -15,6 +15,8 @@ pub struct QueryOp {
     pub sort: Vec<SortKey>,
     /// `None` selects full records; `Some([])` selects no cells.
     pub projection: Option<Vec<CellName>>,
+    /// The most records the page holds, the first in query order. `None`:
+    /// up to the page size of the [`Queries`](crate::Queries) it runs on.
     pub limit: Option<u64>,
     // /// Resume after a previous page. At most one of `after` and `offset`.
     // pub after: Option<Cursor>,
@@ -55,6 +57,9 @@ impl QueryOp {
         self
     }
 
+    /// Return at most `limit` records, the first in query order. The call
+    /// rejects a limit of 0, and one above the page size of the
+    /// [`Queries`](crate::Queries) it runs on.
     pub fn limit(mut self, limit: u64) -> Self {
         self.limit = Some(limit);
         self

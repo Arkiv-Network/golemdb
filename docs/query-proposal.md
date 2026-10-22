@@ -229,7 +229,9 @@ The written order of the tree is the execution order. Cost and stopping point ar
    `max_bytes` ends the page and starts the next one, but every page holds at least one record.
    Bytes are counted on metering's byte basis (metering D4), so every node cuts the page at the
    same record. Without `limit` or `max_bytes`, the caps `#maxQueryLimit` and `#maxQueryBytes` are
-   the defaults. The next page's `offset` is the previous one plus the records returned.
+   the defaults. A `limit` of 0 is `InvalidQuery`, and one above `#maxQueryLimit` is
+   `LimitExceeded`, naming the cap. The next page's `offset` is the previous one plus the records
+   returned.
 10. **Materialize** the projection for the page's records only, in page order, as point reads. A
     full record's size is known from its `#meta` before its cells are read, so a record that does
     not fit is not read; with a projection, its size is known only after the reads, which are
@@ -286,7 +288,7 @@ request-size limit of metering's admission procedure.
 | Error | Raised when | Cost |
 | --- | --- | --- |
 | `InvalidArgument` | a builder step is invalid (cell name, NaN), or the budget is missing | admission work done |
-| `InvalidQuery` | the target is a branch; the tree is malformed (empty `And` / `Or`); a cursor does not match its query. Mixed or `bytes` operands cannot reach a query: they do not compile, or fail as `ValuesError` (`InvalidArgument`) when the operand is built | 0 for a branch target, else admission work done |
+| `InvalidQuery` | the target is a branch; the tree is malformed (empty `And` / `Or`); a `limit` of 0; a cursor does not match its query. Mixed or `bytes` operands cannot reach a query: they do not compile, or fail as `ValuesError` (`InvalidArgument`) when the operand is built | 0 for a branch target, else admission work done |
 | `LimitExceeded` | a cap is exceeded | admission work done |
 | `NotImplemented { operation }` | a supported-later part is used, such as `"query: sort"` | 0 for a top-level part (sort, limit, offset, cursor), checked before admission; admission work done for an unbuilt filter node, found while admitting the tree |
 | `CommitUnavailable` | a commit other than the head is named; older commits come later | admission work done |

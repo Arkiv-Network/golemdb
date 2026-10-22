@@ -34,11 +34,13 @@ pub enum ApiError {
         #[source]
         source: Option<Box<dyn Error + Send + Sync>>,
     },
-    /// A query that cannot run as written, e.g. an `And` or `Or` with no child.
+    /// A query that cannot run as written, e.g. an `And` or `Or` with no
+    /// child, or a `limit` of 0.
     #[error("invalid query: {reason}")]
     InvalidQuery { reason: &'static str },
     /// A request over a cap, named by `limit`, whose value is `max`, e.g. a
-    /// query's filter nested deeper than the query depth cap.
+    /// query's filter nested deeper than the query depth cap, or a query's
+    /// `limit` above the page size.
     #[error("limit exceeded: {limit} is capped at {max}")]
     LimitExceeded { limit: &'static str, max: u32 },
     #[error("branch handle is unknown, consumed, or invalidated")]

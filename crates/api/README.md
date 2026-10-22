@@ -549,7 +549,11 @@ immutable data are implemented behind a cloneable `Database` with shared state.
 Queries support `Eq`, `In`, `Range`, `Prefix` and `Exists` filters, combined by `And` and `Or`
 trees, with full or projected records, and `count`. A filter nests at most 64 `And` / `Or`
 levels, a hardcoded cap until it is read from genesis; a deeper one returns
-`ApiError::LimitExceeded`. A `Prefix` matches `str` values only. An `Exists` matches the records
+`ApiError::LimitExceeded`. A query returns at most 100 records, the first matches in record ID
+order, a hardcoded page size until it is read from genesis; `total_matched` and `count` still
+count every match. `limit(n)` returns at most `n` records: a `limit` of 0 returns
+`ApiError::InvalidQuery`, and one above the page size `ApiError::LimitExceeded`, whose `max` is
+the page size. A `Prefix` matches `str` values only. An `Exists` matches the records
 holding an attribute of its name: of its type, or, with no type, of any type. `Eq` values, `In`
 values, `Range` bounds and `Exists` types are of one indexable type by construction:
 `EqValue::of(marker::Str, "blue")`, `InValues::of(marker::U32, [1, 2])`,
@@ -559,8 +563,8 @@ types or `bytes` do not compile; `EqValue::try_from`, `InValues::try_from`,
 converts into `ApiError::InvalidArgument`). A `Range` with two unbounded sides matches every cell
 of its type.
 Queries read committed state only: `None` reads the head, and an explicit commit
-other than the head returns `ApiError::CommitUnavailable`. Sort, limit and offset
-return `ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost
+other than the head returns `ApiError::CommitUnavailable`. Sort and offset return
+`ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost
 receipts, generated keys, OCC, and transport serialization are deferred.
 
 Use scripted mocks for consumer error paths behind `Arc<dyn Api + Send + Sync>`. For tests, replace the storage opening with

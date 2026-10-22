@@ -2,19 +2,38 @@
 
 mod support;
 
-use golemdb_api::{Api, CommitId, ReadTarget, RecordOp};
-use golemdb_api::{ApiError, Budget, CountOp, QueryOp, SortKey};
+use std::ops::Bound;
+
+use golemdb_api::{Api, CommitId, ReadTarget, RecordKey, RecordOp};
+use golemdb_api::{ApiError, Budget, CountOp, QueryOp, QueryPage, SortKey};
 use golemdb_api::{CellLimits, Database, Genesis, HashAlgorithm, OpenConfig};
 use golemdb_branch::{BranchError, Branches};
 use golemdb_cells::system::FIRST_USER_RECORD_ID;
 use golemdb_cells::{CellKey, CellType, CellValue, Width, reserved};
 use golemdb_merkle::Keccak256Hasher;
+use golemdb_query::{Queries, QueryError};
 use golemdb_record::RecordError;
 use golemdb_storage::MemoryStore;
-use support::{TestDb, eq, key, record};
+use support::{TestDb, eq, key, range, record};
 
 fn blue() -> CellValue {
     CellValue::from_str("blue")
+}
+
+/// The configuration of a database opened over a caller's store.
+fn config() -> OpenConfig {
+    let limits = CellLimits {
+        max_cell_name_len: 32,
+        max_str_len: 64,
+        max_bytes_len: 64,
+    };
+    OpenConfig::new(Genesis::new(HashAlgorithm::Keccak256, limits, None))
+}
+
+/// A page's record keys, in page order, and its `total_matched`.
+fn keys_and_total(page: QueryPage) -> (Vec<RecordKey>, Option<u64>) {
+    let keys = page.records.into_iter().map(|record| record.key).collect();
+    (keys, page.total_matched)
 }
 
 /// Two blue records with extra cells, one of them not indexed, and a red one.
@@ -181,7 +200,6 @@ fn unbuilt_parts_are_not_implemented() {
             filter().sort([SortKey::asc("size", CellType::Uint(Width::W4))]),
             "query: sort",
         ),
-        (filter().limit(1), "query: limit"),
         (filter().offset(1), "query: offset"),
     ] {
         let result = test.db.query(None, op).into_result();
@@ -244,16 +262,212 @@ fn snapshot_selection_precedes_admission() {
     assert!(matches!(count, Err(ApiError::CommitUnavailable { .. })));
 }
 
+/// `Database`'s page size, hardcoded there until it is read from genesis.
+const MAX_PAGE_SIZE: u32 = 100;
+
+#[test]
+fn a_page_holds_the_first_matches_up_to_the_page_size() {
+    // `n` from 0 to one past the page size, created in reverse, so record ID
+    // order, the query order, is descending `n`.
+    let last = MAX_PAGE_SIZE + 1;
+    let test = TestDb::default();
+    test.create(
+        (0..=last)
+            .rev()
+            .map(|n| record(key(n.into()), &[("n", CellValue::from_u32(n))])),
+    );
+    let at_most = |max: u32| {
+        range(
+            "n",
+            Bound::Unbounded,
+            Bound::Included(CellValue::from_u32(max)),
+        )
+    };
+    let page = |max: u32| {
+        let op = QueryOp::from_filter(at_most(max), Budget::Limited(u64::MAX)).with_total();
+        keys_and_total(test.db.query(None, op).into_result().unwrap())
+    };
+    // The keys of `n` from `high` down to `low`.
+    let keys = |high: u32, low: u32| -> Vec<RecordKey> {
+        (low..=high).rev().map(|n| key(n.into())).collect()
+    };
+
+    // Fewer matches than the page size, or as many: all of them.
+    assert_eq!(page(9), (keys(9, 0), Some(10)));
+    let full = MAX_PAGE_SIZE - 1;
+    assert_eq!(page(full), (keys(full, 0), Some(u64::from(MAX_PAGE_SIZE))));
+    // More: the first ones in query order. The others are cut, yet counted.
+    assert_eq!(page(last), (keys(last, 2), Some(u64::from(last) + 1)));
+    assert_eq!(test.count(at_most(last)).unwrap(), u64::from(last) + 1);
+}
+
+#[test]
+fn a_limit_returns_the_first_matches_up_to_it() {
+    // Blue records 1, 3 and 4, in that query order.
+    let test = colors();
+    test.create([record(key(4), &[("color", blue())])]);
+    let page = |limit| {
+        let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX))
+            .limit(limit)
+            .with_total();
+        keys_and_total(test.db.query(None, op).into_result().unwrap())
+    };
+    assert_eq!(page(1), (vec![key(1)], Some(3)));
+    assert_eq!(page(2), (vec![key(1), key(3)], Some(3)));
+    // A limit past the matches, up to the page size, takes them all.
+    let all = vec![key(1), key(3), key(4)];
+    assert_eq!(page(3), (all.clone(), Some(3)));
+    assert_eq!(page(MAX_PAGE_SIZE.into()), (all, Some(3)));
+}
+
+#[test]
+fn a_limit_above_the_page_size_fails_stating_the_page_size() {
+    let test = colors();
+    let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX))
+        .limit(u64::from(MAX_PAGE_SIZE) + 1);
+    let error = test
+        .db
+        .query(None, op)
+        .into_result()
+        .expect_err("a limit above the page size");
+    assert!(
+        matches!(
+            &error,
+            ApiError::LimitExceeded {
+                limit: "query limit",
+                max: MAX_PAGE_SIZE
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("limit exceeded: query limit is capped at {MAX_PAGE_SIZE}")
+    );
+}
+
+#[test]
+fn a_limit_of_zero_is_an_invalid_query() {
+    let test = colors();
+    let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX)).limit(0);
+    let error = test
+        .db
+        .query(None, op)
+        .into_result()
+        .expect_err("a limit of 0");
+    assert!(matches!(&error, ApiError::InvalidQuery { .. }), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "invalid query: `limit` must be at least 1"
+    );
+}
+
+#[test]
+fn the_limit_is_checked_after_unbuilt_parts_and_before_the_filter() {
+    let test = colors();
+    let query = |op| test.db.query(None, op).into_result();
+    let over = u64::from(MAX_PAGE_SIZE) + 1;
+    // A bad limit is reported before a bad filter.
+    let bad_filter = || QueryOp::from_filter(eq("not valid", blue()), Budget::Limited(u64::MAX));
+    assert!(matches!(
+        query(bad_filter().limit(over)),
+        Err(ApiError::LimitExceeded { .. })
+    ));
+    assert!(matches!(
+        query(bad_filter().limit(0)),
+        Err(ApiError::InvalidQuery { .. })
+    ));
+    // An unbuilt part is reported before a bad limit.
+    let filter = || QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX));
+    assert!(matches!(
+        query(filter().offset(1).limit(0)),
+        Err(ApiError::NotImplemented {
+            operation: "query: offset"
+        })
+    ));
+}
+
+/// A store holding five blue records, and their keys in query order: the
+/// order they were created in.
+fn five_blue_records() -> (MemoryStore, Vec<RecordKey>) {
+    let store = MemoryStore::new();
+    let db = Database::from_store(store.clone(), &config()).unwrap();
+    let keys = [5, 1, 4, 2, 3].map(key).to_vec();
+    let branch = db.begin().unwrap();
+    for key in &keys {
+        db.create(branch, record(*key, &[("color", blue())]))
+            .into_result()
+            .unwrap();
+    }
+    db.commit(branch).unwrap();
+    (store, keys)
+}
+
+/// The page of blue records, asking for `limit`, from queries over `store`
+/// built with `max_page_size`.
+fn blue_page(
+    store: &MemoryStore,
+    max_page_size: Option<u32>,
+    limit: Option<u64>,
+) -> golemdb_query::Result<(Vec<RecordKey>, Option<u64>)> {
+    let queries = Queries::new(store.clone(), Keccak256Hasher, None, max_page_size);
+    let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX)).with_total();
+    let op = QueryOp { limit, ..op };
+    queries.query(None, op).map(keys_and_total)
+}
+
+#[test]
+fn the_page_size_is_set_when_queries_are_built() {
+    let (store, keys) = five_blue_records();
+    let page = |max_page_size| blue_page(&store, max_page_size, None).unwrap();
+    // With no cap, every match.
+    assert_eq!(page(None), (keys.clone(), Some(5)));
+    assert_eq!(page(Some(5)), (keys.clone(), Some(5)));
+    assert_eq!(page(Some(3)), (keys[..3].to_vec(), Some(5)));
+    assert_eq!(page(Some(0)), (vec![], Some(5)));
+
+    // A count returns no records: the page size plays no part.
+    let queries = Queries::new(store, Keccak256Hasher, None, Some(1));
+    let count = CountOp::filter(eq("color", blue()), Budget::Limited(u64::MAX));
+    assert_eq!(queries.count(None, count).unwrap(), 5);
+}
+
+#[test]
+fn a_limit_holds_up_to_the_page_size_of_its_queries() {
+    let (store, keys) = five_blue_records();
+    let page = |max_page_size, limit| blue_page(&store, max_page_size, Some(limit));
+    assert_eq!(page(Some(3), 2).unwrap(), (keys[..2].to_vec(), Some(5)));
+    assert_eq!(page(Some(3), 3).unwrap(), (keys[..3].to_vec(), Some(5)));
+    assert_eq!(page(Some(10), 8).unwrap(), (keys.clone(), Some(5)));
+    // With no page size, any limit holds.
+    assert_eq!(page(None, 4).unwrap(), (keys[..4].to_vec(), Some(5)));
+    assert_eq!(page(None, u64::MAX).unwrap(), (keys.clone(), Some(5)));
+    // Past the page size, a limit fails, whatever the matches.
+    for limit in [4, 10] {
+        assert!(
+            matches!(
+                page(Some(3), limit),
+                Err(QueryError::LimitExceeded {
+                    limit: "query limit",
+                    max: 3
+                })
+            ),
+            "{limit}"
+        );
+    }
+    // A limit of 0 never holds.
+    for max_page_size in [None, Some(3)] {
+        assert!(
+            matches!(page(max_page_size, 0), Err(QueryError::InvalidQuery { .. })),
+            "{max_page_size:?}"
+        );
+    }
+}
+
 #[test]
 fn an_indexed_record_without_its_key_is_internal_corruption() {
     let store = MemoryStore::new();
-    let limits = CellLimits {
-        max_cell_name_len: 32,
-        max_str_len: 64,
-        max_bytes_len: 64,
-    };
-    let config = OpenConfig::new(Genesis::new(HashAlgorithm::Keccak256, limits, None));
-    let db = Database::from_store(store.clone(), &config).unwrap();
+    let db = Database::from_store(store.clone(), &config()).unwrap();
     let branch = db.begin().unwrap();
     db.create(branch, record(key(1), &[("color", blue())]))
         .into_result()

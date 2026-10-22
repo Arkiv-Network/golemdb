@@ -379,7 +379,10 @@ fn query_count_and_unavailable_history_report_the_selected_head() {
             invalid.result,
             Err(ApiError::InvalidArgument { .. })
         ));
-        let unsupported = db.query(None, QueryOp::from_filter(filter("color"), BUDGET).limit(1));
+        let unsupported = db.query(
+            None,
+            QueryOp::from_filter(filter("color"), BUDGET).offset(1),
+        );
         unchanged(&unsupported, Some(head));
         assert!(matches!(
             unsupported.result,
@@ -433,6 +436,32 @@ fn boolean_admission_failures_retain_the_selected_head() {
                 ));
             }
         }
+    });
+}
+
+#[test]
+fn limit_failures_retain_the_selected_head() {
+    each_backend(|db| {
+        let head = db.commit(db.begin().unwrap()).unwrap();
+        let query = |limit| {
+            db.query(
+                None,
+                QueryOp::from_filter(filter("color"), BUDGET).limit(limit),
+            )
+        };
+        let zero = query(0);
+        unchanged(&zero, Some(head));
+        assert!(matches!(zero.result, Err(ApiError::InvalidQuery { .. })));
+        // Database currently caps a query's limit at its page size, 100.
+        let over = query(101);
+        unchanged(&over, Some(head));
+        assert!(matches!(
+            over.result,
+            Err(ApiError::LimitExceeded {
+                limit: "query limit",
+                max: 100
+            })
+        ));
     });
 }
 
