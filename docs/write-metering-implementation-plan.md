@@ -321,16 +321,21 @@ For reviewability, split this iteration into result/receipt plumbing and request
 
 **Priority:** 1 — Mumbai release.
 
+**Implemented:** record metadata and `Record::meta()`, shared receipt-effect accounting,
+explicit genesis `RecordLimits`, atomic final-count checks, and full/projected/query
+reads. Database format remains 1 because there are no deployments yet; this iteration
+adds no format-version bump or migration. Pricing and budget enforcement remain deferred.
+
 **Outcome:** every user record carries the metadata needed for planning and deletion bounds.
 
 1. Implement the specified `bytes32` encoding of four big-endian `u64` counters: `cells`, `cell_bytes`, `indexed_cells`, `index_bytes`.
 2. Use the effect/size helper from iteration 1. Cell size is `(8 + name length) + (1 + value length)`; index size is `name length + 2 + value length`. System cells contribute to neither metadata nor receipt user counts.
 3. Create `#meta` with each user record. Update it only when one of its counts changes; delete it with the record. Do not add it to reserved records.
 4. Implement the per-record cell/indexed-cell caps and their genesis configuration. Compute resulting counts and reject a violating operation atomically.
-5. Include `#meta` in full reads, support explicit projection and `Record::meta()`, and keep query materialization consistent with record reads.
-6. Specify the compatibility boundary for existing databases without metadata: use the repository's schema/version policy, with an explicit development reset or a separate migration if required. Do not silently scan and repair records during ordinary metered calls.
+5. Include `#meta` in full reads, support explicit projection and `Record::meta()`, and keep query materialization consistent with record reads. Reads return stored cells without validating metadata; patch and delete validate it before using its counters.
+6. Keep database format 1 during pre-deployment development; no format-version bump or migration is needed for this iteration. Do not silently scan and repair records during ordinary metered calls.
 
-**Acceptance:** create, update, kind change, removal, no-op, deletion and rollback preserve all four counters; equal-size replacements can leave metadata unchanged; cap failures leave cells and IDs unchanged; malformed metadata is a state error rather than an invented zero value.
+**Acceptance:** create, update, kind change, removal, no-op, deletion and rollback preserve all four counters; equal-size replacements can leave metadata unchanged; cap failures leave cells and IDs unchanged; patch and delete reject missing or malformed metadata as a state error rather than inventing zero counts.
 
 ### Iteration 3 — Metering core and explicit budget plumbing
 

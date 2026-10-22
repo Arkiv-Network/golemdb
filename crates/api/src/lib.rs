@@ -19,6 +19,7 @@
 //! let config = OpenConfig::new(Genesis::new(HashAlgorithm::Keccak256, CellLimits {
 //!         max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 128,
 //! },
+//!     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
 //!     None,
 //! ));
 //! let db = Database::open_memory(&config.genesis)?;
@@ -73,7 +74,9 @@ pub use golemdb_query::{
     Bounds, CountOp, Direction, EqValue, ExistsType, Filter, InValues, QueryOp, QueryPage, SortKey,
     ValuesError,
 };
-pub use golemdb_record::{CreateEntry, PatchChange, PatchEntry, ReadTarget, Record, RecordKey};
+pub use golemdb_record::{
+    CreateEntry, PatchChange, PatchEntry, ReadTarget, Record, RecordKey, RecordLimits, RecordMeta,
+};
 
 /// Synchronous record and branch facade. Builders assist callers; implementations
 /// enforce deployment limits, reserved-record rules, identity, and atomic mutations.

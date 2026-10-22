@@ -92,7 +92,7 @@ fn value(ty: CellType, bytes: &[u8]) -> CellValue {
 }
 
 #[test]
-fn late_storage_failure_restores_earlier_patch_writes_and_checkpoint_state() {
+fn late_storage_failure_preserves_cells_metadata_and_checkpoint_state() {
     late_patch_failure(false);
     late_patch_failure(true);
 }
@@ -114,6 +114,17 @@ fn late_patch_failure(remove: bool) {
         )
         .unwrap();
     }
+    for name in [
+        reserved::MAX_RECORD_CELLS,
+        reserved::MAX_RECORD_INDEXED_CELLS,
+    ] {
+        tx.put(
+            tables::CELL,
+            &CellKey::new(system::PARAMS.id, name).encode(),
+            CellValue::from_u64(100).encoded_bytes(),
+        )
+        .unwrap();
+    }
     let key = RecordKey([7; 32]);
     for (address, value) in [
         (
@@ -123,6 +134,16 @@ fn late_patch_failure(remove: bool) {
         (
             CellKey::new(64, reserved::KEY),
             value(CellType::FixedBytes(Width::W32), &key.0),
+        ),
+        (
+            CellKey::new(64, reserved::META),
+            crate::RecordMeta {
+                cells: 1,
+                cell_bytes: 18,
+                indexed_cells: 0,
+                index_bytes: 0,
+            }
+            .encode(),
         ),
         (
             CellKey::new(64, CellNameRef::raw(b"a")),
@@ -179,6 +200,7 @@ fn late_patch_failure(remove: bool) {
         .unwrap();
     assert_eq!(read.cells[b"a".as_slice()].as_str(), Some("original"));
     assert!(!read.cells.contains_key(b"z".as_slice()));
+    assert_eq!(read.meta().unwrap().cell_bytes, 18);
     // Failed patch did not reactivate the rolled-back frame: one rollback now
     // consumes the previous frame, then there are no frames left.
     branches.rollback(b).unwrap();

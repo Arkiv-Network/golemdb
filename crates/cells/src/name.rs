@@ -173,6 +173,13 @@ pub mod reserved {
 
     /// A record's logical key.
     pub const KEY: CellNameRef<'static> = CellNameRef(b"#key");
+    /// A user record's four u64 counters, encoded as a bytes32 field.
+    pub const META: CellNameRef<'static> = CellNameRef(b"#meta");
+    /// Maximum number of user cells per record (u64).
+    pub const MAX_RECORD_CELLS: CellNameRef<'static> = CellNameRef(b"#maxRecordCells");
+    /// Maximum number of indexed user cells per record (u64).
+    pub const MAX_RECORD_INDEXED_CELLS: CellNameRef<'static> =
+        CellNameRef(b"#maxRecordIndexedCells");
     /// The next record ID to hand out.
     pub const NEXT_RECORD_ID: CellNameRef<'static> = CellNameRef(b"#nextRecordID");
     /// Chain parameter: the longest `str` value.
@@ -189,6 +196,9 @@ pub mod reserved {
 
     pub const ALL: &[CellNameRef<'static>] = &[
         KEY,
+        META,
+        MAX_RECORD_CELLS,
+        MAX_RECORD_INDEXED_CELLS,
         NEXT_RECORD_ID,
         MAX_STR_LEN,
         MAX_BYTES_LEN,

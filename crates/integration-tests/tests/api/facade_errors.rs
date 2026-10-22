@@ -79,6 +79,10 @@ fn failure_contract(database: impl Store + Clone + Send + Sync + 'static) {
             max_str_len: 64,
             max_bytes_len: 128,
         },
+        golemdb_api::RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
         None,
     ));
     let db = Database::from_store(
@@ -184,6 +188,10 @@ fn full_mdbx_store_preserves_head_tables_and_sealed_branch() {
             max_cell_name_len: 32,
             max_str_len: 64,
             max_bytes_len: 2 * 1024 * 1024,
+        },
+        golemdb_api::RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
         },
         None,
     );

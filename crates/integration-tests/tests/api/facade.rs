@@ -15,6 +15,10 @@ fn config(hash_function: HashAlgorithm) -> OpenConfig {
             max_str_len: 64,
             max_bytes_len: 128,
         },
+        golemdb_api::RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
         None,
     ))
 }
@@ -93,7 +97,7 @@ fn crud_pending_reads_projections_and_recreation() {
         }
         let pending = get(api.as_ref(), ReadTarget::Branch(branch));
         assert_eq!(pending.key, KEY);
-        assert_eq!(pending.cells.len(), 3);
+        assert_eq!(pending.cells.len(), 4);
         assert_eq!(pending.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
         assert!(pending.cells[b"price".as_slice()].is_indexable());
         let selected = api
@@ -511,7 +515,7 @@ fn empty_records_keep_identity_through_patch_rollback_commit_and_delete() {
         .unwrap();
         let empty = get(&db, ReadTarget::Branch(branch));
         assert_eq!(empty.key, KEY);
-        assert_eq!(empty.cells.len(), 1);
+        assert_eq!(empty.cells.len(), 2);
         assert_eq!(empty.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
         assert_eq!(allocator(&db, ReadTarget::Branch(branch)), 65);
         assert!(matches!(
@@ -674,7 +678,7 @@ fn mdbx_reopens_empty_records_created_directly_or_by_removing_all_cells() {
                 )
                 .into_result()
                 .unwrap();
-            assert_eq!(record.cells.len(), 1);
+            assert_eq!(record.cells.len(), 2);
             assert_eq!(record.cells[b"#key".as_slice()].as_bytes32(), Some(key.0));
         }
         assert_eq!(allocator(&db, ReadTarget::Head), 66);
