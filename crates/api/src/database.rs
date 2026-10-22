@@ -214,7 +214,7 @@ const MAX_QUERY_DEPTH: u32 = 64;
 /// returns the first ones in query order, and a larger limit fails as
 /// `LimitExceeded`. Hardcoded for now: it will be read from genesis
 /// (`#maxQueryLimit`) in the scope of issues #48 and #49.
-const MAX_PAGE_SIZE: u32 = 100;
+const MAX_QUERY_LIMIT: u32 = 100;
 
 /// All layers share one store, through clones of its handle, and record and
 /// branch share one branch registry. Immutable reads use the store and reader
@@ -238,7 +238,7 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
             store.clone(),
             hasher,
             Some(MAX_QUERY_DEPTH),
-            Some(MAX_PAGE_SIZE),
+            Some(MAX_QUERY_LIMIT),
         );
         Ok(Self {
             store,

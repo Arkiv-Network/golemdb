@@ -34,7 +34,7 @@ pub struct Queries<S, H> {
     store: S,
     hasher: H,
     max_query_depth: Option<u32>,
-    max_page_size: Option<u32>,
+    max_query_limit: Option<u32>,
 }
 
 impl<S: Store, H: HashProvider> Queries<S, H> {
@@ -52,13 +52,13 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
         store: S,
         hasher: H,
         max_query_depth: Option<u32>,
-        max_page_size: Option<u32>,
+        max_query_limit: Option<u32>,
     ) -> Self {
         Self {
             store,
             hasher,
             max_query_depth,
-            max_page_size,
+            max_query_limit,
         }
     }
 
@@ -91,7 +91,7 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
                     operation: "query: offset",
                 });
             }
-            let page_size = page_size(op.limit, self.max_page_size)?;
+            let page_size = page_size(op.limit, self.max_query_limit)?;
             let plan = Plan::admit(&op.filter, self.max_query_depth)?;
             let index = Index::new(&self.hasher);
             let matches = match_set(&IndexSource::new(&index, snapshot), plan)?;
