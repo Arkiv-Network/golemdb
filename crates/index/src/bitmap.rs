@@ -9,7 +9,8 @@ use crate::{BitmapContainer, BitmapError};
 /// Owns the chunk-to-record-ID conversion, not storage or Merkle hashing.
 /// Set operations are operators on `Bitmap` (`|=` is union, `&=` is
 /// intersection), so callers need not name Roaring; [`Self::treemap`] reads
-/// the record IDs. The default is the empty bitmap.
+/// the record IDs, and [`Self::iter_skipping`] reads them past a rank. The
+/// default is the empty bitmap.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Bitmap {
     values: RoaringTreemap,
@@ -51,6 +52,18 @@ impl Bitmap {
 
     pub fn into_treemap(self) -> RoaringTreemap {
         self.values
+    }
+
+    /// The record IDs in ascending order past the first `n`, as
+    /// `treemap().iter().skip(n)` yields them. The first one is found by its
+    /// rank, so the skipped IDs are not walked one by one. Empty when the
+    /// bitmap holds `n` IDs or fewer.
+    pub fn iter_skipping(&self, n: u64) -> impl Iterator<Item = u64> + '_ {
+        self.values.select(n).into_iter().flat_map(move |first| {
+            let mut ids = self.values.iter();
+            ids.advance_to(first);
+            ids
+        })
     }
 }
 
@@ -120,6 +133,42 @@ mod tests {
             let mut intersection = bitmap_of(a.iter().copied());
             intersection &= bitmap_of(b.iter().copied());
             prop_assert_eq!(intersection, bitmap_of(a.intersection(&b).copied()));
+        }
+    }
+
+    /// IDs sharing a Roaring container, in a second container of the same
+    /// treemap bucket, and in three more buckets, up to the greatest ID.
+    const SPREAD: [u64; 6] = [1, 2, 1 << 16, 1 << 32, 1 << 40, u64::MAX];
+
+    #[test]
+    fn skipping_no_id_yields_them_all() {
+        assert!(bitmap_of(SPREAD).iter_skipping(0).eq(SPREAD));
+    }
+
+    #[test]
+    fn skipping_passes_the_first_ids_across_containers() {
+        let bitmap = bitmap_of(SPREAD);
+        for n in 1..SPREAD.len() {
+            let rest = SPREAD[n..].iter().copied();
+            assert!(bitmap.iter_skipping(n as u64).eq(rest), "{n}");
+        }
+    }
+
+    #[test]
+    fn skipping_every_id_or_more_yields_none() {
+        let bitmap = bitmap_of(SPREAD);
+        for n in [SPREAD.len() as u64, SPREAD.len() as u64 + 1, u64::MAX] {
+            assert_eq!(bitmap.iter_skipping(n).next(), None, "{n}");
+        }
+        assert_eq!(Bitmap::default().iter_skipping(0).next(), None);
+    }
+
+    proptest! {
+        #[test]
+        fn skipping_is_iterator_skip(ids in ids(), n in 0u64..110) {
+            let bitmap = bitmap_of(ids.iter().copied());
+            let expected = ids.iter().copied().skip(n as usize);
+            prop_assert!(bitmap.iter_skipping(n).eq(expected));
         }
     }
 }

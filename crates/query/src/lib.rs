@@ -55,5 +55,6 @@ pub use error::{QueryError, Result};
 pub use golemdb_metering::Budget;
 pub use queries::Queries;
 pub use query_op::{
-    Bounds, CountOp, Direction, EqValue, Filter, InValues, QueryOp, QueryPage, SortKey, ValuesError,
+    Bounds, CountOp, Direction, EqValue, ExistsType, Filter, InValues, QueryOp, QueryPage, SortKey,
+    ValuesError,
 };

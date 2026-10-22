@@ -89,11 +89,9 @@ impl IndexTerm {
 
     /// Prefix that confines range/prefix scans to one attribute name and type.
     pub fn prefix(name: &str, ty: CellType) -> Result<Vec<u8>, TermError> {
-        validate_name(name)?;
+        let mut out = name_prefix(name)?;
         supported(ty)?;
-        let mut out = Vec::with_capacity(name.len() + 2);
-        out.extend_from_slice(name.as_bytes());
-        out.extend_from_slice(&[0, 0x80 | ty.id()]);
+        out.push(0x80 | ty.id());
         Ok(out)
     }
 
@@ -147,6 +145,18 @@ impl IndexTerm {
 /// [`TermError::InvalidName`], like any name outside the grammar.
 pub(crate) fn name_str(name: CellNameRef<'_>) -> Result<&str, TermError> {
     std::str::from_utf8(name.as_bytes()).map_err(|_| TermError::InvalidName)
+}
+
+/// The start of every term of `name`, whatever its type: the name, then the
+/// `0x00` separator. A valid name holds no `0x00` byte, so no other name's
+/// terms start with it, not even a longer name's (`ab` for `a`).
+pub(crate) fn name_prefix(name: &str) -> Result<Vec<u8>, TermError> {
+    validate_name(name)?;
+    // Room for the type tag `prefix` appends.
+    let mut out = Vec::with_capacity(name.len() + 2);
+    out.extend_from_slice(name.as_bytes());
+    out.push(0);
+    Ok(out)
 }
 
 fn validate_name(name: &str) -> Result<(), TermError> {

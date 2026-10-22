@@ -15,9 +15,13 @@ pub struct QueryOp {
     pub sort: Vec<SortKey>,
     /// `None` selects full records; `Some([])` selects no cells.
     pub projection: Option<Vec<CellName>>,
+    /// The most records the page holds, the first in query order. `None`:
+    /// up to the `max_query_limit` of the [`Queries`](crate::Queries) it runs
+    /// on.
     pub limit: Option<u64>,
     // /// Resume after a previous page. At most one of `after` and `offset`.
     // pub after: Option<Cursor>,
+    /// How many matches, in query order, come before the page. `None`: 0.
     pub offset: Option<u64>,
     pub with_total: bool,
     /// Explicit budget, stored but not enforced yet.
@@ -55,11 +59,17 @@ impl QueryOp {
         self
     }
 
+    /// Return at most `limit` records, the first in query order. The call
+    /// rejects a limit of 0, and one above the `max_query_limit` of the
+    /// [`Queries`](crate::Queries) it runs on.
     pub fn limit(mut self, limit: u64) -> Self {
         self.limit = Some(limit);
         self
     }
 
+    /// Start the page past the first `offset` matches, in query order. The
+    /// next page's offset is this one plus the records returned; an offset
+    /// past the last match gives an empty page.
     pub fn offset(mut self, offset: u64) -> Self {
         self.offset = Some(offset);
         self

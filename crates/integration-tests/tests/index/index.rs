@@ -471,6 +471,61 @@ fn prefix_scans_hold_the_strings_that_start_with_the_prefix() {
 }
 
 #[test]
+fn name_scans_hold_the_terms_of_the_name_and_load_each_bitmap() {
+    let (_dir, db) = fixture::db();
+    let index = Index::new(&HASH);
+    let at =
+        |name: &str, value: CellValue| IndexTerm::from_str_name(name, value.as_view()).unwrap();
+    // In key order: by type tag, then by value.
+    let of_a = [
+        at("a", CellValue::from_bool(true)),
+        at("a", CellValue::from_str("")),
+        at("a", CellValue::from_str("z")),
+        at("a", CellValue::from_u32(0)),
+        at("a", CellValue::from_u32(u32::MAX)),
+        at("a", CellValue::from_u64(1)),
+        at("a", CellValue::from_i32(-1)),
+        at("a", CellValue::from_timestamp64(0)),
+    ];
+    // A name before `a`, longer names `a` is a prefix of (`-` is the least
+    // byte a name continues with), and a name after it.
+    let neighbours = [
+        at("A", CellValue::from_u32(1)),
+        at("a-", CellValue::from_u32(1)),
+        at("ab", CellValue::from_str("")),
+        at("b", CellValue::from_bool(false)),
+    ];
+    let mut tx = db.begin_write().unwrap();
+    let changes = of_a
+        .iter()
+        .chain(&neighbours)
+        .enumerate()
+        .flat_map(|(n, t)| {
+            let n = n as u64;
+            [add(t, n), add(t, n + (1 << 40))]
+        });
+    index.apply(&mut tx, RootRef::Empty, changes).unwrap();
+    let scan = |ty: Option<CellType>| {
+        let range = TermRange::of_name(CellNameRef::raw(b"a"), ty).unwrap();
+        index
+            .terms(&tx, range)
+            .unwrap()
+            .map(|entry| {
+                let (term, root) = entry.unwrap();
+                let bitmap = index.bitmap_at(&tx, root).unwrap();
+                let expected = index.bitmap(&tx, &term).unwrap().unwrap();
+                assert_eq!(bitmap.treemap(), expected.treemap());
+                term
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(scan(None), of_a);
+    assert_eq!(scan(Some(CellType::Str)), of_a[1..3]);
+    assert_eq!(scan(Some(CellType::Uint(Width::W4))), of_a[3..5]);
+    assert!(scan(Some(CellType::Int(Width::W8))).is_empty());
+}
+
+#[test]
 fn corrupt_missing_and_mismatched_state_is_not_absence() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
