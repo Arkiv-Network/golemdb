@@ -1,4 +1,23 @@
-use crate::{BranchRef, Hash, HashProvider, LeafRef, MerkleError, Result, RootRef, path};
+use crate::{
+    BranchRef, COMMIT_BYTES, HASH_BYTES, Hash, HashProvider, LeafRef, MerkleError, Result, RootRef,
+    path::{self, NIBBLE_MASK, NIBBLES_PER_BYTE},
+};
+
+/// Children of a branch: one slot per nibble value.
+pub const BRANCH_SLOTS: usize = 16;
+
+/// Fewer children would make the branch a leaf or empty.
+const MIN_BRANCH_CHILDREN: u32 = 2;
+
+/// The widest routing path a trie supports.
+pub(crate) const MAX_PATH_BYTES: usize = 32;
+
+/// Bytes of the leading prefix length in an encoded branch.
+const PREFIX_LEN_BYTES: usize = 1;
+
+/// Bytes of each of a branch's two child masks, one bit per slot.
+const MASK_BYTES: usize = size_of::<u16>();
+const _: () = assert!(u16::BITS as usize == BRANCH_SLOTS);
 
 /// Where a trie keeps its leaves, and so which children a branch records the
 /// commit of.
@@ -64,17 +83,21 @@ impl<const N: usize> BranchNodeCompact<N> {
     ) -> Result<Self> {
         const {
             assert!(
-                N >= 1 && N <= 32,
+                N >= 1 && N <= MAX_PATH_BYTES,
                 "Merkle paths must contain between 1 and 32 bytes"
             )
         };
-        if prefix_len as usize >= 2 * N || prefix.len() != (prefix_len as usize).div_ceil(2) {
+        if prefix_len as usize >= NIBBLES_PER_BYTE * N
+            || prefix.len() != (prefix_len as usize).div_ceil(NIBBLES_PER_BYTE)
+        {
             return Err(MerkleError::InvalidNode("invalid prefix length"));
         }
-        if prefix_len % 2 == 1 && prefix.last().is_some_and(|byte| byte & 15 != 0) {
+        if !(prefix_len as usize).is_multiple_of(NIBBLES_PER_BYTE)
+            && prefix.last().is_some_and(|byte| byte & NIBBLE_MASK != 0)
+        {
             return Err(MerkleError::InvalidNode("nonzero prefix padding"));
         }
-        if state_mask.count_ones() < 2
+        if state_mask.count_ones() < MIN_BRANCH_CHILDREN
             || tree_mask & !state_mask != 0
             || child_hashes.len() != state_mask.count_ones() as usize
             || leaf_paths.len() != (state_mask & !tree_mask).count_ones() as usize
@@ -115,7 +138,7 @@ impl<const N: usize> BranchNodeCompact<N> {
     }
 
     pub fn child(&self, slot: u8) -> Option<RootRef<N>> {
-        if slot >= 16 || self.state_mask & (1 << slot) == 0 {
+        if usize::from(slot) >= BRANCH_SLOTS || self.state_mask & (1 << slot) == 0 {
             return None;
         }
         let before = (1u16 << slot) - 1;
@@ -174,25 +197,27 @@ impl<const N: usize> BranchNodeCompact<N> {
     pub fn decode(bytes: &[u8], leaf_storage: LeafStorage) -> Result<Self> {
         const {
             assert!(
-                N >= 1 && N <= 32,
+                N >= 1 && N <= MAX_PATH_BYTES,
                 "Merkle paths must contain between 1 and 32 bytes"
             )
         };
         let bad = || MerkleError::InvalidNode("invalid encoded length");
         let prefix_len = *bytes.first().ok_or_else(bad)?;
-        let end = 1 + (prefix_len as usize).div_ceil(2);
-        let header = bytes.get(..end + 4).ok_or_else(bad)?;
-        let state_mask = u16::from_be_bytes([header[end], header[end + 1]]);
-        let tree_mask = u16::from_be_bytes([header[end + 2], header[end + 3]]);
-        let hash_end = end + 4 + state_mask.count_ones() as usize * 32;
+        let end = PREFIX_LEN_BYTES + (prefix_len as usize).div_ceil(NIBBLES_PER_BYTE);
+        let tree_at = end + MASK_BYTES;
+        let masks_end = tree_at + MASK_BYTES;
+        let header = bytes.get(..masks_end).ok_or_else(bad)?;
+        let mask = |at: usize| u16::from_be_bytes(header[at..at + MASK_BYTES].try_into().unwrap());
+        let (state_mask, tree_mask) = (mask(end), mask(tree_at));
+        let hash_end = masks_end + state_mask.count_ones() as usize * HASH_BYTES;
         let paths_end = hash_end + (state_mask & !tree_mask).count_ones() as usize * N;
-        let commits_end =
-            paths_end + leaf_storage.stored_mask(state_mask, tree_mask).count_ones() as usize * 8;
+        let commits_end = paths_end
+            + leaf_storage.stored_mask(state_mask, tree_mask).count_ones() as usize * COMMIT_BYTES;
         if bytes.len() != commits_end {
             return Err(bad());
         }
-        let child_hashes = bytes[end + 4..hash_end]
-            .chunks_exact(32)
+        let child_hashes = bytes[masks_end..hash_end]
+            .chunks_exact(HASH_BYTES)
             .map(|b| b.try_into().unwrap())
             .collect();
         let leaf_paths = bytes[hash_end..paths_end]
@@ -200,11 +225,11 @@ impl<const N: usize> BranchNodeCompact<N> {
             .map(|b| b.try_into().unwrap())
             .collect();
         let child_commits = bytes[paths_end..]
-            .chunks_exact(8)
+            .chunks_exact(COMMIT_BYTES)
             .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
             .collect();
         Self::new(
-            header[1..end].to_vec(),
+            header[PREFIX_LEN_BYTES..end].to_vec(),
             prefix_len,
             state_mask,
             tree_mask,
@@ -222,13 +247,13 @@ impl<const N: usize> BranchNodeCompact<N> {
             .collect()
     }
 
-    pub(crate) fn children(&self) -> [RootRef<N>; 16] {
+    pub(crate) fn children(&self) -> [RootRef<N>; BRANCH_SLOTS] {
         std::array::from_fn(|slot| self.child(slot as u8).unwrap_or(RootRef::Empty))
     }
 
     pub(crate) fn from_children(
         prefix: &[u8],
-        children: &[RootRef<N>; 16],
+        children: &[RootRef<N>; BRANCH_SLOTS],
         leaf_storage: LeafStorage,
     ) -> Result<Self> {
         let mut state = 0;
@@ -269,13 +294,13 @@ impl<const N: usize> BranchNodeCompact<N> {
     pub(crate) fn validate_at(&self, ancestors: &[u8]) -> Result<()> {
         let mut route = ancestors.to_vec();
         route.extend(self.unpack_prefix());
-        if route.len() >= N * 2 {
+        if route.len() >= N * NIBBLES_PER_BYTE {
             return Err(MerkleError::InvalidNode("branch exceeds path depth"));
         }
-        if route.len() + 1 == N * 2 && self.tree_mask != 0 {
+        if route.len() + 1 == N * NIBBLES_PER_BYTE && self.tree_mask != 0 {
             return Err(MerkleError::InvalidNode("branch child beyond final nibble"));
         }
-        for slot in 0..16 {
+        for slot in 0..BRANCH_SLOTS as u8 {
             if let Some(RootRef::Leaf(leaf)) = self.child(slot)
                 && (route
                     .iter()

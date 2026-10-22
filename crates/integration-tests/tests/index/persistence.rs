@@ -128,7 +128,7 @@ fn persistence_worker() {
         BITMAP_BRANCH_DOMAIN,
         &HASH,
     )
-    .in_namespace(&ns);
+    .in_namespace(ns);
     let old_row = read.get(HEAD, b"old_bitmap").unwrap().unwrap();
     let mut ids = Vec::new();
     let old_root = RootRef::<BITMAP_TRIE_PATH_BYTES>::decode(&old_row).unwrap();

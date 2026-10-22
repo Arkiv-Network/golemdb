@@ -20,6 +20,8 @@ pub struct Roots {
 impl Roots {
     /// `len(state) ‖ state ‖ index`, each root as [`RootRef::encode`] writes it.
     pub(crate) fn encode(&self) -> Vec<u8> {
+        // Every state root fits the length byte.
+        const { assert!(RootRef::<CELL_TRIE_PATH_BYTES>::MAX_ENCODED_BYTES <= u8::MAX as usize) };
         let state = self.state.encode();
         [&[state.len() as u8][..], &state, &self.index.encode()].concat()
     }

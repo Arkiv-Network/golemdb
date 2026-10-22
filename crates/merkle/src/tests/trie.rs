@@ -154,7 +154,7 @@ fn branches<const N: usize>(tx: &impl ReadTransaction, root: RootRef<N>) -> BTre
             )
             .unwrap();
             let base: Vec<u8> = route.iter().copied().chain(node.unpack_prefix()).collect();
-            for slot in 0..16 {
+            for slot in 0..crate::BRANCH_SLOTS as u8 {
                 if let Some(child) = node.child(slot) {
                     stack.push((child, [&base[..], &[slot]].concat()));
                 }
@@ -724,7 +724,7 @@ proptest! {
     ) {
         let mut seen = BTreeMap::new();
         for (namespace, route) in &rows {
-            let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).in_namespace(namespace);
+            let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).in_namespace(*namespace);
             let previous = seen.insert(trie.node_key(1, route), (namespace, route));
             prop_assert!(previous.is_none_or(|row| row == (namespace, route)));
         }
@@ -742,8 +742,9 @@ fn namespaced_tries_sharing_a_table_keep_their_own_rows() {
     let leaves = (0..6)
         .map(|id| leaf::<6>(key(id), id as u32))
         .collect::<Vec<_>>();
-    let trie =
-        |namespace| Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).in_namespace(namespace);
+    let trie = |namespace: &Hash| {
+        Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).in_namespace(*namespace)
+    };
     let roots = namespaces.each_ref().map(|namespace| {
         let edits = leaves.iter().map(|leaf| (leaf.path, Some(leaf.hash)));
         trie(namespace)

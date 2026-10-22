@@ -211,7 +211,7 @@ fn later_commits_never_overwrite_earlier_rows() {
 }
 
 fn trie_key(commit: u64) -> Vec<u8> {
-    crate::node_key(commit, &[], &[])
+    Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).node_key(commit, &[])
 }
 
 #[test]

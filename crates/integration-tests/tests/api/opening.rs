@@ -351,7 +351,12 @@ fn unsupported_format_ids_and_missing_trie_roots_are_rejected() {
     let db = MemoryStore::new();
     Database::from_store(db.clone(), &config()).unwrap();
     // The genesis state root is a branch stored at commit 0, at the empty route.
-    let root = golemdb_merkle::node_key(0, &[], &[]);
+    let trie = golemdb_merkle::Trie::<_, { golemdb_cells::CELL_TRIE_PATH_BYTES }>::new(
+        tables::CELL_TRIE,
+        golemdb_cells::CELL_BRANCH_DOMAIN,
+        &Keccak256Hasher,
+    );
+    let root = trie.node_key(0, &[]);
     let mut tx = db.begin_write().unwrap();
     assert!(tx.delete(tables::CELL_TRIE, &root).unwrap());
     tx.commit().unwrap();

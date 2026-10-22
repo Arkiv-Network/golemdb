@@ -427,7 +427,8 @@ fn root_key(root: &RootRef<CELL_TRIE_PATH_BYTES>) -> Vec<u8> {
     let RootRef::Branch(branch) = root else {
         panic!("not a branch root")
     };
-    golemdb_merkle::node_key(branch.commit, &[], &[])
+    Trie::<_, CELL_TRIE_PATH_BYTES>::new(tables::CELL_TRIE, CELL_BRANCH_DOMAIN, &HASH)
+        .node_key(branch.commit, &[])
 }
 
 fn memory_db() -> ((), MemoryStore) {

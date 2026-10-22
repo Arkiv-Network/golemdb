@@ -15,8 +15,8 @@ pub struct LeafPayload {
 /// `leaf_table` under `commit ‖ namespace ‖ path`. Branches record each leaf's
 /// commit, so old roots keep reading the payloads they were built with. The
 /// trie writes and reads the rows itself; callers pass payloads, not keys.
-pub struct PayloadTrie<'h, H: HashProvider, const N: usize> {
-    trie: Trie<'h, H, N>,
+pub struct PayloadTrie<'h, H: HashProvider, const N: usize, const NS: usize = 0> {
+    trie: Trie<'h, H, N, NS>,
     leaf_table: Table,
 }
 
@@ -35,9 +35,23 @@ impl<'h, H: HashProvider, const N: usize> PayloadTrie<'h, H, N> {
     }
 
     /// As [`Trie::in_namespace`], for branches and payloads alike.
-    pub fn in_namespace(mut self, namespace: &'h Hash) -> Self {
-        self.trie = self.trie.in_namespace(namespace);
-        self
+    pub fn in_namespace<const NS: usize>(self, namespace: [u8; NS]) -> PayloadTrie<'h, H, N, NS> {
+        PayloadTrie {
+            trie: self.trie.in_namespace(namespace),
+            leaf_table: self.leaf_table,
+        }
+    }
+}
+
+impl<'h, H: HashProvider, const N: usize, const NS: usize> PayloadTrie<'h, H, N, NS> {
+    /// As [`Trie::node_key`].
+    pub fn node_key(&self, commit: u64, route: &[u8]) -> Vec<u8> {
+        self.trie.node_key(commit, route)
+    }
+
+    /// Row key in `leaf_table` of the payload at `path` written at `commit`.
+    pub fn leaf_key(&self, commit: u64, path: &[u8; N]) -> Vec<u8> {
+        self.trie.leaf_key(commit, path)
     }
 
     /// As [`Trie::get`].
@@ -55,7 +69,7 @@ impl<'h, H: HashProvider, const N: usize> PayloadTrie<'h, H, N> {
         &'a self,
         tx: &'a T,
         root: RootRef<N>,
-    ) -> Walk<'a, T, H, N> {
+    ) -> Walk<'a, T, H, N, NS> {
         self.trie.walk(tx, root)
     }
 

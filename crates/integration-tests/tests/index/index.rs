@@ -1,5 +1,5 @@
 use crate::support::mdbx as fixture;
-use golemdb_index::INDEX_BRANCH_DOMAIN;
+use golemdb_index::{BITMAP_BRANCH_DOMAIN, INDEX_BRANCH_DOMAIN};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -10,9 +10,7 @@ use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
 use golemdb_index::{
     INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, TermRange, tables,
 };
-use golemdb_merkle::{
-    HASH_BYTES, Hash, Keccak256Hasher, LeafRef, RootRef, Trie, leaf_key, node_key,
-};
+use golemdb_merkle::{HASH_BYTES, Hash, Keccak256Hasher, LeafRef, PayloadTrie, RootRef, Trie};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
 
@@ -65,11 +63,18 @@ fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Hash> {
 fn bitmap_root_row(tx: &impl ReadTransaction, t: &IndexTerm) -> (golemdb_storage::Table, Vec<u8>) {
     let value = tx.get(tables::INDEX, t.as_bytes()).unwrap().unwrap();
     let ns = t.routing_path(&HASH);
+    let trie = PayloadTrie::new(
+        tables::BITMAP_TRIE,
+        tables::BITMAP_CONTAINER,
+        BITMAP_BRANCH_DOMAIN,
+        &HASH,
+    )
+    .in_namespace(ns);
     match RootRef::<6>::decode(&value).unwrap() {
-        RootRef::Branch(branch) => (tables::BITMAP_TRIE, node_key(branch.commit, &ns, &[])),
+        RootRef::Branch(branch) => (tables::BITMAP_TRIE, trie.node_key(branch.commit, &[])),
         RootRef::Leaf(leaf) => (
             tables::BITMAP_CONTAINER,
-            leaf_key(leaf.commit, &ns, &leaf.path),
+            trie.leaf_key(leaf.commit, &leaf.path),
         ),
         RootRef::Empty => unreachable!("Index rows hold nonempty roots"),
     }
@@ -532,7 +537,9 @@ fn corrupt_missing_and_mismatched_state_is_not_absence() {
     let RootRef::Branch(branch) = root else {
         panic!("not a branch root")
     };
-    let root_row = node_key(branch.commit, &[], &[]);
+    let root_row =
+        Trie::<_, INDEX_TRIE_PATH_BYTES>::new(tables::INDEX_TRIE, INDEX_BRANCH_DOMAIN, &HASH)
+            .node_key(branch.commit, &[]);
     tx.delete(tables::INDEX_TRIE, &root_row).unwrap();
     // A missing branch row is never mistaken for an empty or singleton root.
     assert!(index.validate_root(&tx, root).is_err());
