@@ -21,7 +21,7 @@ pub enum ApiError {
     NotFound,
     #[error("cell {name} not found")]
     CellNotFound { name: crate::CellName },
-    /// Reserved for metering; currently never returned. Spent is receipt.cost.
+    /// Spent is receipt.cost. Database calls start emitting this after planner integration.
     #[error("operation exceeds its budget (required: {required:?})")]
     OutOfBudget { required: Option<u64> },
     #[error("key already exists")]
@@ -116,6 +116,9 @@ impl From<RecordError> for ApiError {
             }
             RecordError::AlreadyExists => Self::AlreadyExists,
             RecordError::Reserved => Self::Reserved,
+            RecordError::Metering(failure) => Self::OutOfBudget {
+                required: failure.required,
+            },
             RecordError::CommitUnavailable { requested, head } => {
                 Self::CommitUnavailable { requested, head }
             }
