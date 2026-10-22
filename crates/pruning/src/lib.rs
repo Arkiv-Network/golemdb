@@ -1,9 +1,10 @@
 //! Pruning: discarding what only commits before a node's retention window reach.
 //!
-//! [`Pruner::prune`] runs inside each commit's transaction. It garbage-collects
-//! superseded trie rows: a row superseded at commit `s` is reached only by roots
-//! before `s`, so it is deleted once `s ≤ head − window`. The caller drops its
-//! own per-commit rows, such as `Roots`, before [`Pruner::cutoff`].
+//! [`Pruner::record`] and [`Pruner::sweep`] run inside each commit's
+//! transaction. They garbage-collect superseded trie rows: a row superseded at
+//! commit `s` is reached only by roots before `s`, so it is deleted once
+//! `s ≤ head − window`. The caller drops its own per-commit rows, such as
+//! `Roots`, before [`Pruner::cutoff`].
 
 mod error;
 mod gc;
@@ -17,9 +18,7 @@ use golemdb_storage::{Table, WriteTransaction};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PruningConfig {
     window: u64,
-    batch: u64,
     max_deletes: usize,
-    chunk: usize,
 }
 
 impl PruningConfig {
@@ -27,27 +26,15 @@ impl PruningConfig {
     pub const fn new(window: u64) -> Self {
         Self {
             window,
-            batch: 50,
             max_deletes: 100_000,
-            chunk: 1000,
         }
     }
 
-    /// Commits per epoch, whose rows are deleted together; at least 1.
-    pub const fn with_batch(mut self, batch: u64) -> Self {
-        self.batch = if batch == 0 { 1 } else { batch };
-        self
-    }
-
-    /// Most rows one commit deletes; at least 1.
+    /// Most rows one commit deletes, bounding a backlog after the window
+    /// shrinks; at least 1. Keep it above the rows one commit supersedes, or
+    /// `Stale` grows without bound.
     pub const fn with_max_deletes(mut self, max_deletes: usize) -> Self {
         self.max_deletes = if max_deletes == 0 { 1 } else { max_deletes };
-        self
-    }
-
-    /// Entries per `Stale` row; at least 1.
-    pub const fn with_chunk(mut self, chunk: usize) -> Self {
-        self.chunk = if chunk == 0 { 1 } else { chunk };
         self
     }
 
@@ -69,20 +56,20 @@ impl Pruner {
         Self { config }
     }
 
-    /// The settings this pruner runs with.
-    pub const fn config(&self) -> &PruningConfig {
-        &self.config
-    }
-
-    /// Prune inside the commit's transaction: record the rows `commit` superseded,
-    /// then delete what has left the window.
-    pub fn prune<'a>(
+    /// Record the rows `commit` superseded, to delete once they leave the window.
+    pub fn record<'a>(
         &self,
         tx: &mut impl WriteTransaction,
         commit: u64,
         superseded: impl IntoIterator<Item = (Table, &'a [u8])>,
     ) -> Result<()> {
-        gc::collect(tx, &self.config, commit, superseded)
+        gc::record(tx, commit, superseded)
+    }
+
+    /// Delete recorded rows superseded at or before `head − window`, up to
+    /// `max_deletes`.
+    pub fn sweep(&self, tx: &mut impl WriteTransaction, head: u64) -> Result<()> {
+        gc::sweep(tx, self.cutoff(head), self.config.max_deletes)
     }
 
     /// Commits before this may be pruned: `head − window`. Not the earliest

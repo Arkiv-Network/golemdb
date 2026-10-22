@@ -10,7 +10,3 @@ golemdb-cells.workspace = true
 golemdb-index.workspace = true
 golemdb-storage.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-golemdb-storage-mdbx.workspace = true
-tempfile = "3"

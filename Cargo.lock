@@ -629,8 +629,6 @@ dependencies = [
  "golemdb-cells",
  "golemdb-index",
  "golemdb-storage",
- "golemdb-storage-mdbx",
- "tempfile",
  "thiserror",
 ]
 

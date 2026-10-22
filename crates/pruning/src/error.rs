@@ -7,8 +7,6 @@ pub enum PruningError {
     Storage(#[from] StorageError),
     #[error("table {0} is not versioned, so it has no superseded rows")]
     UnversionedTable(&'static str),
-    #[error("superseded key of {len} bytes is too long to list")]
-    KeyTooLong { len: usize },
 }
 
 /// A result with a [`PruningError`].
