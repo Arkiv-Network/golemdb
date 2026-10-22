@@ -4,11 +4,12 @@
 //!
 //! 1. Open one storage snapshot and select its head. A requested commit other
 //!    than that head is rejected; historical reads are not implemented yet.
-//! 2. `query` only: reject unsupported sort and offset options, then a
-//!    `limit` of 0 or above `max_page_size`.
-//! 3. Admit the filter, then evaluate it and materialize the page's records,
-//!    at most `limit`, or with no limit `max_page_size`, from the same
-//!    snapshot. Explicit budgets are not enforced yet.
+//! 2. `query` only: reject an unsupported sort, then a `limit` of 0 or above
+//!    `max_query_limit`.
+//! 3. Admit the filter, then evaluate it and materialize the page's records
+//!    from the same snapshot: past the first `offset` matches, at most
+//!    `limit`, or with no limit `max_query_limit`. Explicit budgets are not
+//!    enforced yet.
 //!
 //! Report variants retain the selected snapshot's head even on failure,
 //! including unavailable history and invalid requests. If snapshot/head
@@ -43,11 +44,12 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
     /// at admission. Admission and evaluation recurse once per level, so with
     /// no cap a deep enough filter overflows the stack, aborting the process.
     ///
-    /// `max_page_size` caps how many records a query returns, and so its
+    /// `max_query_limit` caps how many records a query returns, and so its
     /// `limit`: a larger limit fails as [`QueryError::LimitExceeded`]. A query
     /// with no limit that matches more still runs, and returns the first
-    /// `max_page_size` matches in query order; the others are not read. With
-    /// no cap, any limit holds, and a query with none returns every match.
+    /// `max_query_limit` matches in query order past its `offset`; the others
+    /// are not read. With no cap, any limit holds, and a query with none
+    /// returns every match past its offset.
     pub fn new(
         store: S,
         hasher: H,
@@ -63,13 +65,15 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
     }
 
     /// The records matching `op`'s filter at `commit` (`None` for the head),
-    /// in record ID order, projected as `get` projects: the first `limit` of
-    /// them, or with no limit the first `max_page_size`, while
-    /// `total_matched` counts every match. A `limit` of 0 fails as
-    /// [`QueryError::InvalidQuery`], one above `max_page_size` as
-    /// [`QueryError::LimitExceeded`]. Sort and offset return `NotImplemented`
-    /// for now, and the budget is not enforced yet. Use
-    /// [`Self::query_report`] to retain the execution context on failure.
+    /// in record ID order, projected as `get` projects: past the first
+    /// `offset` of them, the first `limit`, or with no limit the first
+    /// `max_query_limit`, while `total_matched` counts every match. The next
+    /// page's offset is this one plus the records returned; an offset past
+    /// the last match gives an empty page. A `limit` of 0 fails as
+    /// [`QueryError::InvalidQuery`], one above `max_query_limit` as
+    /// [`QueryError::LimitExceeded`]. Sort returns `NotImplemented` for now,
+    /// and the budget is not enforced yet. Use [`Self::query_report`] to
+    /// retain the execution context on failure.
     pub fn query(&self, commit: Option<CommitId>, op: QueryOp) -> Result<QueryPage> {
         self.query_report(commit, op).result
     }
@@ -86,19 +90,13 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
                     operation: "query: sort",
                 });
             }
-            if op.offset.is_some() {
-                return Err(QueryError::NotImplemented {
-                    operation: "query: offset",
-                });
-            }
             let page_size = page_size(op.limit, self.max_query_limit)?;
             let plan = Plan::admit(&op.filter, self.max_query_depth)?;
             let index = Index::new(&self.hasher);
             let matches = match_set(&IndexSource::new(&index, snapshot), plan)?;
             let cells = CellReader::new(snapshot);
             let records = matches
-                .treemap()
-                .iter()
+                .iter_skipping(op.offset.unwrap_or(0))
                 .take(page_size)
                 .map(|id| read_committed_by_id(&cells, id, op.projection.as_deref()))
                 .collect::<golemdb_record::Result<_>>()?;
@@ -111,7 +109,7 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
     }
 
     /// The size of the filter's match set at `commit` (`None` for the head),
-    /// which `max_page_size` does not cap. The budget is not enforced yet.
+    /// which `max_query_limit` does not cap. The budget is not enforced yet.
     /// Use [`Self::count_report`] to retain the execution context on failure.
     pub fn count(&self, commit: Option<CommitId>, op: CountOp) -> Result<u64> {
         self.count_report(commit, op).result
@@ -148,10 +146,10 @@ impl<S: Store, H: HashProvider> Queries<S, H> {
 }
 
 /// How many records a page holds at most: the query's `limit`, which must
-/// be at least 1 and at most `max_page_size`; with no limit, `max_page_size`;
-/// with neither, every match.
-fn page_size(limit: Option<u64>, max_page_size: Option<u32>) -> Result<usize> {
-    match (limit, max_page_size) {
+/// be at least 1 and at most `max_query_limit`; with no limit,
+/// `max_query_limit`; with neither, every match.
+fn page_size(limit: Option<u64>, max_query_limit: Option<u32>) -> Result<usize> {
+    match (limit, max_query_limit) {
         (Some(0), _) => Err(QueryError::InvalidQuery {
             reason: "`limit` must be at least 1",
         }),
@@ -211,13 +209,13 @@ mod tests {
 
     #[test]
     fn a_limit_of_zero_is_an_invalid_query() {
-        for max_page_size in [None, Some(0), Some(100)] {
+        for max_query_limit in [None, Some(0), Some(100)] {
             assert!(
                 matches!(
-                    page_size(Some(0), max_page_size),
+                    page_size(Some(0), max_query_limit),
                     Err(QueryError::InvalidQuery { .. })
                 ),
-                "{max_page_size:?}"
+                "{max_query_limit:?}"
             );
         }
     }

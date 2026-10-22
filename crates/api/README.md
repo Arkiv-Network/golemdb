@@ -553,7 +553,9 @@ levels, a hardcoded cap until it is read from genesis; a deeper one returns
 order, a hardcoded page size until it is read from genesis; `total_matched` and `count` still
 count every match. `limit(n)` returns at most `n` records: a `limit` of 0 returns
 `ApiError::InvalidQuery`, and one above the page size `ApiError::LimitExceeded`, whose `max` is
-the page size. A `Prefix` matches `str` values only. An `Exists` matches the records
+the page size. `offset(n)` starts the page past the first `n` matches, so the next page's
+offset is the previous one plus the records returned; an offset past the last match returns an
+empty page. A `Prefix` matches `str` values only. An `Exists` matches the records
 holding an attribute of its name: of its type, or, with no type, of any type. `Eq` values, `In`
 values, `Range` bounds and `Exists` types are of one indexable type by construction:
 `EqValue::of(marker::Str, "blue")`, `InValues::of(marker::U32, [1, 2])`,
@@ -563,7 +565,7 @@ types or `bytes` do not compile; `EqValue::try_from`, `InValues::try_from`,
 converts into `ApiError::InvalidArgument`). A `Range` with two unbounded sides matches every cell
 of its type.
 Queries read committed state only: `None` reads the head, and an explicit commit
-other than the head returns `ApiError::CommitUnavailable`. Sort and offset return
+other than the head returns `ApiError::CommitUnavailable`. Sort returns
 `ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost
 receipts, generated keys, OCC, and transport serialization are deferred.
 

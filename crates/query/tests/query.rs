@@ -190,24 +190,21 @@ fn pending_branch_work_is_invisible() {
     );
 }
 
+fn by_size() -> [SortKey; 1] {
+    [SortKey::asc("size", CellType::Uint(Width::W4))]
+}
+
 #[test]
-fn unbuilt_parts_are_not_implemented() {
+fn sort_is_not_implemented() {
     let test = colors();
-    let filter =
-        || QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX));
-    for (op, part) in [
-        (
-            filter().sort([SortKey::asc("size", CellType::Uint(Width::W4))]),
-            "query: sort",
-        ),
-        (filter().offset(1), "query: offset"),
-    ] {
-        let result = test.db.query(None, op).into_result();
-        assert!(
-            matches!(result, Err(ApiError::NotImplemented { operation }) if operation == part),
-            "{part}"
-        );
-    }
+    let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX)).sort(by_size());
+    let result = test.db.query(None, op).into_result();
+    assert!(matches!(
+        result,
+        Err(ApiError::NotImplemented {
+            operation: "query: sort"
+        })
+    ));
 }
 
 #[test]
@@ -262,14 +259,15 @@ fn snapshot_selection_precedes_admission() {
     assert!(matches!(count, Err(ApiError::CommitUnavailable { .. })));
 }
 
-/// `Database`'s page size, hardcoded there until it is read from genesis.
-const MAX_PAGE_SIZE: u32 = 100;
+/// `Database`'s query limit: its page size, hardcoded there until it is read
+/// from genesis.
+const MAX_QUERY_LIMIT: u32 = 100;
 
 #[test]
 fn a_page_holds_the_first_matches_up_to_the_page_size() {
     // `n` from 0 to one past the page size, created in reverse, so record ID
     // order, the query order, is descending `n`.
-    let last = MAX_PAGE_SIZE + 1;
+    let last = MAX_QUERY_LIMIT + 1;
     let test = TestDb::default();
     test.create(
         (0..=last)
@@ -294,8 +292,11 @@ fn a_page_holds_the_first_matches_up_to_the_page_size() {
 
     // Fewer matches than the page size, or as many: all of them.
     assert_eq!(page(9), (keys(9, 0), Some(10)));
-    let full = MAX_PAGE_SIZE - 1;
-    assert_eq!(page(full), (keys(full, 0), Some(u64::from(MAX_PAGE_SIZE))));
+    let full = MAX_QUERY_LIMIT - 1;
+    assert_eq!(
+        page(full),
+        (keys(full, 0), Some(u64::from(MAX_QUERY_LIMIT)))
+    );
     // More: the first ones in query order. The others are cut, yet counted.
     assert_eq!(page(last), (keys(last, 2), Some(u64::from(last) + 1)));
     assert_eq!(test.count(at_most(last)).unwrap(), u64::from(last) + 1);
@@ -317,14 +318,14 @@ fn a_limit_returns_the_first_matches_up_to_it() {
     // A limit past the matches, up to the page size, takes them all.
     let all = vec![key(1), key(3), key(4)];
     assert_eq!(page(3), (all.clone(), Some(3)));
-    assert_eq!(page(MAX_PAGE_SIZE.into()), (all, Some(3)));
+    assert_eq!(page(MAX_QUERY_LIMIT.into()), (all, Some(3)));
 }
 
 #[test]
 fn a_limit_above_the_page_size_fails_stating_the_page_size() {
     let test = colors();
     let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX))
-        .limit(u64::from(MAX_PAGE_SIZE) + 1);
+        .limit(u64::from(MAX_QUERY_LIMIT) + 1);
     let error = test
         .db
         .query(None, op)
@@ -335,14 +336,14 @@ fn a_limit_above_the_page_size_fails_stating_the_page_size() {
             &error,
             ApiError::LimitExceeded {
                 limit: "query limit",
-                max: MAX_PAGE_SIZE
+                max: MAX_QUERY_LIMIT
             }
         ),
         "{error:?}"
     );
     assert_eq!(
         error.to_string(),
-        format!("limit exceeded: query limit is capped at {MAX_PAGE_SIZE}")
+        format!("limit exceeded: query limit is capped at {MAX_QUERY_LIMIT}")
     );
 }
 
@@ -366,7 +367,7 @@ fn a_limit_of_zero_is_an_invalid_query() {
 fn the_limit_is_checked_after_unbuilt_parts_and_before_the_filter() {
     let test = colors();
     let query = |op| test.db.query(None, op).into_result();
-    let over = u64::from(MAX_PAGE_SIZE) + 1;
+    let over = u64::from(MAX_QUERY_LIMIT) + 1;
     // A bad limit is reported before a bad filter.
     let bad_filter = || QueryOp::from_filter(eq("not valid", blue()), Budget::Limited(u64::MAX));
     assert!(matches!(
@@ -380,11 +381,73 @@ fn the_limit_is_checked_after_unbuilt_parts_and_before_the_filter() {
     // An unbuilt part is reported before a bad limit.
     let filter = || QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX));
     assert!(matches!(
-        query(filter().offset(1).limit(0)),
+        query(filter().sort(by_size()).limit(0)),
         Err(ApiError::NotImplemented {
-            operation: "query: offset"
+            operation: "query: sort"
         })
     ));
+}
+
+#[test]
+fn an_offset_skips_the_first_matches() {
+    // Blue records 1, 3 and 4, in that query order.
+    let test = colors();
+    test.create([record(key(4), &[("color", blue())])]);
+    let page = |offset| {
+        let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX))
+            .offset(offset)
+            .with_total();
+        keys_and_total(test.db.query(None, op).into_result().unwrap())
+    };
+    assert_eq!(page(0), (vec![key(1), key(3), key(4)], Some(3)));
+    assert_eq!(page(1), (vec![key(3), key(4)], Some(3)));
+    assert_eq!(page(2), (vec![key(4)], Some(3)));
+    // Past the last match: an empty page, not an error.
+    for offset in [3, 4, u64::MAX] {
+        assert_eq!(page(offset), (vec![], Some(3)), "{offset}");
+    }
+}
+
+#[test]
+fn offsets_page_through_every_match() {
+    // More matches than two pages hold, created in reverse, so record ID
+    // order, the query order, is descending `n`.
+    let total = 2 * u64::from(MAX_QUERY_LIMIT) + 50;
+    let test = TestDb::default();
+    test.create(
+        (0..total)
+            .rev()
+            .map(|n| record(key(n), &[("color", blue())])),
+    );
+    let in_query_order: Vec<_> = (0..total).rev().map(key).collect();
+    let page = |offset, limit: Option<u64>| {
+        let op =
+            QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX)).offset(offset);
+        let op = QueryOp { limit, ..op };
+        keys_and_total(test.db.query(None, op).into_result().unwrap()).0
+    };
+    for (limit, size) in [
+        (None, MAX_QUERY_LIMIT as usize),
+        (Some(7), 7),
+        (Some(MAX_QUERY_LIMIT.into()), MAX_QUERY_LIMIT as usize),
+    ] {
+        // Each page's offset is the previous one plus the records returned,
+        // until a page comes back empty. One query per expected page, and one
+        // for the empty page past them: bounded, so a query that ignores its
+        // offset fails the test rather than hangs it.
+        let mut pages = Vec::new();
+        let mut offset = 0;
+        for _ in 0..=in_query_order.len().div_ceil(size) {
+            let keys = page(offset, limit);
+            if keys.is_empty() {
+                break;
+            }
+            offset += keys.len() as u64;
+            pages.push(keys);
+        }
+        let expected: Vec<_> = in_query_order.chunks(size).map(<[_]>::to_vec).collect();
+        assert_eq!(pages, expected, "{limit:?}");
+    }
 }
 
 /// A store holding five blue records, and their keys in query order: the
@@ -403,23 +466,22 @@ fn five_blue_records() -> (MemoryStore, Vec<RecordKey>) {
     (store, keys)
 }
 
-/// The page of blue records, asking for `limit`, from queries over `store`
-/// built with `max_page_size`.
+/// The page of blue records `paging` asks for, from queries over `store`
+/// built with `max_query_limit`.
 fn blue_page(
     store: &MemoryStore,
-    max_page_size: Option<u32>,
-    limit: Option<u64>,
+    max_query_limit: Option<u32>,
+    paging: impl FnOnce(QueryOp) -> QueryOp,
 ) -> golemdb_query::Result<(Vec<RecordKey>, Option<u64>)> {
-    let queries = Queries::new(store.clone(), Keccak256Hasher, None, max_page_size);
+    let queries = Queries::new(store.clone(), Keccak256Hasher, None, max_query_limit);
     let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX)).with_total();
-    let op = QueryOp { limit, ..op };
-    queries.query(None, op).map(keys_and_total)
+    queries.query(None, paging(op)).map(keys_and_total)
 }
 
 #[test]
 fn the_page_size_is_set_when_queries_are_built() {
     let (store, keys) = five_blue_records();
-    let page = |max_page_size| blue_page(&store, max_page_size, None).unwrap();
+    let page = |max_query_limit| blue_page(&store, max_query_limit, |op| op).unwrap();
     // With no cap, every match.
     assert_eq!(page(None), (keys.clone(), Some(5)));
     assert_eq!(page(Some(5)), (keys.clone(), Some(5)));
@@ -435,7 +497,7 @@ fn the_page_size_is_set_when_queries_are_built() {
 #[test]
 fn a_limit_holds_up_to_the_page_size_of_its_queries() {
     let (store, keys) = five_blue_records();
-    let page = |max_page_size, limit| blue_page(&store, max_page_size, Some(limit));
+    let page = |max_query_limit, limit| blue_page(&store, max_query_limit, |op| op.limit(limit));
     assert_eq!(page(Some(3), 2).unwrap(), (keys[..2].to_vec(), Some(5)));
     assert_eq!(page(Some(3), 3).unwrap(), (keys[..3].to_vec(), Some(5)));
     assert_eq!(page(Some(10), 8).unwrap(), (keys.clone(), Some(5)));
@@ -456,12 +518,42 @@ fn a_limit_holds_up_to_the_page_size_of_its_queries() {
         );
     }
     // A limit of 0 never holds.
-    for max_page_size in [None, Some(3)] {
+    for max_query_limit in [None, Some(3)] {
         assert!(
-            matches!(page(max_page_size, 0), Err(QueryError::InvalidQuery { .. })),
-            "{max_page_size:?}"
+            matches!(
+                page(max_query_limit, 0),
+                Err(QueryError::InvalidQuery { .. })
+            ),
+            "{max_query_limit:?}"
         );
     }
+}
+
+#[test]
+fn an_offset_starts_the_page_of_its_queries() {
+    let (store, keys) = five_blue_records();
+    let page = |max_query_limit, paging: fn(QueryOp) -> QueryOp| {
+        blue_page(&store, max_query_limit, paging)
+    };
+    // With no page size, the page holds every match past the offset.
+    assert_eq!(
+        page(None, |op| op.offset(2)).unwrap(),
+        (keys[2..].to_vec(), Some(5))
+    );
+    // With one, it holds up to the page size, or up to the limit.
+    assert_eq!(
+        page(Some(3), |op| op.offset(1)).unwrap(),
+        (keys[1..4].to_vec(), Some(5))
+    );
+    assert_eq!(
+        page(Some(3), |op| op.offset(4)).unwrap(),
+        (keys[4..].to_vec(), Some(5))
+    );
+    assert_eq!(
+        page(Some(3), |op| op.offset(1).limit(2)).unwrap(),
+        (keys[1..3].to_vec(), Some(5))
+    );
+    assert_eq!(page(Some(3), |op| op.offset(5)).unwrap(), (vec![], Some(5)));
 }
 
 #[test]

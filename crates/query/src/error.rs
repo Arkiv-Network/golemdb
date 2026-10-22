@@ -25,7 +25,7 @@ pub enum QueryError {
     /// The request exceeds a cap, named by `limit`, whose value is `max`: a
     /// filter nested deeper than the `max_query_depth` of its
     /// [`Queries`](crate::Queries) (`"filter depth"`), or a `limit` above its
-    /// `max_page_size` (`"query limit"`). Raised at admission, before index
+    /// `max_query_limit` (`"query limit"`). Raised at admission, before index
     /// or record reads.
     #[error("limit exceeded: {limit} is capped at {max}")]
     LimitExceeded { limit: &'static str, max: u32 },

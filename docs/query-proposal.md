@@ -231,7 +231,7 @@ The written order of the tree is the execution order. Cost and stopping point ar
    same record. Without `limit` or `max_bytes`, the caps `#maxQueryLimit` and `#maxQueryBytes` are
    the defaults. A `limit` of 0 is `InvalidQuery`, and one above `#maxQueryLimit` is
    `LimitExceeded`, naming the cap. The next page's `offset` is the previous one plus the records
-   returned.
+   returned; an `offset` past the last match gives an empty page.
 10. **Materialize** the projection for the page's records only, in page order, as point reads. A
     full record's size is known from its `#meta` before its cells are read, so a record that does
     not fit is not read; with a projection, its size is known only after the reads, which are

@@ -379,9 +379,10 @@ fn query_count_and_unavailable_history_report_the_selected_head() {
             invalid.result,
             Err(ApiError::InvalidArgument { .. })
         ));
+        let by_age = SortKey::asc("age", CellType::Int(Width::W4));
         let unsupported = db.query(
             None,
-            QueryOp::from_filter(filter("color"), BUDGET).offset(1),
+            QueryOp::from_filter(filter("color"), BUDGET).sort([by_age]),
         );
         unchanged(&unsupported, Some(head));
         assert!(matches!(
