@@ -483,7 +483,7 @@ normative.
 
 - `create` writes it; `patch` writes it only when a count changes; `delete` removes it.
   `#meta` and the receipt's details come from the same computed effects.
-- **Reading:** a full `get` returns `#meta`; so does `RecordOp::get(key).only(["#meta"])`.
+- **Reading:** a full `get` returns `#meta`; so does `RecordOp::get(key, budget).only(["#meta"])`.
   `Record::meta()` decodes it, returning `None` if the read did not include it.
 - A user record without `#meta`, or a count that would fall below zero, is reported as
   corrupt state (`Internal`), never repaired.
@@ -508,18 +508,17 @@ pub mod op { pub enum Create {} pub enum Patch {} pub enum Get {} pub enum Delet
 
 | Constructor | Methods | Notes |
 | --- | --- | --- |
-| `RecordOp::create()` | `.key(k)`, `.attribute(n, v)`, `.field(n, v)` | key per key mode |
-| `RecordOp::patch(k)` | `.attribute(n, v)`, `.field(n, v)`, `.remove(n)`; agreed: `.set(n, v)` | `set` keeps the stored kind ([Agreed changes](#agreed-changes-not-yet-implemented)) |
-| `RecordOp::get(k)` | `.only(names)` | default: all cells |
-| `RecordOp::delete(k)` | – | |
-| all | `.budget(max_cost: u64)` | stored, not enforced |
+| `RecordOp::create(budget)` | `.key(k)`, `.attribute(n, v)`, `.field(n, v)` | key per key mode |
+| `RecordOp::patch(k, budget)` | `.attribute(n, v)`, `.field(n, v)`, `.remove(n)`; agreed: `.set(n, v)` | `set` keeps the stored kind ([Agreed changes](#agreed-changes-not-yet-implemented)) |
+| `RecordOp::get(k, budget)` | `.only(names)` | default: all cells |
+| `RecordOp::delete(k, budget)` | – | |
 
 Inspection, for mocks, adapters and policy wrappers that receive an operation:
 
 | Accessor | On | Returns |
 | --- | --- | --- |
 | `record_key() -> Option<RecordKey>` | all | the key; `None` only for a create without `.key` |
-| `max_cost() -> Option<u64>` | all | the budget given, if any |
+| `budget() -> Budget` | all | the budget given at construction |
 | `validate() -> Result<(), ApiError>` | all | the first builder error, if any |
 | `value(name) -> Option<&CellValue>` | create, patch | the value this operation writes to `name` |
 | `removes(name) -> bool` | patch | whether this patch removes `name` |
@@ -573,7 +572,7 @@ and `feature/golem-db-api` deviate today: they check reserved keys before the ha
 
 ### `create`
 
-`create(branch, RecordOp::create()…) -> Metered<RecordKey>`
+`create(branch, RecordOp::create(budget)…) -> Metered<RecordKey>`
 
 Order of checks ([three stages](#order-of-checks)); the first failure is returned and nothing
 is written:
@@ -595,7 +594,7 @@ as one atomic branch operation, and returns the key.
 
 ### `get`
 
-`get(target, RecordOp::get(key)…) -> Metered<Record>`
+`get(target, RecordOp::get(key, budget)…) -> Metered<Record>`
 
 ```rust
 pub enum ReadTarget { Head, Branch(BranchId), Commit(CommitId) }
@@ -618,7 +617,7 @@ read reports corrupt state.
 
 ### `patch`
 
-`patch(branch, RecordOp::patch(key)…) -> Metered<()>`
+`patch(branch, RecordOp::patch(key, budget)…) -> Metered<()>`
 
 Order of checks ([three stages](#order-of-checks)):
 
@@ -646,7 +645,7 @@ operation.
 
 ### `delete`
 
-`delete(branch, RecordOp::delete(key)) -> Metered<()>`
+`delete(branch, RecordOp::delete(key, budget)) -> Metered<()>`
 
 Order of checks: handle → `HandleInvalid` / `Sealed`; reserved key → `Reserved`; key not bound
 → `NotFound`.
@@ -713,7 +712,8 @@ reads report all zeros. Details are always present; metering R9 allows a transpo
 them opt-in. "Index terms created" is not reported yet: it needs the index-term reads that
 come with metering (metering D2 step 4).
 
-**Budget.** `RecordOp::budget(n)` is accepted and stored but not enforced. `OutOfBudget`
+**Budget.** `feature/golem-db-api`'s `RecordOp` has no budget yet; it becomes a constructor
+argument ([Explicit budgets](#agreed-changes-not-yet-implemented)), not enforced at first. `OutOfBudget`
 exists and is never returned yet; when it is, the amount spent is the receipt's `cost`, and the
 error carries `required` ([Agreed changes](#agreed-changes-not-yet-implemented)).
 
@@ -851,8 +851,11 @@ pub enum Budget { Limited(u64), Unlimited }
 ```
 
 `Unlimited` must be stated, never implied by omission; it is for host-authorized estimation
-(metering D8). How a `RecordOp` receives its budget, for example as a constructor argument, is
-open. Today `.budget(n)` is optional and unenforced.
+(metering D8). Every operation takes it as a constructor argument: `RecordOp::get(k, budget)`,
+`QueryOp::filter(f, budget)`, `CountOp::filter(f, budget)`, so an operation without a budget does
+not compile. The budget is part of the request: the immutable-data calls, which have no operation
+type, take it as an argument; an `ImmutableDataOp`, should those calls gain optional parts, would
+take it in its constructor like the others.
 
 **`priced_at` from the head.** A committed read prices against the head's schedule, also when
 it fails ([Receipts](#receipts)). The experiment reports `priced_at = c` when `get(Commit(c))`
@@ -978,7 +981,7 @@ Queries run against **committed state only**, never against a branch.
 ```
 query = {
     projection? : [cell name]
-    filter      : ordered DNF: OR of AND-groups, negated literals allowed
+    filter      : tree of And / Or / Not nodes over typed leaves, evaluated as written
     sort?       : [ (name, type, direction) ]      ordered list of terms
     page        : { limit, offset? }
 }
@@ -989,18 +992,23 @@ at, a cursor for the next page, and a receipt.
 
 #### Filtering
 
-The `filter` is an **ordered** DNF, and the database never reorders it:
+The `filter` is a **tree** of `And`, `Or` and `Not` nodes over typed leaves. The written tree is
+the plan, and the database never reorders it: nodes evaluate depth-first, children left to
+right, so a condition shared by several branches is written, and read, once.
 
-- **AND-order:** predicates intersect in submitted order, carrying a running intermediate; a group
-  stops early when that intermediate is empty. This is the caller's main optimization lever.
-- **OR-order:** groups evaluate in submitted order and union. The order is pinned so that the
-  abort point, and so `OutOfBudget`, is deterministic.
+- **`And`:** children intersect in written order, carrying a running set; the node stops early
+  when that set is empty, and its remaining children are not read. This is the caller's main
+  optimization lever. A `Not` child subtracts from the running set; a standalone `Not`, or one
+  under an `Or`, needs the set of all live records and waits on product decision
+  [P08](CHANGES.md).
+- **`Or`:** children evaluate in written order and union, with no early exit. The order is pinned
+  so that the abort point, and so `OutOfBudget`, is deterministic.
 - **Early exit applies to unsorted queries only.** A sorted query costs O(N) whatever page was
   asked for. An unsorted query may stop once `offset + limit` records are collected, unless
   `total_matched` is required.
-- A record matching several groups is returned **once**.
+- A record matching several children of an `Or` is returned **once**.
 - **Predicates are typed:** a cell of another type under the same name is treated as absent.
-- `LimitExceeded` caps the group count, predicates per group and nesting.
+- `LimitExceeded` caps the nesting depth.
 
 **The database performs no statistics-based planning**: work is a pure function of
 `(state, ordered filter, page)`, and query optimization is the caller's job. So the _outcome_
@@ -1080,7 +1088,7 @@ Two normative rules for implementations that keep a warm sequence:
 | Input | Meaning |
 | --- | --- |
 | `at?` | `CommitId`; absent = the current head; must lie within retention |
-| `filter` | ordered DNF, as in `query` |
+| `filter` | a filter tree, as in `query` |
 | `budget` | `Limited(u64)` or host-authorized `Unlimited` |
 
 **Output:** a `u64` count and a receipt.
@@ -1194,7 +1202,7 @@ rules, not who may call the API.
 | Error | Raised when |
 | --- | --- |
 | `InvalidQuery` | a predicate the type's index class does not support, or a cursor whose fingerprint does not match |
-| `LimitExceeded` | a filter exceeds the caps: group count, predicates per group, nesting |
+| `LimitExceeded` | a filter nests deeper than its depth cap |
 | `Pruned` | an immutable-data ordinal existed but is beyond the retention window; a pruned key gives `NotFound` |
 
 ### Open items

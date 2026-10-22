@@ -1,9 +1,11 @@
 //! Plan evaluation over any [`PostingSource`]. Pure; reads only through the
 //! source, so it is testable without storage.
 
+use std::iter;
+
 use golemdb_index::Bitmap;
 
-use crate::{Result, plan::Plan, posting_source::PostingSource};
+use crate::{QueryError, Result, plan::Plan, posting_source::PostingSource};
 
 /// The match set of an admitted filter: the IDs of every matching record,
 /// ascending. Consumes the plan. Fails only when the source does.
@@ -13,13 +15,44 @@ pub(crate) fn match_set(source: &impl PostingSource, plan: Plan) -> Result<Bitma
         Plan::TermReads(terms) => union(terms.iter().map(|term| source.postings(term))),
         Plan::Scan(range) => union(source.scan(range)?),
         Plan::Empty => Ok(Bitmap::default()),
+        Plan::And { first, rest } => intersection(
+            iter::once(*first)
+                .chain(rest)
+                .map(|child| match_set(source, child)),
+        ),
+        Plan::Or { first, rest } => union(
+            iter::once(*first)
+                .chain(rest)
+                .map(|child| match_set(source, child)),
+        ),
     }
 }
 
-/// The union of `postings`, read one after another in the order given.
-fn union(mut postings: impl Iterator<Item = golemdb_index::Result<Bitmap>>) -> Result<Bitmap> {
-    postings.try_fold(Bitmap::default(), |mut union, postings| {
-        union |= postings?;
+/// The intersection of `sets`, taken one after another in the order given:
+/// an `And`'s children as they are evaluated. Once the running set is
+/// empty, the remaining sets are not pulled: nothing of theirs is read. No
+/// sets at all intersect to the empty set; an `And` always has one.
+fn intersection<E>(mut sets: impl Iterator<Item = std::result::Result<Bitmap, E>>) -> Result<Bitmap>
+where
+    QueryError: From<E>,
+{
+    let mut running = sets.next().transpose()?.unwrap_or_default();
+    while !running.treemap().is_empty() {
+        let Some(set) = sets.next() else { break };
+        running &= set?;
+    }
+    Ok(running)
+}
+
+/// The union of `sets`, taken one after another in the order given: a
+/// leaf's postings as they are read, or an `Or`'s children as they are
+/// evaluated.
+fn union<E>(mut sets: impl Iterator<Item = std::result::Result<Bitmap, E>>) -> Result<Bitmap>
+where
+    QueryError: From<E>,
+{
+    sets.try_fold(Bitmap::default(), |mut union, set| {
+        union |= set?;
         Ok(union)
     })
 }
@@ -225,7 +258,7 @@ mod tests {
 
     /// Admission, then evaluation: the sequence `query` and `count` follow.
     fn evaluate(source: &impl PostingSource, filter: &Filter) -> Result<Bitmap> {
-        match_set(source, Plan::try_from(filter)?)
+        match_set(source, Plan::admit(filter, None)?)
     }
 
     fn ids(source: &FakeSource, filter: Filter) -> Vec<u64> {
@@ -624,6 +657,206 @@ mod tests {
             };
             let result = evaluate(&source, &filter);
             assert!(is_injected_failure(&result), "{good}: {result:?}");
+        }
+    }
+
+    fn and(children: impl IntoIterator<Item = Filter>) -> Filter {
+        Filter::And(children.into_iter().collect())
+    }
+
+    fn or(children: impl IntoIterator<Item = Filter>) -> Filter {
+        Filter::Or(children.into_iter().collect())
+    }
+
+    /// `field = n`, a `u32`.
+    fn is(field: &str, n: u32) -> Filter {
+        eq(field, CellValue::from_u32(n))
+    }
+
+    /// The term `field = n` is indexed under, a `u32`.
+    fn term_of(field: &str, n: u32) -> IndexTerm {
+        IndexTerm::from_str_name(field, CellValue::from_u32(n).as_view()).expect("valid term")
+    }
+
+    /// A source with `field = 1` indexed for `ids`, per field.
+    fn source_of<'a>(fields: impl IntoIterator<Item = (&'a str, &'a [u64])>) -> RecordingSource {
+        let inner = fields
+            .into_iter()
+            .fold(FakeSource::default(), |source, (field, ids)| {
+                source.with(field, CellValue::from_u32(1), ids.iter().copied())
+            });
+        RecordingSource {
+            inner,
+            reads: RefCell::default(),
+        }
+    }
+
+    fn matches(source: &RecordingSource, filter: &Filter) -> Vec<u64> {
+        evaluate(source, filter)
+            .expect("filter evaluates")
+            .treemap()
+            .iter()
+            .collect()
+    }
+
+    #[test]
+    fn and_matches_the_records_every_child_matches() {
+        let source = source_of([
+            ("a", &[1, 2, 3, 1 << 40][..]),
+            ("b", &[2, 3, 4, 1 << 40]),
+            ("c", &[3, 5, 1 << 40]),
+        ]);
+        assert_eq!(
+            matches(&source, &and([is("a", 1), is("b", 1)])),
+            [2, 3, 1 << 40]
+        );
+        assert_eq!(
+            matches(&source, &and([is("a", 1), is("b", 1), is("c", 1)])),
+            [3, 1 << 40]
+        );
+        assert_eq!(matches(&source, &and([is("a", 1)])), [1, 2, 3, 1 << 40]);
+        assert!(matches(&source, &and([is("a", 1), is("a", 2)])).is_empty());
+    }
+
+    #[test]
+    fn or_matches_the_records_some_child_matches() {
+        let source = source_of([("a", &[1, 1 << 40][..]), ("b", &[2, 1 << 40])]);
+        assert_eq!(
+            matches(&source, &or([is("a", 1), is("b", 1)])),
+            [1, 2, 1 << 40]
+        );
+        assert_eq!(
+            matches(&source, &or([is("a", 2), is("b", 1)])),
+            [2, 1 << 40]
+        );
+        assert_eq!(matches(&source, &or([is("b", 1)])), [2, 1 << 40]);
+        assert!(matches(&source, &or([is("a", 2), is("c", 1)])).is_empty());
+    }
+
+    #[test]
+    fn nodes_combine_as_written() {
+        let source = source_of([("a", &[1, 2][..]), ("b", &[3]), ("c", &[2, 3, 4])]);
+        // (a ∨ b) ∧ c, and a ∨ (b ∧ c).
+        assert_eq!(
+            matches(&source, &and([or([is("a", 1), is("b", 1)]), is("c", 1)])),
+            [2, 3]
+        );
+        assert_eq!(
+            matches(&source, &or([is("a", 1), and([is("b", 1), is("c", 1)])])),
+            [1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn and_stops_reading_once_no_record_is_left() {
+        let source = source_of([("a", &[1][..]), ("b", &[2]), ("c", &[1, 2])]);
+        // a ∩ b is empty: c is skipped.
+        assert!(matches(&source, &and([is("a", 1), is("b", 1), is("c", 1)])).is_empty());
+        assert_eq!(*source.reads.borrow(), [term_of("a", 1), term_of("b", 1)]);
+
+        // An absent first term: nothing else is read.
+        source.reads.borrow_mut().clear();
+        assert!(matches(&source, &and([is("a", 9), is("c", 1), is("b", 1)])).is_empty());
+        assert_eq!(*source.reads.borrow(), [term_of("a", 9)]);
+
+        // A first leaf that admits no value reads nothing at all.
+        source.reads.borrow_mut().clear();
+        assert!(matches(&source, &and([is_in("a", []), is("c", 1)])).is_empty());
+        assert!(source.reads.borrow().is_empty());
+    }
+
+    #[test]
+    fn and_reads_every_child_while_records_are_left() {
+        let source = source_of([("a", &[1, 2][..]), ("b", &[2]), ("c", &[2, 3])]);
+        assert_eq!(
+            matches(&source, &and([is("a", 1), is("b", 1), is("c", 1)])),
+            [2]
+        );
+        assert_eq!(
+            *source.reads.borrow(),
+            [term_of("a", 1), term_of("b", 1), term_of("c", 1)]
+        );
+    }
+
+    #[test]
+    fn or_reads_every_child_in_the_written_order() {
+        let source = source_of([("a", &[1][..]), ("b", &[2])]);
+        assert_eq!(
+            matches(&source, &or([is("b", 9), is("a", 1), is("b", 1)])),
+            [1, 2]
+        );
+        assert_eq!(
+            *source.reads.borrow(),
+            [term_of("b", 9), term_of("a", 1), term_of("b", 1)]
+        );
+    }
+
+    #[test]
+    fn a_shared_condition_is_read_once() {
+        // (a ∨ b) ∧ c reads c a single time.
+        let source = source_of([("a", &[1][..]), ("b", &[2]), ("c", &[1, 2])]);
+        let filter = and([or([is("a", 1), is("b", 1)]), is("c", 1)]);
+        assert_eq!(matches(&source, &filter), [1, 2]);
+        assert_eq!(
+            *source.reads.borrow(),
+            [term_of("a", 1), term_of("b", 1), term_of("c", 1)]
+        );
+    }
+
+    #[test]
+    fn nested_nodes_read_depth_first_left_to_right() {
+        let source = source_of([("a", &[1][..]), ("b", &[1]), ("c", &[2]), ("d", &[2])]);
+        let filter = or([and([is("a", 1), is("b", 1)]), and([is("c", 1), is("d", 1)])]);
+        assert_eq!(matches(&source, &filter), [1, 2]);
+        assert_eq!(
+            *source.reads.borrow(),
+            [
+                term_of("a", 1),
+                term_of("b", 1),
+                term_of("c", 1),
+                term_of("d", 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_trees_are_rejected_before_reading() {
+        // FailingSource would surface as QueryError::Internal if it were consulted.
+        for filter in [
+            and([]),
+            or([]),
+            and([is("a", 1), or([is("b", 1), and([])])]),
+        ] {
+            assert!(
+                matches!(
+                    evaluate(&FailingSource, &filter),
+                    Err(QueryError::InvalidQuery { .. })
+                ),
+                "{filter:?}"
+            );
+        }
+        let filter = or([is("a", 1), and([is("b", 1), is("1bad", 1)])]);
+        assert!(matches!(
+            evaluate(&FailingSource, &filter),
+            Err(QueryError::InvalidArgument { field, .. }) if field == name(b"1bad")
+        ));
+    }
+
+    #[test]
+    fn a_failing_child_fails_the_node() {
+        // The first child reads; the second, a scan, fails at its first term.
+        let source = FailingMidScan {
+            inner: FakeSource::default().with("a", CellValue::from_u32(1), [1]),
+            good: 0,
+        };
+        let scan = i32s(Bound::Unbounded, Bound::Included(i32::MAX));
+        for filter in [and([is("a", 1), scan.clone()]), or([is("a", 1), scan])] {
+            let result = evaluate(&source, &filter);
+            assert!(is_injected_failure(&result), "{filter:?}: {result:?}");
+        }
+        for filter in [and([is("a", 1)]), or([is("a", 1)])] {
+            let result = evaluate(&FailingSource, &filter);
+            assert!(is_injected_failure(&result), "{filter:?}: {result:?}");
         }
     }
 }

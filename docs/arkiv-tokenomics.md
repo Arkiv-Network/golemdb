@@ -247,7 +247,7 @@ storage_units = cell_bytes × cell_byte_units + index_bytes × index_byte_units
 ```
 
 All four counts come from `#meta`. `c_cell` and `c_idx` are per-entry overheads in
-bytes-equivalent: keys, trie leaves, posting-list containers, so many small cells are priced
+bytes-equivalent: keys, trie leaves, bitmap containers, so many small cells are priced
 correctly. Cell bytes and index bytes have their own factor, both 1 at first: one more weight
 costs little, and if measurements show that an index byte costs nodes more than a cell byte,
 the ratio changes without a code change. Weights are integers, so a ratio that is not a whole
@@ -443,26 +443,33 @@ Why outside the user gas limit, and why fixed:
   the gas limit would load nodes the same. Outside keeps the user gas limit, the base fee target
   and `eth_feeHistory` meaning what users expect.
 
-**Purge order: a cursor on the expiry index.** `purge_cursor`, a cell of the `arkiv_state` record, holds the oldest
-expiry block not yet fully purged. Each block:
+**Purge order: a cursor on the expiry index.** `purge_cursor`, a cell of the `arkiv_state` record,
+holds the oldest expiry block not yet fully purged. The purge runs first in the block, so the
+block's branch still equals the parent block's committed state, and the purge selects from that
+state. Each block:
 
-1. Take the first entity with `$expiresAt = purge_cursor`, in record-ID order, and delete it with
-   the remaining budget as its GolemDB budget. If the delete returns `OutOfBudget`, the purge
-   stops for this block; the work spent counts against the budget, and the entity is first in
-   line next block.
-2. Repeat while budget remains. If that block's term is empty, advance the cursor and continue,
-   up to the current block.
+1. Query the parent's committed state for `$expiresAt = purge_cursor`, in record-ID order, with
+   an empty projection, which returns each entity's key, and a limit. The query is charged
+   against `purge_budget` like any read (metering D6).
+2. Delete the entities found, in that order, each with the remaining budget as its GolemDB budget.
+   If a delete returns `OutOfBudget`, the purge stops for this block; the work spent counts against
+   the budget, and the entities not yet deleted are first in line next block.
+3. If every entity of that expiry block is deleted and budget remains, advance the cursor to the
+   next expiry block and repeat from step 1, up to the current block.
 
 The purge stops at the first entity that does not fit rather than skipping it, so the order stays
 fixed. `purge_budget` must therefore be at least the largest possible deletion cost, the D5 bound
 of a record at the caps `#maxRecordCells` and `#maxRecordIndexedCells` and the maximum modeled
-trie depth; otherwise such a record
-would block the purge for good.
+trie depth; otherwise such a record would block the purge for good.
 
-Every delete removes the entity from the `$expiresAt` bitmap index at the cursor, so the next
-query starts from the front again: no position within a term is needed. Entities expiring in the
-current block join the backlog by being the term the cursor reaches next; extends and owner
-deletes move or remove an entity from its term and need no backlog bookkeeping. After a quiet
+**Each expiry block is read once per block.** Queries read committed state only, and the index
+reflects a branch's deletes only once the branch is committed: its changes are applied at seal.
+Within one block, a second query of the same expiry block would still return the entities just
+deleted, so the purge reads each expiry block once and works through that list. The deletes become
+visible in the index when the block commits, and the next block's query at the cursor returns the
+entities still left: no position within a term is needed. Entities expiring in the current block
+join the backlog by being the term the cursor reaches next; extends and owner deletes move or
+remove an entity from its term in committed state and need no backlog bookkeeping. After a quiet
 stretch, the cursor steps through empty terms, each a cheap read of an absent term counted
 against the budget, so catching up takes a few blocks.
 
