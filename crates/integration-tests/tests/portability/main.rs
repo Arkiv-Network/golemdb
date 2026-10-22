@@ -125,23 +125,28 @@ fn write_commit(db: &Database, commit: u64) -> Result<Head> {
         } else {
             (id % SHORT_BYTES_LEN) as usize
         };
-        let record = RecordOp::create(key(id))
-            .attribute("price", CellValue::from_i64(PRICE_FACTOR * id as i64))?
-            .attribute("ratio", CellValue::from_f64(id as f64 / RATIO_DIVISOR)?)?
-            .attribute(TITLE, CellValue::from_str(&format!("{id:0>title_len$}")))?
-            .field("blob", CellValue::from_bytes(&vec![id as u8; blob_len]))?;
-        db.create(branch, record)?;
+        let record = RecordOp::create(key(id), golemdb_api::Budget::Limited(u64::MAX))
+            .attribute("price", CellValue::from_i64(PRICE_FACTOR * id as i64))
+            .attribute("ratio", CellValue::from_f64(id as f64 / RATIO_DIVISOR)?)
+            .attribute(TITLE, CellValue::from_str(&format!("{id:0>title_len$}")))
+            .field("blob", CellValue::from_bytes(&vec![id as u8; blob_len]));
+        db.create(branch, record).into_result()?;
     }
     if commit > 1 {
         for id in ids(commit - 1) {
             match id % PATCH_DELETE_PERIOD {
                 0 => {
-                    let patch = RecordOp::patch(key(id))
-                        .attribute("price", CellValue::from_i64(id as i64))?
-                        .remove(TITLE)?;
-                    db.patch(branch, patch)?;
+                    let patch = RecordOp::patch(key(id), golemdb_api::Budget::Limited(u64::MAX))
+                        .attribute("price", CellValue::from_i64(id as i64))
+                        .remove(TITLE);
+                    db.patch(branch, patch).into_result()?;
                 }
-                1 => db.delete(branch, RecordOp::delete(key(id)))?,
+                1 => db
+                    .delete(
+                        branch,
+                        RecordOp::delete(key(id), golemdb_api::Budget::Limited(u64::MAX)),
+                    )
+                    .into_result()?,
                 _ => {}
             }
         }
@@ -165,7 +170,13 @@ fn contents(db: &Database, commit: u64) -> Result<u64> {
     const OFFSET_BASIS: u64 = 0xCBF2_9CE4_8422_2325;
     let mut hash = OFFSET_BASIS;
     for id in 0..commit * RECORDS_PER_COMMIT {
-        match db.get(ReadTarget::Head, RecordOp::get(key(id))) {
+        match db
+            .get(
+                ReadTarget::Head,
+                RecordOp::get(key(id), golemdb_api::Budget::Limited(u64::MAX)),
+            )
+            .into_result()
+        {
             Ok(record) => {
                 for (name, value) in &record.cells {
                     for part in [name.as_bytes(), value.encoded_bytes()] {

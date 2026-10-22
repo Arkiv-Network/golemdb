@@ -4,12 +4,20 @@ use golemdb_branch::{BranchError, CommitId, OperationError};
 pub enum RecordError {
     #[error("record not found")]
     NotFound,
+    #[error("cell {name} not found")]
+    CellNotFound { name: golemdb_cells::CellName },
     #[error("record key already exists")]
     AlreadyExists,
     #[error("reserved records cannot be modified through CRUD")]
     Reserved,
-    #[error("invalid argument: {0}")]
-    InvalidArgument(String),
+    #[error("invalid argument: {message}")]
+    InvalidInput {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+    #[error("record effect count overflow")]
+    AccountingOverflow,
     #[error("missing or inconsistent initialized record state: {0}")]
     CorruptState(&'static str),
     #[error("record ID space exhausted")]

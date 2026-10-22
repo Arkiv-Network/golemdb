@@ -139,9 +139,8 @@ fn only_attributes_are_indexed() {
     let blue = CellValue::from_str("blue");
     test.create([
         record(key(1), &[("color", blue.clone())]),
-        RecordOp::create(key(2))
-            .field("color", blue.clone())
-            .expect("valid field"),
+        RecordOp::create(key(2), golemdb_api::Budget::Limited(u64::MAX))
+            .field("color", blue.clone()),
     ]);
     assert_eq!(test.keys(eq("color", blue)).unwrap(), [key(1)]);
 }
@@ -157,15 +156,25 @@ fn patched_and_deleted_records_stop_matching() {
     test.db
         .patch(
             branch,
-            RecordOp::patch(key(2))
-                .attribute("color", red.clone())
-                .unwrap(),
+            RecordOp::patch(key(2), golemdb_api::Budget::Limited(u64::MAX))
+                .attribute("color", red.clone()),
         )
+        .into_result()
         .unwrap();
     test.db
-        .patch(branch, RecordOp::patch(key(3)).remove("color").unwrap())
+        .patch(
+            branch,
+            RecordOp::patch(key(3), golemdb_api::Budget::Limited(u64::MAX)).remove("color"),
+        )
+        .into_result()
         .unwrap();
-    test.db.delete(branch, RecordOp::delete(key(4))).unwrap();
+    test.db
+        .delete(
+            branch,
+            RecordOp::delete(key(4), golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
+        .unwrap();
     test.db.commit(branch).unwrap();
 
     assert_eq!(test.keys(eq("color", blue)).unwrap(), [key(1)]);

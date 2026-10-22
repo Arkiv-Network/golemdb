@@ -221,8 +221,18 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
         branch_id: BranchId,
         operation: impl FnOnce(&CellRead<'_, S::Read<'_>>) -> std::result::Result<T, E>,
     ) -> std::result::Result<T, OperationError<E>> {
+        self.read_with_origin(branch_id, |_, reader| operation(reader))
+    }
+
+    /// Read with the origin selected by the same branch validation.
+    pub fn read_with_origin<T, E>(
+        &self,
+        branch_id: BranchId,
+        operation: impl FnOnce(CommitId, &CellRead<'_, S::Read<'_>>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, OperationError<E>> {
         self.with_branch(branch_id, |state, origin| {
-            operation(&CellRead::new(&state.overlay, origin)).map_err(OperationError::Operation)
+            operation(state.commit_id, &CellRead::new(&state.overlay, origin))
+                .map_err(OperationError::Operation)
         })
         .map_err(OperationError::Branch)?
     }
@@ -244,11 +254,20 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
         branch_id: BranchId,
         operation: impl FnOnce(&mut CellWrite<'_, S::Read<'_>>) -> std::result::Result<T, E>,
     ) -> std::result::Result<T, OperationError<E>> {
+        self.write_with_origin(branch_id, |_, writer| operation(writer))
+    }
+
+    /// Atomic write with its validated origin; rejected handles never run the callback.
+    pub fn write_with_origin<T, E>(
+        &self,
+        branch_id: BranchId,
+        operation: impl FnOnce(CommitId, &mut CellWrite<'_, S::Read<'_>>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, OperationError<E>> {
         self.with_branch(branch_id, |state, origin| {
             state.require_open().map_err(OperationError::Branch)?;
             state
                 .overlay
-                .write(origin, operation)
+                .write(origin, |writer| operation(state.commit_id, writer))
                 .map_err(OperationError::Operation)
         })
         .map_err(OperationError::Branch)?

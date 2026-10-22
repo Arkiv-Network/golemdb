@@ -6,7 +6,10 @@ use golemdb_record::RecordError;
 
 #[test]
 fn api_errors_preserve_diagnostic_sources() {
-    let invalid = ApiError::from(RecordError::InvalidArgument("deployment limit".into()));
+    let invalid = ApiError::from(RecordError::InvalidInput {
+        message: "deployment limit".into(),
+        source: None,
+    });
     assert_eq!(invalid.to_string(), "invalid argument: deployment limit");
     assert!(invalid.source().is_none());
     let error = ApiError::from(BranchError::Storage(

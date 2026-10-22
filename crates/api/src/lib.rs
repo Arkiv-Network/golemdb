@@ -6,8 +6,8 @@
 //!
 //! [`Database`] implements Api on a cloneable handle with a shared branch registry.
 //! Its constructors initialize or validate genesis and select the configured hash.
-//! These contracts are unmetered: no receipt, debug flag, or record version. Queries
-//! take a budget, which is not enforced yet.
+//! CRUD, query and count return [`Metered`] results on success and failure.
+//! Budgets are explicit but not enforced yet; receipt costs remain zero.
 //! Current record storage supports branch reads and committed-head reads only.
 //! Immutable rows are staged on branches and read from committed storage, with
 //! named column projections and native typed access.
@@ -24,14 +24,14 @@
 //! let db = Database::open_memory(&config.genesis)?;
 //! let branch = db.begin()?;
 //! let key = RecordKey([0x42; 32]);
-//! db.create(branch, RecordOp::create(key)
-//!     .attribute("price", CellValue::from_i32(50))?
-//!     .field("description", CellValue::from_str("A product"))?)?;
-//! let pending = db.clone().get(ReadTarget::Branch(branch), RecordOp::get(key))?;
+//! db.create(branch, RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+//!     .attribute("price", CellValue::from_i32(50))
+//!     .field("description", CellValue::from_str("A product"))).into_result()?;
+//! let pending = db.clone().get(ReadTarget::Branch(branch), RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 //! assert_eq!(pending.cells[b"price".as_slice()].as_i32(), Some(50));
 //! let commit = db.commit(branch)?;
 //! assert_eq!(commit.get(), 1);
-//! assert_eq!(db.get(ReadTarget::Head, RecordOp::get(key))?, pending);
+//! assert_eq!(db.get(ReadTarget::Head, RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?, pending);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -39,6 +39,7 @@ mod config;
 mod database;
 mod error;
 mod genesis;
+mod metered;
 mod open;
 mod open_error;
 mod record_op;
@@ -55,7 +56,9 @@ pub use golemdb_immutable_data::{
     ImmutableDataSegment,
 };
 pub use golemdb_merkle::HashAlgorithm;
+pub use golemdb_metering::Budget;
 pub use golemdb_storage_mdbx::MdbxOptions;
+pub use metered::{Details, Metered, Receipt};
 pub use open::OpenInfo;
 pub use open_error::{OpenError, OpenResult};
 pub use record_op::{RecordOp, op};
@@ -67,40 +70,39 @@ pub use golemdb_cells::{
     marker,
 };
 pub use golemdb_query::{
-    Bounds, Budget, CountOp, Direction, EqValue, Filter, InValues, QueryOp, QueryPage, SortKey,
-    ValuesError,
+    Bounds, CountOp, Direction, EqValue, Filter, InValues, QueryOp, QueryPage, SortKey, ValuesError,
 };
-pub use golemdb_record::{ReadTarget, Record, RecordKey};
+pub use golemdb_record::{CreateEntry, PatchChange, PatchEntry, ReadTarget, Record, RecordKey};
 
 /// Synchronous record and branch facade. Builders assist callers; implementations
 /// enforce deployment limits, reserved-record rules, identity, and atomic mutations.
 /// Adding a required method requires updating concrete implementations and mocks.
 pub trait Api {
     /// Stage a caller-keyed record with zero or more user cells and return its key.
-    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Result<RecordKey>;
+    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Metered<RecordKey>;
 
     /// Read pending or committed state. Head selection and materialization share
     /// one snapshot. Missing projected cells are omitted; an empty projection
     /// still verifies existence. Explicit non-head commits are not yet supported.
-    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Result<Record>;
+    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Metered<Record>;
 
     /// Atomically edit one record. Removing every user cell preserves its identity.
     /// Empty patches and removals of missing cells are valid on an existing record.
-    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Result<()>;
+    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Metered<()>;
 
     /// Delete the record and its binding without reclaiming the internal ID.
-    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()>;
+    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Metered<()>;
 
     /// Committed records matching the operation's filter, in record ID order,
     /// projected as `get` projects. Matching and materialization share one
     /// snapshot. `commit` names the commit to read, `None` the head; explicit
     /// non-head commits are not yet supported; sort, limit and offset return
     /// NotImplemented.
-    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Result<QueryPage>;
+    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Metered<QueryPage>;
 
     /// The number of committed records matching the operation's filter, under
     /// the same commit rules as `query`.
-    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Result<u64>;
+    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Metered<u64>;
 
     // Branch lifecycle. IDs are valid only for their issuing engine.
     fn head(&self) -> Result<CommitId>;

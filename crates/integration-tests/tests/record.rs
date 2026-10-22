@@ -1,3 +1,4 @@
+use golemdb_api::Budget;
 use golemdb_branch::{BranchError, Branches};
 use golemdb_cells::{
     CellChange, CellKey, CellName, CellNameRef, CellType, CellValue, CellValueRef, Cells, Width,
@@ -111,16 +112,32 @@ fn lifecycle(db: impl Store + Clone) {
     let records = Records::new(branches.clone());
     let b = branches.begin().unwrap();
     let competitor = branches.begin().unwrap();
-    records.create(b, KEY, values("Alice")).unwrap();
-    records.create(competitor, OTHER, values("loser")).unwrap();
+    records
+        .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+        .result
+        .unwrap();
+    records
+        .create(
+            competitor,
+            OTHER,
+            create_entries(values("loser")),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
     assert_eq!(id(&branches, competitor, OTHER), 64);
     branches.seal(b).unwrap();
     assert_eq!(
-        records.get(ReadTarget::Branch(b), KEY, None).unwrap().cells[b"name".as_slice()].as_str(),
+        records
+            .get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited)
+            .result
+            .unwrap()
+            .cells[b"name".as_slice()]
+        .as_str(),
         Some("Alice")
     );
     assert!(matches!(
-        records.delete(b, KEY),
+        records.delete(b, KEY, Budget::Unlimited).result,
         Err(RecordError::Branch(BranchError::Sealed))
     ));
     assert_eq!(
@@ -128,20 +145,34 @@ fn lifecycle(db: impl Store + Clone) {
         golemdb_branch::CommitId::new(1)
     );
     assert!(matches!(
-        records.get(ReadTarget::Branch(competitor), OTHER, None),
+        records
+            .get(
+                ReadTarget::Branch(competitor),
+                OTHER,
+                None,
+                Budget::Unlimited
+            )
+            .result,
         Err(RecordError::Branch(BranchError::HandleInvalid))
     ));
     assert!(matches!(
-        records.create(b, OTHER, values("consumed")),
+        records
+            .create(
+                b,
+                OTHER,
+                create_entries(values("consumed")),
+                Budget::Unlimited
+            )
+            .result,
         Err(RecordError::Branch(BranchError::HandleInvalid))
     ));
     assert!(matches!(
-        records.get(ReadTarget::Commit(golemdb_branch::CommitId::new(0)), KEY, None),
+        records.get(ReadTarget::Commit(golemdb_branch::CommitId::new(0)), KEY, None, Budget::Unlimited).result,
         Err(RecordError::CommitUnavailable {
             requested, head }) if requested.get() == 0 && head.get() == 1
     ));
     assert!(matches!(
-        records.get(ReadTarget::Commit(golemdb_branch::CommitId::new(2)), KEY, None),
+        records.get(ReadTarget::Commit(golemdb_branch::CommitId::new(2)), KEY, None, Budget::Unlimited).result,
         Err(RecordError::CommitUnavailable {
             requested, head }) if requested.get() == 2 && head.get() == 1
     ));
@@ -150,8 +181,10 @@ fn lifecycle(db: impl Store + Clone) {
             .get(
                 ReadTarget::Commit(golemdb_branch::CommitId::new(1)),
                 KEY,
-                None
+                None,
+                Budget::Unlimited
             )
+            .result
             .unwrap()
             .cells[b"name".as_slice()],
         text("Alice", true)
@@ -174,12 +207,16 @@ fn lifecycle(db: impl Store + Clone) {
         .patch(
             b,
             KEY,
-            [
-                (name(b"name"), CellPatch::Set(u64_value(9))),
-                (name(b"old"), CellPatch::Set(text("indexed", true))),
-            ]
-            .into(),
+            patch_entries(
+                [
+                    (name(b"name"), CellPatch::Write(u64_value(9))),
+                    (name(b"old"), CellPatch::Write(text("indexed", true))),
+                ]
+                .into(),
+            ),
+            Budget::Unlimited,
         )
+        .result
         .unwrap();
     branches.commit(b).unwrap();
     assert!(
@@ -189,8 +226,11 @@ fn lifecycle(db: impl Store + Clone) {
             .is_none()
     );
     let b = branches.begin().unwrap();
-    records.delete(b, KEY).unwrap();
-    records.create(b, KEY, values("Alice")).unwrap();
+    records.delete(b, KEY, Budget::Unlimited).result.unwrap();
+    records
+        .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+        .result
+        .unwrap();
     assert_eq!(id(&branches, b, KEY), 65);
     branches.commit(b).unwrap();
     let tx = db.begin_read().unwrap();
@@ -224,8 +264,10 @@ fn lifecycle(db: impl Store + Clone) {
             .get(
                 ReadTarget::Commit(golemdb_branch::CommitId::new(3)),
                 KEY,
-                None
+                None,
+                Budget::Unlimited
             )
+            .result
             .unwrap()
             .cells
             .len(),
@@ -239,14 +281,17 @@ fn lifecycle(db: impl Store + Clone) {
             .unwrap()
             .is_empty()
     );
-    records.delete(b, KEY).unwrap();
+    records.delete(b, KEY, Budget::Unlimited).result.unwrap();
     reopened.commit(b).unwrap();
     assert!(matches!(
-        records.get(
-            ReadTarget::Commit(golemdb_branch::CommitId::new(4)),
-            KEY,
-            None
-        ),
+        records
+            .get(
+                ReadTarget::Commit(golemdb_branch::CommitId::new(4)),
+                KEY,
+                None,
+                Budget::Unlimited
+            )
+            .result,
         Err(RecordError::NotFound)
     ));
 }
@@ -266,14 +311,54 @@ fn mdbx_commit_and_database_reopen() {
     let b = branches.begin().unwrap();
     assert_eq!(allocated(&branches, b), 66);
     assert!(matches!(
-        records.get(
-            ReadTarget::Commit(golemdb_branch::CommitId::new(4)),
-            KEY,
-            None
-        ),
+        records
+            .get(
+                ReadTarget::Commit(golemdb_branch::CommitId::new(4)),
+                KEY,
+                None,
+                Budget::Unlimited
+            )
+            .result,
         Err(RecordError::NotFound)
     ));
-    records.create(b, KEY, values("after restart")).unwrap();
+    records
+        .create(
+            b,
+            KEY,
+            create_entries(values("after restart")),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
     assert_eq!(id(&branches, b, KEY), 66);
     branches.commit(b).unwrap();
+}
+
+fn create_entries(cells: RecordCells) -> Vec<golemdb_record::CreateEntry> {
+    cells
+        .into_iter()
+        .map(|(name, value)| golemdb_record::CreateEntry {
+            name,
+            kind: value.kind(),
+            value,
+        })
+        .collect()
+}
+
+fn patch_entries(changes: golemdb_record::RecordPatch) -> Vec<golemdb_record::PatchEntry> {
+    use golemdb_record::{PatchChange, PatchEntry};
+    changes
+        .into_iter()
+        .map(|(name, change)| PatchEntry {
+            name,
+            change: match change {
+                CellPatch::Write(value) => PatchChange::Write {
+                    kind: value.kind(),
+                    value,
+                },
+                CellPatch::Set(value) => PatchChange::Set(value),
+                CellPatch::Remove => PatchChange::Remove,
+            },
+        })
+        .collect()
 }

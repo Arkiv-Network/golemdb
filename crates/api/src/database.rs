@@ -1,3 +1,4 @@
+use crate::Metered;
 use crate::open::OpenedStore;
 use std::sync::Arc;
 
@@ -122,22 +123,22 @@ impl Database {
 }
 
 impl Api for Database {
-    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Result<RecordKey> {
+    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Metered<RecordKey> {
         self.inner.create(branch, operation)
     }
-    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Result<Record> {
+    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Metered<Record> {
         self.inner.get(target, operation)
     }
-    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Result<()> {
+    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Metered<()> {
         self.inner.patch(branch, operation)
     }
-    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()> {
+    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Metered<()> {
         self.inner.delete(branch, operation)
     }
-    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Result<QueryPage> {
+    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Metered<QueryPage> {
         self.inner.query(commit_id, operation)
     }
-    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Result<u64> {
+    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Metered<u64> {
         self.inner.count(commit_id, operation)
     }
     fn head(&self) -> Result<CommitId> {
@@ -245,29 +246,34 @@ impl<S: Store, H: HashProvider> Inner<S, H> {
 }
 
 impl<S: Store, H: HashProvider> Api for Inner<S, H> {
-    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Result<RecordKey> {
-        let (key, cells) = operation.into_create();
-        self.records.create(branch, key, cells).map_err(Into::into)
+    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Metered<RecordKey> {
+        let (key, budget, entries) = operation.into_create();
+        self.records.create(branch, key, entries, budget).into()
     }
-    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Result<Record> {
+    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Metered<Record> {
         self.records
-            .get(target, operation.record_key(), operation.names())
-            .map_err(Into::into)
+            .get(
+                target,
+                operation.record_key(),
+                operation.names(),
+                operation.budget(),
+            )
+            .into()
     }
-    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Result<()> {
-        let (key, patch) = operation.into_patch();
-        self.records.patch(branch, key, patch).map_err(Into::into)
+    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Metered<()> {
+        let (key, budget, entries) = operation.into_patch();
+        self.records.patch(branch, key, entries, budget).into()
     }
-    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()> {
+    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Metered<()> {
         self.records
-            .delete(branch, operation.record_key())
-            .map_err(Into::into)
+            .delete(branch, operation.record_key(), operation.budget())
+            .into()
     }
-    fn query(&self, commit: Option<CommitId>, operation: QueryOp) -> Result<QueryPage> {
-        self.queries.query(commit, operation).map_err(Into::into)
+    fn query(&self, commit: Option<CommitId>, operation: QueryOp) -> Metered<QueryPage> {
+        self.queries.query_report(commit, operation).into()
     }
-    fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Result<u64> {
-        self.queries.count(commit, operation).map_err(Into::into)
+    fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Metered<u64> {
+        self.queries.count_report(commit, operation).into()
     }
     fn head(&self) -> Result<CommitId> {
         self.branches.head().map_err(Into::into)

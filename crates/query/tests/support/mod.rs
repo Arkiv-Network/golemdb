@@ -36,19 +36,33 @@ impl TestDb {
     pub fn create(&self, records: impl IntoIterator<Item = RecordOp<op::Create>>) {
         let branch = self.db.begin().expect("branch");
         for record in records {
-            self.db.create(branch, record).expect("create");
+            self.db
+                .create(branch, record)
+                .into_result()
+                .expect("create");
         }
         self.db.commit(branch).expect("commit");
     }
 
     /// Keys of the records matching `filter` at the head, in query order.
     pub fn keys(&self, filter: Filter) -> Result<Vec<RecordKey>, ApiError> {
-        let page = self.db.query(None, QueryOp::from_filter(filter))?;
+        let page = self
+            .db
+            .query(
+                None,
+                QueryOp::from_filter(filter, golemdb_api::Budget::Limited(u64::MAX)),
+            )
+            .into_result()?;
         Ok(page.records.into_iter().map(|record| record.key).collect())
     }
 
     pub fn count(&self, filter: Filter) -> Result<u64, ApiError> {
-        self.db.count(None, CountOp::filter(filter))
+        self.db
+            .count(
+                None,
+                CountOp::filter(filter, golemdb_api::Budget::Limited(u64::MAX)),
+            )
+            .into_result()
     }
 }
 
@@ -60,11 +74,10 @@ pub fn key(n: u64) -> RecordKey {
 
 /// A record whose cells are all attributes, so all of them are indexed.
 pub fn record(key: RecordKey, attributes: &[(&str, CellValue)]) -> RecordOp<op::Create> {
-    attributes
-        .iter()
-        .fold(RecordOp::create(key), |op, (name, value)| {
-            op.attribute(name, value.clone()).expect("valid attribute")
-        })
+    attributes.iter().fold(
+        RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX)),
+        |op, (name, value)| op.attribute(name, value.clone()),
+    )
 }
 
 /// Raw, so tests can also build names the grammar rejects. Through the

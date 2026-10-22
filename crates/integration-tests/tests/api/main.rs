@@ -4,3 +4,5 @@ mod immutable_data;
 mod immutable_genesis;
 mod opening;
 mod opening_failure;
+
+mod receipts;

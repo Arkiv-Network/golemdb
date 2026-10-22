@@ -1,5 +1,5 @@
 //! [`Plan`]: a filter after admission. Building it validates the whole filter,
-//! its depth included, before any state read and resolves its leaves to the
+//! its depth included, before index or record reads and resolves its leaves to the
 //! index work they need. Pure; no storage access.
 
 use std::collections::BTreeSet;

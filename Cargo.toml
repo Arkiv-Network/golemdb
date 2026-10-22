@@ -6,6 +6,7 @@ members = [
     "crates/storage",
     "crates/storage-mdbx",
     "crates/merkle",
+    "crates/metering",
     "crates/index",
     "crates/branch",
     "crates/record",
@@ -27,6 +28,7 @@ golemdb-immutable-data = { path = "crates/immutable-data", version = "0.1.0" }
 golemdb-storage = { path = "crates/storage", version = "0.1.0" }
 golemdb-storage-mdbx = { path = "crates/storage-mdbx", version = "0.1.0" }
 golemdb-merkle = { path = "crates/merkle", version = "0.1.0" }
+golemdb-metering = { path = "crates/metering", version = "0.1.0" }
 golemdb-index = { path = "crates/index", version = "0.1.0" }
 golemdb-branch = { path = "crates/branch", version = "0.1.0" }
 golemdb-record = { path = "crates/record", version = "0.1.0" }
