@@ -11,7 +11,7 @@ pub type Result<T> = std::result::Result<T, QueryError>;
 pub enum QueryError {
     /// A leaf names no valid index term: a bad field name. A leaf's values
     /// are of an indexable type by construction. Raised at admission, before
-    /// any state read.
+    /// index or record reads.
     #[error("invalid argument: field `{field}`: {source}")]
     InvalidArgument {
         field: CellName,
@@ -19,13 +19,13 @@ pub enum QueryError {
         source: TermError,
     },
     /// The request cannot be run as written: an `And` or `Or` with no child.
-    /// Raised at admission, before any state read.
+    /// Raised at admission, before index or record reads.
     #[error("invalid query: {reason}")]
     InvalidQuery { reason: &'static str },
     /// The request exceeds a cap, named by `limit`, whose value is `max`: a
     /// filter nested deeper than the `max_query_depth` of its
-    /// [`Queries`](crate::Queries). Raised at admission, before any state
-    /// read.
+    /// [`Queries`](crate::Queries). Raised at admission, before index or record
+    /// reads.
     #[error("limit exceeded: {limit} is capped at {max}")]
     LimitExceeded { limit: &'static str, max: u32 },
     /// A part of the query API that is specified but not built yet.

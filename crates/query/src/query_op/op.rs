@@ -1,6 +1,6 @@
 //! [`QueryOp`] and [`CountOp`]: typed requests built step by step.
 //!
-//! Steps never fail. A missing budget, an invalid name, a cap exceeded, or
+//! Budgets are explicit at construction. Steps never fail; an invalid name, a cap exceeded, or
 //! both `after` and `offset` are reported by the call that runs the request.
 
 use golemdb_cells::CellName;
@@ -20,12 +20,12 @@ pub struct QueryOp {
     // pub after: Option<Cursor>,
     pub offset: Option<u64>,
     pub with_total: bool,
-    /// Required; `None` fails at the call.
-    pub budget: Option<Budget>,
+    /// Explicit budget, stored but not enforced yet.
+    pub budget: Budget,
 }
 
 impl QueryOp {
-    pub fn from_filter(filter: Filter) -> Self {
+    pub fn from_filter(filter: Filter, budget: Budget) -> Self {
         Self {
             filter,
             sort: Vec::new(),
@@ -34,7 +34,7 @@ impl QueryOp {
             // after: None,
             offset: None,
             with_total: false,
-            budget: None,
+            budget,
         }
     }
 
@@ -72,7 +72,7 @@ impl QueryOp {
     }
 
     pub fn budget(mut self, budget: Budget) -> Self {
-        self.budget = Some(budget);
+        self.budget = budget;
         self
     }
 }
@@ -81,20 +81,17 @@ impl QueryOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CountOp {
     pub filter: Filter,
-    /// Required; `None` fails at the call.
-    pub budget: Option<Budget>,
+    /// Explicit budget, stored but not enforced yet.
+    pub budget: Budget,
 }
 
 impl CountOp {
-    pub fn filter(filter: Filter) -> Self {
-        Self {
-            filter,
-            budget: None,
-        }
+    pub fn filter(filter: Filter, budget: Budget) -> Self {
+        Self { filter, budget }
     }
 
     pub fn budget(mut self, budget: Budget) -> Self {
-        self.budget = Some(budget);
+        self.budget = budget;
         self
     }
 }
@@ -120,7 +117,7 @@ mod tests {
     #[test]
     fn a_query_starts_with_only_its_filter() {
         assert_eq!(
-            QueryOp::from_filter(color_is_blue()),
+            QueryOp::from_filter(color_is_blue(), crate::Budget::Limited(u64::MAX)),
             QueryOp {
                 filter: color_is_blue(),
                 sort: vec![],
@@ -128,7 +125,7 @@ mod tests {
                 limit: None,
                 offset: None,
                 with_total: false,
-                budget: None,
+                budget: Budget::Limited(u64::MAX),
             }
         );
     }
@@ -136,7 +133,7 @@ mod tests {
     #[test]
     fn every_step_sets_its_field() {
         let price = SortKey::asc("price", CellType::Uint(Width::W8));
-        let op = QueryOp::from_filter(color_is_blue())
+        let op = QueryOp::from_filter(color_is_blue(), crate::Budget::Limited(u64::MAX))
             .sort([price.clone()])
             .only(["owner", "status"])
             .limit(50)
@@ -152,16 +149,18 @@ mod tests {
                 limit: Some(50),
                 offset: Some(10),
                 with_total: true,
-                budget: Some(Budget::Limited(1_000)),
+                budget: Budget::Limited(1_000),
             }
         );
     }
 
     #[test]
     fn projection_is_deduplicated_in_byte_order_and_may_be_empty() {
-        let op = QueryOp::from_filter(color_is_blue()).only(["status", "owner", "status"]);
+        let op = QueryOp::from_filter(color_is_blue(), crate::Budget::Limited(u64::MAX))
+            .only(["status", "owner", "status"]);
         assert_eq!(op.projection, Some(vec![name(b"owner"), name(b"status")]));
-        let none = QueryOp::from_filter(color_is_blue()).only(Vec::<&str>::new());
+        let none = QueryOp::from_filter(color_is_blue(), crate::Budget::Limited(u64::MAX))
+            .only(Vec::<&str>::new());
         assert_eq!(none.projection, Some(vec![]));
     }
 
@@ -169,7 +168,7 @@ mod tests {
     fn repeated_steps_replace_earlier_ones() {
         let price = SortKey::asc("price", CellType::Uint(Width::W8));
         let date = SortKey::desc("date", CellType::Date32);
-        let op = QueryOp::from_filter(color_is_blue())
+        let op = QueryOp::from_filter(color_is_blue(), crate::Budget::Limited(u64::MAX))
             .sort([price])
             .sort([date.clone()])
             .limit(1)
@@ -178,18 +177,22 @@ mod tests {
             .budget(Budget::Unlimited);
         assert_eq!(op.sort, [date]);
         assert_eq!(op.limit, Some(2));
-        assert_eq!(op.budget, Some(Budget::Unlimited));
+        assert_eq!(op.budget, Budget::Unlimited);
     }
 
     #[test]
     fn a_count_takes_a_filter_and_a_budget() {
         assert_eq!(
-            CountOp::filter(color_is_blue()).budget(Budget::Limited(7)),
+            CountOp::filter(color_is_blue(), crate::Budget::Limited(u64::MAX))
+                .budget(Budget::Limited(7)),
             CountOp {
                 filter: color_is_blue(),
-                budget: Some(Budget::Limited(7)),
+                budget: Budget::Limited(7),
             }
         );
-        assert_eq!(CountOp::filter(color_is_blue()).budget, None);
+        assert_eq!(
+            CountOp::filter(color_is_blue(), crate::Budget::Limited(u64::MAX)).budget,
+            Budget::Limited(u64::MAX)
+        );
     }
 }

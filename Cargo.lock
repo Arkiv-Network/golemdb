@@ -526,6 +526,7 @@ dependencies = [
  "golemdb-immutable-data",
  "golemdb-index",
  "golemdb-merkle",
+ "golemdb-metering",
  "golemdb-query",
  "golemdb-record",
  "golemdb-storage",
@@ -618,6 +619,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "golemdb-metering"
+version = "0.1.0"
+
+[[package]]
 name = "golemdb-query"
 version = "0.1.0"
 dependencies = [
@@ -626,6 +631,7 @@ dependencies = [
  "golemdb-cells",
  "golemdb-index",
  "golemdb-merkle",
+ "golemdb-metering",
  "golemdb-record",
  "golemdb-storage",
  "proptest",
@@ -639,6 +645,7 @@ dependencies = [
  "golemdb-branch",
  "golemdb-cells",
  "golemdb-merkle",
+ "golemdb-metering",
  "golemdb-storage",
  "thiserror",
 ]

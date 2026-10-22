@@ -94,27 +94,46 @@ fn failure_contract(database: impl Store + Clone + Send + Sync + 'static) {
     let branch = db.begin().unwrap();
     db.create(
         branch,
-        RecordOp::create(key)
-            .attribute("price", CellValue::from_i32(50))
-            .unwrap(),
+        RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+            .attribute("price", CellValue::from_i32(50)),
     )
+    .into_result()
     .unwrap();
     let pending = db
-        .get(ReadTarget::Branch(branch), RecordOp::get(key))
+        .get(
+            ReadTarget::Branch(branch),
+            RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
         .unwrap();
     let info = db.branch_info(branch).unwrap();
     fail_reads.store(true, Ordering::SeqCst);
-    diagnostic(db.get(ReadTarget::Head, RecordOp::get(key)).unwrap_err());
     diagnostic(
-        db.patch(branch, RecordOp::patch(key).remove("price").unwrap())
-            .unwrap_err(),
+        db.get(
+            ReadTarget::Head,
+            RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
+        .unwrap_err(),
+    );
+    diagnostic(
+        db.patch(
+            branch,
+            RecordOp::patch(key, golemdb_api::Budget::Limited(u64::MAX)).remove("price"),
+        )
+        .into_result()
+        .unwrap_err(),
     );
     diagnostic(db.head().unwrap_err());
     fail_reads.store(false, Ordering::SeqCst);
     assert_eq!(db.branch_info(branch).unwrap(), info);
     assert_eq!(
-        db.get(ReadTarget::Branch(branch), RecordOp::get(key))
-            .unwrap(),
+        db.get(
+            ReadTarget::Branch(branch),
+            RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))
+        )
+        .into_result()
+        .unwrap(),
         pending
     );
 
@@ -126,7 +145,12 @@ fn failure_contract(database: impl Store + Clone + Send + Sync + 'static) {
     fail_writes.store(false, Ordering::SeqCst);
     assert_eq!(db.commit(branch).unwrap(), sealed.commit_id);
     assert_eq!(
-        db.get(ReadTarget::Head, RecordOp::get(key)).unwrap(),
+        db.get(
+            ReadTarget::Head,
+            RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))
+        )
+        .into_result()
+        .unwrap(),
         pending
     );
 }
@@ -169,10 +193,10 @@ fn full_mdbx_store_preserves_head_tables_and_sealed_branch() {
     let branch = db.begin().unwrap();
     db.create(
         branch,
-        RecordOp::create(key)
-            .field("payload", CellValue::from_bytes(&vec![1; 2 * 1024 * 1024]))
-            .unwrap(),
+        RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+            .field("payload", CellValue::from_bytes(&vec![1; 2 * 1024 * 1024])),
     )
+    .into_result()
     .unwrap();
     let sealed = db.seal(branch).unwrap();
     for _ in 0..2 {
@@ -182,16 +206,24 @@ fn full_mdbx_store_preserves_head_tables_and_sealed_branch() {
         assert_eq!(db.seal(branch).unwrap(), sealed);
         assert!(db.branch_info(branch).unwrap().sealed);
         assert_eq!(
-            db.get(ReadTarget::Branch(branch), RecordOp::get(key))
-                .unwrap()
-                .cells[b"payload".as_slice()]
+            db.get(
+                ReadTarget::Branch(branch),
+                RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result()
+            .unwrap()
+            .cells[b"payload".as_slice()]
             .as_bytes()
             .unwrap()
             .len(),
             2 * 1024 * 1024
         );
         assert!(matches!(
-            db.get(ReadTarget::Head, RecordOp::get(key)),
+            db.get(
+                ReadTarget::Head,
+                RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
     }
@@ -199,10 +231,10 @@ fn full_mdbx_store_preserves_head_tables_and_sealed_branch() {
     let branch = db.begin().unwrap();
     db.create(
         branch,
-        RecordOp::create(key)
-            .field("payload", CellValue::from_bytes(b"small"))
-            .unwrap(),
+        RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+            .field("payload", CellValue::from_bytes(b"small")),
     )
+    .into_result()
     .unwrap();
     assert_eq!(db.commit(branch).unwrap(), CommitId::new(1));
 }
