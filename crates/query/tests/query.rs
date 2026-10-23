@@ -577,7 +577,7 @@ fn materialization_requires_identity_but_does_not_validate_metadata() {
 
         // Remove an engine-owned cell below the facade while keeping the
         // indexed attribute. Materialization needs #key but does not use #meta.
-        let branches = Branches::new(store, Keccak256Hasher, None).unwrap();
+        let branches = Branches::new(store, Keccak256Hasher, None, None).unwrap();
         let corrupt = branches.begin().unwrap();
         branches
             .write(corrupt, |cell_writer| {

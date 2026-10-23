@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use golemdb_cells::CellLimits;
 use golemdb_immutable_data::ImmutableDataConfig;
 use golemdb_merkle::HashAlgorithm;
+use golemdb_pruning::PruningConfig;
 use golemdb_record::RecordLimits;
 use serde::{Deserialize, Serialize};
 
@@ -118,6 +119,8 @@ pub struct OpenConfig {
     /// `Database::open` defaults to `<database>/immutable-data`. `from_store`
     /// requires an explicit directory when genesis declares immutable segments.
     pub immutable_data_directory: Option<PathBuf>,
+    /// Prune inside every commit with these settings; `None` turns pruning off.
+    pub pruning: Option<PruningConfig>,
 }
 
 impl OpenConfig {
@@ -126,6 +129,7 @@ impl OpenConfig {
             genesis,
             mode: OpenMode::CreateIfMissing,
             immutable_data_directory: None,
+            pruning: None,
         }
     }
 
@@ -136,6 +140,12 @@ impl OpenConfig {
 
     pub fn with_immutable_data_directory(mut self, directory: impl AsRef<Path>) -> Self {
         self.immutable_data_directory = Some(directory.as_ref().to_path_buf());
+        self
+    }
+
+    /// Prune inside every commit with `pruning`.
+    pub const fn with_pruning(mut self, pruning: PruningConfig) -> Self {
+        self.pruning = Some(pruning);
         self
     }
 }

@@ -5,8 +5,9 @@ use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
 use crate::{BranchError, CommitId, Head, Result};
 
-/// Every published commit's roots, by commit number: physical locators that
-/// make old tries walkable. `#roots` commits only their hashes.
+/// Every published commit's roots, by commit number: locators that make old
+/// state and index tries walkable (not the bitmap tries an old index root
+/// names). `#roots` commits only their hashes.
 pub const ROOTS: Table = Table("Roots");
 
 /// One commit's two roots, as locators: hash, commit and, for a singleton, its

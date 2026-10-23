@@ -193,7 +193,7 @@ fn later_commits_never_overwrite_earlier_rows() {
         unreachable!()
     };
     let mut tx = db.begin_write().unwrap();
-    let first = trie.insert(&mut tx, 1, a, &b.path, b.hash).unwrap();
+    let first = trie.insert(&mut tx, 1, a, &b.path, b.hash).unwrap().root;
     let row = tx.get(TABLE.table(), &trie_key(1)).unwrap();
     assert_eq!(
         first,
@@ -203,7 +203,7 @@ fn later_commits_never_overwrite_earlier_rows() {
         })
     );
     // The same branch written again at a later commit gets a row of its own.
-    let second = trie.insert(&mut tx, 2, a, &b.path, b.hash).unwrap();
+    let second = trie.insert(&mut tx, 2, a, &b.path, b.hash).unwrap().root;
     assert_eq!(second.hash(&HASH), first.hash(&HASH));
     assert!(matches!(second, RootRef::Branch(b) if b.commit == 2));
     assert_eq!(tx.get(TABLE.table(), &trie_key(2)).unwrap(), row);

@@ -1,5 +1,5 @@
 use golemdb_merkle::{Hash, HashProvider, RootRef};
-use golemdb_storage::WriteTransaction;
+use golemdb_storage::{Table, WriteTransaction};
 
 use super::Index;
 use crate::{INDEX_TRIE_PATH_BYTES, IndexTerm, Result, bitmap_trie::BitmapTrie, path, tables};
@@ -28,6 +28,9 @@ pub struct IndexUpdate {
     pub root: RootRef<INDEX_TRIE_PATH_BYTES>,
     /// Actual changes only, in term order. Roots span the complete input batch.
     pub changed_terms: Vec<TermRootChange>,
+    /// Stored trie and container rows this batch replaced, which only older
+    /// roots reach.
+    pub superseded: Vec<(Table, Vec<u8>)>,
 }
 
 impl<H: HashProvider> Index<'_, H> {
@@ -68,20 +71,24 @@ impl<H: HashProvider> Index<'_, H> {
                 false
             }
         });
-        let mut changed_terms = Vec::new();
+        let (mut changed_terms, mut superseded) = (Vec::new(), Vec::new());
         for group in changes.chunk_by(|a, b| a.0 == b.0) {
             let term = &group[0].0;
             let before_root = self.bitmap_root(tx, term)?;
             let before = before_root.map(|root| root.hash(self.hasher));
             self.trie.check(tx, root, term, before)?;
             let term_path = term.routing_path(self.hasher);
-            let after_root = BitmapTrie::new(self.hasher, &term_path).apply(
+            let update = BitmapTrie::new(self.hasher, &term_path).apply(
                 tx,
                 commit,
                 before_root,
                 group.iter().map(|&(_, hi, lo, present)| (hi, lo, present)),
             )?;
+            superseded.extend(update.superseded);
+            let after_root = (update.root != RootRef::Empty).then_some(update.root);
             let after = after_root.map(|root| root.hash(self.hasher));
+            // Containers count as changed only when their contents change, so an
+            // unchanged root superseded no rows.
             if before == after {
                 continue;
             }
@@ -100,7 +107,7 @@ impl<H: HashProvider> Index<'_, H> {
         // Terms are unique, so each check above saw the original root and each
         // term's row is written once; one trie update for the whole batch writes
         // each touched branch once.
-        let root = self.trie.set(
+        let update = self.trie.set(
             tx,
             commit,
             root,
@@ -108,9 +115,11 @@ impl<H: HashProvider> Index<'_, H> {
                 .iter()
                 .map(|change| (&change.term, change.after)),
         )?;
+        superseded.extend(update.superseded);
         Ok(IndexUpdate {
-            root,
+            root: update.root,
             changed_terms,
+            superseded,
         })
     }
 }

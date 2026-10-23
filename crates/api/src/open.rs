@@ -2,6 +2,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use golemdb_branch::Head;
 use golemdb_merkle::{Blake3Hasher, HashAlgorithm, Keccak256Hasher};
+use golemdb_pruning::PruningConfig;
 use golemdb_storage::{Store, WriteTransaction};
 
 use crate::{CommitId, Genesis, OpenConfig, OpenResult};
@@ -35,6 +36,7 @@ pub(crate) struct OpenedStore<S> {
     store: S,
     genesis: Genesis,
     info: OpenInfo,
+    pruning: Option<PruningConfig>,
 }
 
 impl<S> OpenedStore<S> {
@@ -43,6 +45,10 @@ impl<S> OpenedStore<S> {
     }
     pub fn genesis(&self) -> &Genesis {
         &self.genesis
+    }
+    /// The pruning settings the store was opened with.
+    pub fn pruning(&self) -> Option<PruningConfig> {
+        self.pruning
     }
     /// Hand initialized storage to the engine; low-level writes remain trusted.
     pub fn into_store(self) -> S {
@@ -90,6 +96,7 @@ pub(crate) fn open_store<S: Store>(store: S, config: &OpenConfig) -> OpenResult<
         store,
         genesis: config.genesis.clone(),
         info,
+        pruning: config.pruning,
     })
 }
 

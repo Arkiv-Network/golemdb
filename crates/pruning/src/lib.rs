@@ -4,8 +4,9 @@
 //! transaction. They garbage-collect superseded trie rows: a row superseded at
 //! commit `s` is reached only by roots before `s`, so it may be deleted once
 //! `s ≤ head − window`. Due rows are deleted in batches, sorted by table and
-//! key, so rows sharing a page are deleted together. The caller drops its own
-//! per-commit rows, such as `Roots`, before [`Pruner::cutoff`].
+//! key, so rows sharing a page are deleted together. [`Pruner::drop_before`]
+//! drops a caller's own rows keyed by commit, such as `Roots`, outside the
+//! window.
 
 mod error;
 mod gc;
@@ -13,7 +14,9 @@ mod gc;
 pub use error::{PruningError, Result};
 pub use gc::STALE;
 
-use golemdb_storage::{Table, WriteTransaction};
+use std::ops::Bound;
+
+use golemdb_storage::{Table, WriteTransaction, scan};
 
 /// Due rows a sweep waits for before deleting a batch, so each batch is large
 /// enough for rows sharing a page to be deleted together.
@@ -80,9 +83,54 @@ impl Pruner {
         gc::sweep(tx, self.cutoff(head), batch)
     }
 
+    /// Delete every row of `table` keyed by a big-endian commit before
+    /// `cutoff(head)`, with no limit: a window shrink drops them all in one
+    /// commit.
+    pub fn drop_before(
+        &self,
+        tx: &mut impl WriteTransaction,
+        table: Table,
+        head: u64,
+    ) -> Result<()> {
+        let upper = Bound::Excluded(self.cutoff(head).to_be_bytes().to_vec());
+        let keys = scan(tx, table, Bound::Unbounded, upper)?
+            .map(|row| row.map(|(key, _)| key))
+            .collect::<golemdb_storage::Result<Vec<_>>>()?;
+        for key in keys {
+            tx.delete(table, &key)?;
+        }
+        Ok(())
+    }
+
     /// Commits before this may be pruned: `head − window`. Not the earliest
     /// retained commit, which can be later after the window grows.
     pub const fn cutoff(&self, head: u64) -> u64 {
         head.saturating_sub(self.config.window)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction, scan_prefix};
+
+    use crate::{Pruner, PruningConfig};
+
+    /// Rows keyed by commits before the cutoff go, the rest stay.
+    #[test]
+    fn drop_before_keeps_the_window() {
+        let db = MemoryStore::new();
+        let table = Table("PerCommit");
+        let mut tx = db.begin_write().unwrap();
+        for commit in 1..=5u64 {
+            tx.put(table, &commit.to_be_bytes(), b"row").unwrap();
+        }
+        Pruner::new(PruningConfig::new(2))
+            .drop_before(&mut tx, table, 5)
+            .unwrap();
+        let kept: Vec<_> = (scan_prefix(&tx, table, vec![]).unwrap())
+            .map(|row| row.unwrap().0)
+            .collect();
+        let window: Vec<_> = (3..=5u64).map(|c| c.to_be_bytes().to_vec()).collect();
+        assert_eq!(kept, window);
     }
 }

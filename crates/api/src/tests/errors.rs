@@ -53,6 +53,9 @@ fn capacity_errors_remain_public_through_internal_wrappers() {
         RecordError::Branch(BranchError::Index(IndexError::Merkle(
             MerkleError::Storage(StorageError::Full),
         ))),
+        RecordError::Branch(BranchError::Pruning(
+            golemdb_pruning::PruningError::Storage(StorageError::Full),
+        )),
     ] {
         assert!(matches!(ApiError::from(error), ApiError::StoreFull));
     }

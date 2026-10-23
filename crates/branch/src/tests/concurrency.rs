@@ -36,7 +36,7 @@ fn database() -> MemoryStore {
 
 #[test]
 fn reader_cannot_observe_a_partial_multi_cell_write() {
-    let branches = Branches::new(database(), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(database(), Keccak256Hasher, None, None).unwrap();
     let branch = branches.begin().unwrap();
     branches
         .write(branch, |cells| {
@@ -81,7 +81,7 @@ fn reader_cannot_observe_a_partial_multi_cell_write() {
 #[test]
 fn operation_waiting_for_branch_validates_head_after_acquiring_lock() {
     let db = database();
-    let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
     let branch = branches.begin().unwrap();
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -129,7 +129,7 @@ enum Consume {
 fn queued_access_is_rejected(consume: Consume) {
     // Exercise reads and writes separately against the same consumption path.
     for write in [false, true] {
-        let branches = Branches::new(database(), Keccak256Hasher, None).unwrap();
+        let branches = Branches::new(database(), Keccak256Hasher, None, None).unwrap();
         let branch = branches.begin().unwrap();
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -192,7 +192,7 @@ fn queued_reads_and_writes_reject_a_committed_branch() {
 
 #[test]
 fn concurrent_commits_of_one_branch_publish_only_once() {
-    let branches = Branches::new(database(), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(database(), Keccak256Hasher, None, None).unwrap();
     let branch = branches.begin().unwrap();
     branches
         .write(branch, |cells| {

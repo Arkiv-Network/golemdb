@@ -1,5 +1,5 @@
 use crate::INDEX_BRANCH_DOMAIN;
-use golemdb_merkle::{Hash, HashProvider, LeafRef, RootRef, Trie};
+use golemdb_merkle::{Hash, HashProvider, LeafRef, RootRef, Trie, TrieUpdate};
 use golemdb_storage::{ReadCursor, ReadTransaction, WriteTransaction};
 
 use crate::{BITMAP_TRIE_PATH_BYTES, INDEX_TRIE_PATH_BYTES, IndexError, IndexTerm, Result, tables};
@@ -47,7 +47,7 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
         commit: u64,
         root: RootRef<INDEX_TRIE_PATH_BYTES>,
         changes: impl IntoIterator<Item = (&'t IndexTerm, Option<Hash>)>,
-    ) -> Result<RootRef<INDEX_TRIE_PATH_BYTES>> {
+    ) -> Result<TrieUpdate<INDEX_TRIE_PATH_BYTES>> {
         let edits = changes.into_iter().map(|(term, bitmap)| match bitmap {
             Some(hash) => {
                 let leaf = self.leaf(term, hash);
