@@ -18,11 +18,11 @@ use std::{
 const SUPERBLOCK: Table = Table("Superblock");
 const TABLES: [Table; 8] = [
     tables::CELL,
-    tables::CELL_TRIE,
+    tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX,
-    golemdb_index::tables::INDEX_TRIE,
-    golemdb_index::tables::BITMAP_TRIE,
-    golemdb_index::tables::BITMAP_CONTAINER,
+    golemdb_index::tables::INDEX_TRIE.table(),
+    golemdb_index::tables::BITMAP_TRIE.table(),
+    golemdb_index::tables::BITMAP_CONTAINER.table(),
     SUPERBLOCK,
     Table("Roots"),
 ];
@@ -355,7 +355,9 @@ impl<R: golemdb_storage::ReadTransaction> golemdb_storage::ReadTransaction for F
     where
         Self: 'a;
     fn get(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Option<Vec<u8>>> {
-        if table == golemdb_index::tables::BITMAP_CONTAINER && self.fail.load(Ordering::Relaxed) {
+        if table == golemdb_index::tables::BITMAP_CONTAINER.table()
+            && self.fail.load(Ordering::Relaxed)
+        {
             return Err(golemdb_storage::StorageError::Backend(
                 "injected bitmap read failure".into(),
             ));

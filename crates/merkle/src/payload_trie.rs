@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
-use crate::{Hash, HashProvider, LeafRef, Result, RootRef, Trie, Walk};
+use crate::{Hash, HashProvider, LeafRef, Result, RootRef, Trie, TrieTable, Walk};
 
 /// A new leaf for a [`PayloadTrie`]: its hash, and the bytes of its row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,27 +23,31 @@ pub struct PayloadTrie<'h, H: HashProvider, const N: usize, const NS: usize = 0>
 impl<'h, H: HashProvider, const N: usize> PayloadTrie<'h, H, N> {
     /// Branches go to `branch_table` and payloads to `leaf_table`, which must
     /// differ: a leaf's key can equal a branch's.
-    pub fn new(branch_table: Table, leaf_table: Table, domain: u8, hasher: &'h H) -> Self {
+    pub fn new(branch_table: TrieTable, leaf_table: TrieTable, domain: u8, hasher: &'h H) -> Self {
+        Self::namespaced(branch_table, leaf_table, [], domain, hasher)
+    }
+}
+
+impl<'h, H: HashProvider, const N: usize, const NS: usize> PayloadTrie<'h, H, N, NS> {
+    /// As [`PayloadTrie::new`], keying branches and payloads alike under
+    /// `namespace`, as [`Trie::namespaced`] does.
+    pub fn namespaced(
+        branch_table: TrieTable<NS>,
+        leaf_table: TrieTable<NS>,
+        namespace: [u8; NS],
+        domain: u8,
+        hasher: &'h H,
+    ) -> Self {
         assert!(
             leaf_table != branch_table,
             "leaf rows need a table of their own"
         );
         Self {
-            trie: Trie::new(branch_table, domain, hasher).with_leaf_rows(),
-            leaf_table,
+            trie: Trie::namespaced(branch_table, namespace, domain, hasher).with_leaf_rows(),
+            leaf_table: leaf_table.table(),
         }
     }
 
-    /// As [`Trie::in_namespace`], for branches and payloads alike.
-    pub fn in_namespace<const NS: usize>(self, namespace: [u8; NS]) -> PayloadTrie<'h, H, N, NS> {
-        PayloadTrie {
-            trie: self.trie.in_namespace(namespace),
-            leaf_table: self.leaf_table,
-        }
-    }
-}
-
-impl<'h, H: HashProvider, const N: usize, const NS: usize> PayloadTrie<'h, H, N, NS> {
     /// As [`Trie::node_key`].
     pub fn node_key(&self, commit: u64, route: &[u8]) -> Vec<u8> {
         self.trie.node_key(commit, route)

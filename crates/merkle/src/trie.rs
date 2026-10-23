@@ -1,5 +1,5 @@
 use crate::{
-    BranchNodeCompact, HASH_BYTES, Hash, HashProvider, LeafStorage, MerkleError, Result,
+    BranchNodeCompact, HASH_BYTES, Hash, HashProvider, LeafStorage, MerkleError, Result, TrieTable,
     node::{BRANCH_SLOTS, MAX_PATH_BYTES},
     path::{self, NIBBLES_PER_BYTE},
 };
@@ -112,7 +112,8 @@ impl<const N: usize> RootRef<N> {
 /// root stays valid.
 /// No operation commits or opens a transaction. Abort the enclosing write
 /// transaction after a mutation error: intermediate branches may be stored.
-/// `NS` is the namespace width in bytes, 0 for an unnamespaced trie.
+/// `NS` is the namespace width in bytes, fixed by the [`TrieTable`]; 0 for an
+/// unnamespaced trie.
 pub struct Trie<'h, H: HashProvider, const N: usize, const NS: usize = 0> {
     table: Table,
     domain: u8,
@@ -126,19 +127,34 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     /// Configure a trie. Path widths outside 1..=32 bytes fail at compile time.
     ///
     /// ```compile_fail,E0080
-    /// use golemdb_merkle::{Keccak256Hasher, Trie};
+    /// use golemdb_merkle::{Keccak256Hasher, Trie, TrieTable};
     /// use golemdb_storage::Table;
     /// const EXAMPLE_BRANCH_DOMAIN: u8 = 0x03;
-    /// let _ = Trie::<_, 0>::new(Table("Branches"), EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
+    /// const BRANCHES: TrieTable = TrieTable::new(Table("Branches"));
+    /// let _ = Trie::<_, 0>::new(BRANCHES, EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
     /// ```
     ///
     /// ```compile_fail,E0080
-    /// use golemdb_merkle::{Keccak256Hasher, Trie};
+    /// use golemdb_merkle::{Keccak256Hasher, Trie, TrieTable};
     /// use golemdb_storage::Table;
     /// const EXAMPLE_BRANCH_DOMAIN: u8 = 0x03;
-    /// let _ = Trie::<_, 33>::new(Table("Branches"), EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
+    /// const BRANCHES: TrieTable = TrieTable::new(Table("Branches"));
+    /// let _ = Trie::<_, 33>::new(BRANCHES, EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
     /// ```
-    pub fn new(table: Table, domain: u8, hasher: &'h H) -> Self {
+    pub fn new(table: TrieTable, domain: u8, hasher: &'h H) -> Self {
+        Self::namespaced(table, [], domain, hasher)
+    }
+}
+
+impl<'h, H: HashProvider, const N: usize, const NS: usize> Trie<'h, H, N, NS> {
+    /// As [`Trie::new`], keying rows under `namespace` for several tries
+    /// sharing `table`, whose width keeps keys of different namespaces apart.
+    pub fn namespaced(
+        table: TrieTable<NS>,
+        namespace: [u8; NS],
+        domain: u8,
+        hasher: &'h H,
+    ) -> Self {
         const {
             assert!(
                 N >= 1 && N <= MAX_PATH_BYTES,
@@ -146,29 +162,14 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
             )
         };
         Self {
-            table,
+            table: table.table(),
             domain,
             hasher,
-            namespace: [],
+            namespace,
             leaf_storage: LeafStorage::InNode,
         }
     }
 
-    /// Key rows under `namespace`, for several tries sharing one table. The
-    /// fixed width keeps keys of different namespaces apart; tries sharing a
-    /// table must all use the same width.
-    pub fn in_namespace<const NS: usize>(self, namespace: [u8; NS]) -> Trie<'h, H, N, NS> {
-        Trie {
-            table: self.table,
-            domain: self.domain,
-            hasher: self.hasher,
-            namespace,
-            leaf_storage: self.leaf_storage,
-        }
-    }
-}
-
-impl<'h, H: HashProvider, const N: usize, const NS: usize> Trie<'h, H, N, NS> {
     /// Leaves are rows of their own, so branches record their commits too.
     /// [`crate::PayloadTrie`] writes those rows.
     pub(crate) fn with_leaf_rows(mut self) -> Self {

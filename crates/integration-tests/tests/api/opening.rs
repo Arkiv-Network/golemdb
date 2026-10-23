@@ -20,11 +20,11 @@ pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
     [
         SUPERBLOCK,
         tables::CELL,
-        tables::CELL_TRIE,
+        tables::CELL_TRIE.table(),
         golemdb_index::tables::INDEX,
-        golemdb_index::tables::INDEX_TRIE,
-        golemdb_index::tables::BITMAP_TRIE,
-        golemdb_index::tables::BITMAP_CONTAINER,
+        golemdb_index::tables::INDEX_TRIE.table(),
+        golemdb_index::tables::BITMAP_TRIE.table(),
+        golemdb_index::tables::BITMAP_CONTAINER.table(),
     ]
     .into_iter()
     .map(|table| {
@@ -242,7 +242,7 @@ fn partial_or_foreign_state_is_never_initialized() {
     for table in [
         SUPERBLOCK,
         tables::CELL,
-        tables::CELL_TRIE,
+        tables::CELL_TRIE.table(),
         Table("Foreign"),
     ] {
         for delete in [false, true] {
@@ -358,7 +358,7 @@ fn unsupported_format_ids_and_missing_trie_roots_are_rejected() {
     );
     let root = trie.node_key(0, &[]);
     let mut tx = db.begin_write().unwrap();
-    assert!(tx.delete(tables::CELL_TRIE, &root).unwrap());
+    assert!(tx.delete(tables::CELL_TRIE.table(), &root).unwrap());
     tx.commit().unwrap();
     assert!(Database::from_store(db, &config()).is_err());
 }

@@ -122,13 +122,13 @@ fn persistence_worker() {
     // Each term's bitmap trie is namespaced by its routing path; the Index row
     // holds the root's hash and commit, and containers are keyed by commit too.
     let ns = term(b"a").routing_path(&HASH);
-    let bitmap_trie = PayloadTrie::<_, BITMAP_TRIE_PATH_BYTES>::new(
+    let bitmap_trie = PayloadTrie::<_, BITMAP_TRIE_PATH_BYTES, _>::namespaced(
         tables::BITMAP_TRIE,
         tables::BITMAP_CONTAINER,
+        ns,
         BITMAP_BRANCH_DOMAIN,
         &HASH,
-    )
-    .in_namespace(ns);
+    );
     let old_row = read.get(HEAD, b"old_bitmap").unwrap().unwrap();
     let mut ids = Vec::new();
     let old_root = RootRef::<BITMAP_TRIE_PATH_BYTES>::decode(&old_row).unwrap();

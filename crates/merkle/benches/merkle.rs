@@ -3,7 +3,7 @@ use std::hint::black_box;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use golemdb_merkle::{
     Blake3Hasher, BranchNodeCompact, HashProvider, Keccak256Hasher, LeafRef, LeafStorage, RootRef,
-    Trie,
+    Trie, TrieTable,
 };
 use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction};
 
@@ -12,7 +12,7 @@ const BENCH_LEAF_DOMAIN: u8 = 0x04;
 const BENCH_BRANCH_DOMAIN: u8 = 0x05;
 const BENCH_NODE_DOMAIN: u8 = 0x03;
 
-const TABLE: Table = Table("BenchBranches");
+const TABLE: TrieTable = TrieTable::new(Table("BenchBranches"));
 
 fn branches(c: &mut Criterion) {
     let mut group = c.benchmark_group("merkle/branch");

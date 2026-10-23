@@ -3,7 +3,7 @@ use golemdb_cells::{
     CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, tables,
 };
 use golemdb_index::{Index, IndexTerm, PostingChange};
-use golemdb_merkle::{Blake3Hasher, Hash, HashProvider, Keccak256Hasher, RootRef};
+use golemdb_merkle::{Blake3Hasher, Hash, HashProvider, Keccak256Hasher, RootRef, TrieTable};
 use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction, scan_prefix};
 use std::{
     panic::AssertUnwindSafe,
@@ -16,11 +16,11 @@ use std::{
 const SUPERBLOCK: Table = Table("Superblock");
 const TABLES: [Table; 8] = [
     tables::CELL,
-    tables::CELL_TRIE,
+    tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX,
-    golemdb_index::tables::INDEX_TRIE,
-    golemdb_index::tables::BITMAP_TRIE,
-    golemdb_index::tables::BITMAP_CONTAINER,
+    golemdb_index::tables::INDEX_TRIE.table(),
+    golemdb_index::tables::BITMAP_TRIE.table(),
+    golemdb_index::tables::BITMAP_CONTAINER.table(),
     SUPERBLOCK,
     crate::ROOTS,
 ];
@@ -287,20 +287,17 @@ fn implicit_seal_failure_keeps_branch_open_and_never_opens_writer() {
 
 /// Row keys of `table`, whose paths have `N` bytes, reachable from `roots`,
 /// each in its namespace.
-fn reachable_rows<const N: usize>(
+fn reachable_rows<const N: usize, const NS: usize>(
     tx: &impl golemdb_storage::ReadTransaction,
-    table: Table,
+    table: TrieTable<NS>,
     domain: u8,
-    roots: &[(Option<Hash>, RootRef<N>)],
+    roots: &[([u8; NS], RootRef<N>)],
 ) -> std::collections::BTreeSet<Vec<u8>> {
-    let node_key = |ns: &Option<Hash>, commit, route: &[u8]| {
-        let trie = golemdb_merkle::Trie::<_, N>::new(table, domain, &Keccak256Hasher);
-        match ns {
-            Some(ns) => trie.in_namespace(*ns).node_key(commit, route),
-            None => trie.node_key(commit, route),
-        }
+    let node_key = |ns: [u8; NS], commit, route: &[u8]| {
+        golemdb_merkle::Trie::<_, N, NS>::namespaced(table, ns, domain, &Keccak256Hasher)
+            .node_key(commit, route)
     };
-    let leaf_storage = if table == golemdb_index::tables::BITMAP_TRIE {
+    let leaf_storage = if table.table() == golemdb_index::tables::BITMAP_TRIE.table() {
         golemdb_merkle::LeafStorage::Rows
     } else {
         golemdb_merkle::LeafStorage::InNode
@@ -314,9 +311,9 @@ fn reachable_rows<const N: usize>(
         let RootRef::Branch(branch) = root else {
             continue;
         };
-        let key = node_key(&ns, branch.commit, &route);
+        let key = node_key(ns, branch.commit, &route);
         let bytes = tx
-            .get(table, &key)
+            .get(table.table(), &key)
             .unwrap()
             .expect("reachable row is stored");
         if !seen.insert(key) {
@@ -337,10 +334,7 @@ fn reachable_rows<const N: usize>(
 /// term's routing path.
 fn bitmap_roots(
     db: &impl Store,
-) -> Vec<(
-    Option<Hash>,
-    RootRef<{ golemdb_index::BITMAP_TRIE_PATH_BYTES }>,
-)> {
+) -> Vec<(Hash, RootRef<{ golemdb_index::BITMAP_TRIE_PATH_BYTES }>)> {
     let tx = db.begin_read().unwrap();
     scan_prefix(&tx, golemdb_index::tables::INDEX, vec![])
         .unwrap()
@@ -349,7 +343,7 @@ fn bitmap_roots(
             let ns = IndexTerm::decode(&term)
                 .unwrap()
                 .routing_path(&Keccak256Hasher);
-            (Some(ns), RootRef::decode(&value).unwrap())
+            (ns, RootRef::decode(&value).unwrap())
         })
         .collect()
 }
@@ -385,8 +379,8 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
             })
             .unwrap();
         let sealed = branches.seal(branch).unwrap();
-        states.push((None, sealed.cells.root));
-        indexes.push((None, sealed.index.root));
+        states.push(([], sealed.cells.root));
+        indexes.push(([], sealed.index.root));
         branches.commit(branch).unwrap();
         bitmaps.extend(bitmap_roots(branches.store()));
     }
@@ -399,8 +393,8 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
     };
     // No intermediate versions: every stored trie row belongs to a committed root.
     assert_eq!(
-        rows(tables::CELL_TRIE),
-        reachable_rows::<{ golemdb_cells::CELL_TRIE_PATH_BYTES }>(
+        rows(tables::CELL_TRIE.table()),
+        reachable_rows(
             &tx,
             tables::CELL_TRIE,
             golemdb_cells::CELL_BRANCH_DOMAIN,
@@ -408,8 +402,8 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
         )
     );
     assert_eq!(
-        rows(golemdb_index::tables::INDEX_TRIE),
-        reachable_rows::<{ golemdb_index::INDEX_TRIE_PATH_BYTES }>(
+        rows(golemdb_index::tables::INDEX_TRIE.table()),
+        reachable_rows(
             &tx,
             golemdb_index::tables::INDEX_TRIE,
             golemdb_index::INDEX_BRANCH_DOMAIN,
@@ -417,8 +411,8 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
         )
     );
     assert_eq!(
-        rows(golemdb_index::tables::BITMAP_TRIE),
-        reachable_rows::<{ golemdb_index::BITMAP_TRIE_PATH_BYTES }>(
+        rows(golemdb_index::tables::BITMAP_TRIE.table()),
+        reachable_rows(
             &tx,
             golemdb_index::tables::BITMAP_TRIE,
             golemdb_index::BITMAP_BRANCH_DOMAIN,
@@ -645,7 +639,7 @@ fn a_failed_append_keeps_the_sealed_branch_retryable() {
     )
     .node_key(root.commit, &[]);
     let mut tx = db.begin_write().unwrap();
-    tx.put(tables::CELL_TRIE, &row, b"taken").unwrap();
+    tx.put(tables::CELL_TRIE.table(), &row, b"taken").unwrap();
     tx.commit().unwrap();
     assert!(matches!(
         branches.commit(branch),
@@ -656,7 +650,7 @@ fn a_failed_append_keeps_the_sealed_branch_retryable() {
     assert!(branches.branch_info(branch).unwrap().sealed);
     assert_eq!(branches.head().unwrap().get(), 0);
     let mut tx = db.begin_write().unwrap();
-    tx.delete(tables::CELL_TRIE, &row).unwrap();
+    tx.delete(tables::CELL_TRIE.table(), &row).unwrap();
     tx.commit().unwrap();
     assert_eq!(branches.commit(branch).unwrap().get(), 1);
 }

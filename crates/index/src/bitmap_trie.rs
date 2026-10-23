@@ -17,13 +17,13 @@ impl<'a, H: HashProvider> BitmapTrie<'a, H> {
     /// The bitmap trie of the term whose routing path is `term`.
     pub(crate) fn new(hasher: &'a H, term: &Hash) -> Self {
         Self {
-            trie: PayloadTrie::new(
+            trie: PayloadTrie::namespaced(
                 tables::BITMAP_TRIE,
                 tables::BITMAP_CONTAINER,
+                *term,
                 BITMAP_BRANCH_DOMAIN,
                 hasher,
-            )
-            .in_namespace(*term),
+            ),
             hasher,
         }
     }

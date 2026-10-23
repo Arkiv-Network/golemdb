@@ -1,6 +1,6 @@
 use crate::{
     BranchNodeCompact, BranchRef, Hash, HashProvider, Keccak256Hasher, LeafRef, LeafStorage,
-    MerkleError, Result, RootRef, Trie,
+    MerkleError, Result, RootRef, Trie, TrieTable,
 };
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction};
 use proptest::prelude::*;
@@ -10,7 +10,7 @@ const TEST_BRANCH_DOMAIN: u8 = 0x05;
 const OTHER_BRANCH_DOMAIN: u8 = 0x03;
 
 const HASH: Keccak256Hasher = Keccak256Hasher;
-const TABLE: Table = Table("Branches");
+const TABLE: TrieTable = TrieTable::new(Table("Branches"));
 
 /// A branch whose leaves have no rows, with zero child commits.
 fn compact(
@@ -157,7 +157,7 @@ fn corrupt_hash_and_leaf_routing_fail_on_reads_and_mutations() {
     let key = trie.node_key(0, &[]);
     let mut bytes = node.encode();
     bytes[7] ^= 1;
-    tx.put(TABLE, &key, &bytes).unwrap();
+    tx.put(TABLE.table(), &key, &bytes).unwrap();
     assert!(matches!(
         trie.get(&tx, root, &leaf.path),
         Err(MerkleError::HashMismatch)
@@ -172,7 +172,7 @@ fn corrupt_hash_and_leaf_routing_fail_on_reads_and_mutations() {
     ));
     let mut bytes = node.encode();
     bytes[71] ^= 1; // Unhashed first leaf path, inconsistent with branch prefix.
-    tx.put(TABLE, &key, &bytes).unwrap();
+    tx.put(TABLE.table(), &key, &bytes).unwrap();
     assert!(matches!(
         trie.get(&tx, root, &leaf.path),
         Err(MerkleError::InvalidNode(_))
@@ -194,7 +194,7 @@ fn later_commits_never_overwrite_earlier_rows() {
     };
     let mut tx = db.begin_write().unwrap();
     let first = trie.insert(&mut tx, 1, a, &b.path, b.hash).unwrap();
-    let row = tx.get(TABLE, &trie_key(1)).unwrap();
+    let row = tx.get(TABLE.table(), &trie_key(1)).unwrap();
     assert_eq!(
         first,
         RootRef::Branch(BranchRef {
@@ -206,8 +206,8 @@ fn later_commits_never_overwrite_earlier_rows() {
     let second = trie.insert(&mut tx, 2, a, &b.path, b.hash).unwrap();
     assert_eq!(second.hash(&HASH), first.hash(&HASH));
     assert!(matches!(second, RootRef::Branch(b) if b.commit == 2));
-    assert_eq!(tx.get(TABLE, &trie_key(2)).unwrap(), row);
-    assert_eq!(tx.get(TABLE, &trie_key(1)).unwrap(), row);
+    assert_eq!(tx.get(TABLE.table(), &trie_key(2)).unwrap(), row);
+    assert_eq!(tx.get(TABLE.table(), &trie_key(1)).unwrap(), row);
 }
 
 fn trie_key(commit: u64) -> Vec<u8> {
@@ -222,12 +222,16 @@ fn branch_depth_is_checked_in_context() {
     let child = compact(vec![0; 5], 10, 3, 3, vec![[0; 32], [1; 32]], vec![]).unwrap();
     let child_hash = child.hash(TEST_BRANCH_DOMAIN, &HASH);
     for slot in [0, 1] {
-        tx.put(TABLE, &trie.node_key(0, &[0, 0, slot]), &child.encode())
-            .unwrap();
+        tx.put(
+            TABLE.table(),
+            &trie.node_key(0, &[0, 0, slot]),
+            &child.encode(),
+        )
+        .unwrap();
     }
     let parent = compact(vec![0], 2, 3, 3, vec![child_hash, child_hash], vec![]).unwrap();
     let parent_hash = parent.hash(TEST_BRANCH_DOMAIN, &HASH);
-    tx.put(TABLE, &trie.node_key(0, &[]), &parent.encode())
+    tx.put(TABLE.table(), &trie.node_key(0, &[]), &parent.encode())
         .unwrap();
     let branch = |hash| RootRef::Branch(BranchRef { hash, commit: 0 });
     assert!(matches!(
@@ -236,7 +240,7 @@ fn branch_depth_is_checked_in_context() {
     ));
     let terminal = compact(vec![0; 6], 11, 3, 3, vec![[0; 32], [1; 32]], vec![]).unwrap();
     let hash = terminal.hash(TEST_BRANCH_DOMAIN, &HASH);
-    tx.put(TABLE, &trie.node_key(0, &[]), &terminal.encode())
+    tx.put(TABLE.table(), &trie.node_key(0, &[]), &terminal.encode())
         .unwrap();
     assert!(matches!(
         trie.get(&tx, branch(hash), &[0; 6]),

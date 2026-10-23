@@ -16,11 +16,11 @@ use std::{
 const SUPERBLOCK: Table = Table("Superblock");
 const TABLES: [Table; 8] = [
     tables::CELL,
-    tables::CELL_TRIE,
+    tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX,
-    golemdb_index::tables::INDEX_TRIE,
-    golemdb_index::tables::BITMAP_TRIE,
-    golemdb_index::tables::BITMAP_CONTAINER,
+    golemdb_index::tables::INDEX_TRIE.table(),
+    golemdb_index::tables::BITMAP_TRIE.table(),
+    golemdb_index::tables::BITMAP_CONTAINER.table(),
     SUPERBLOCK,
     Table("Roots"),
 ];

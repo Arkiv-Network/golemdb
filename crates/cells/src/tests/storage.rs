@@ -65,7 +65,7 @@ fn transitions_and_tagged_commitments(db: &impl Store) {
         rows(&tx, tables::CELL),
         vec![(key(42, b"status").encode(), b"\x02ready".to_vec())]
     );
-    assert!(rows(&tx, tables::CELL_TRIE).is_empty());
+    assert!(rows(&tx, tables::CELL_TRIE.table()).is_empty());
     cells.validate_root(&tx, first.root).unwrap();
     // The same payload under a different kind/type has a different commitment.
     let attr: CellValue = CellValueRef::new(CellType::Str, b"ready", true)
@@ -126,7 +126,7 @@ fn transitions_and_tagged_commitments(db: &impl Store) {
         .root;
     assert_eq!(empty, RootRef::Empty);
     assert!(rows(&tx, tables::CELL).is_empty());
-    assert!(!rows(&tx, tables::CELL_TRIE).is_empty());
+    assert!(!rows(&tx, tables::CELL_TRIE.table()).is_empty());
     cells.validate_root(&tx, empty).unwrap();
     tx.commit().unwrap();
 }
@@ -186,7 +186,7 @@ fn batches_report_original_and_final_values_and_skip_noops(db: &impl Store) {
             [put(42, b"a", b"old"), put(42, b"b", b"same")],
         )
         .unwrap();
-    let branch_rows = rows(&tx, tables::CELL_TRIE);
+    let branch_rows = rows(&tx, tables::CELL_TRIE.table());
     let noops = cells
         .apply(
             &mut tx,
@@ -204,7 +204,7 @@ fn batches_report_original_and_final_values_and_skip_noops(db: &impl Store) {
         .unwrap();
     assert_eq!(noops.root, first.root);
     assert!(noops.changed_cells.is_empty());
-    assert_eq!(rows(&tx, tables::CELL_TRIE), branch_rows);
+    assert_eq!(rows(&tx, tables::CELL_TRIE.table()), branch_rows);
     let changed = cells
         .apply(
             &mut tx,
@@ -264,7 +264,7 @@ fn snapshots_abort_and_old_branches(db: &impl Store) {
     tx.put(HEAD, b"root", &root.hash(&HASH)).unwrap();
     tx.commit().unwrap();
     let snapshot = db.begin_read().unwrap();
-    let old_branches = rows(&snapshot, tables::CELL_TRIE);
+    let old_branches = rows(&snapshot, tables::CELL_TRIE.table());
     // Later batches are later commits; earlier commits' rows are never rewritten.
     let mut tx = db.begin_write().unwrap();
     let next = cells
@@ -295,7 +295,7 @@ fn snapshots_abort_and_old_branches(db: &impl Store) {
         // Drop is also an abort.
     }
     let read = db.begin_read().unwrap();
-    assert_eq!(rows(&read, tables::CELL_TRIE), old_branches);
+    assert_eq!(rows(&read, tables::CELL_TRIE.table()), old_branches);
     assert_eq!(
         read.get(HEAD, b"root").unwrap(),
         Some(root.hash(&HASH).to_vec())
@@ -318,7 +318,10 @@ fn snapshots_abort_and_old_branches(db: &impl Store) {
         Some(value(b"three"))
     );
     for (key, bytes) in old_branches {
-        assert_eq!(latest.get(tables::CELL_TRIE, &key).unwrap(), Some(bytes));
+        assert_eq!(
+            latest.get(tables::CELL_TRIE.table(), &key).unwrap(),
+            Some(bytes)
+        );
     }
     let trie = Trie::<_, CELL_TRIE_PATH_BYTES>::new(tables::CELL_TRIE, CELL_BRANCH_DOMAIN, &HASH);
     let mut expected = vec![
@@ -378,7 +381,8 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
     tx.commit().unwrap();
     let mut tx = db.begin_write().unwrap();
     // Never treat a missing branch row as a singleton when multiple cells exist.
-    tx.delete(tables::CELL_TRIE, &root_key(&root)).unwrap();
+    tx.delete(tables::CELL_TRIE.table(), &root_key(&root))
+        .unwrap();
     assert!(matches!(
         cells.validate_root(&tx, root),
         Err(CellError::Merkle(
@@ -387,7 +391,7 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
     ));
     tx.abort();
     let mut tx = db.begin_write().unwrap();
-    tx.put(tables::CELL_TRIE, &root_key(&root), b"broken")
+    tx.put(tables::CELL_TRIE.table(), &root_key(&root), b"broken")
         .unwrap();
     assert!(matches!(
         cells.validate_root(&tx, root),

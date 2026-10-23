@@ -130,7 +130,7 @@ fn abort_after_a_flat_write_failure_discards_intermediate_trie_nodes() {
     ));
     // The trie write preceded the failed flat write. Caller must abort both.
     assert!(
-        tx.cursor(tables::CELL_TRIE, b"")
+        tx.cursor(tables::CELL_TRIE.table(), b"")
             .unwrap()
             .next()
             .unwrap()
@@ -139,7 +139,7 @@ fn abort_after_a_flat_write_failure_discards_intermediate_trie_nodes() {
     tx.abort();
     let read = db.begin_read().unwrap();
     assert!(
-        read.cursor(tables::CELL_TRIE, b"")
+        read.cursor(tables::CELL_TRIE.table(), b"")
             .unwrap()
             .next()
             .unwrap()

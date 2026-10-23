@@ -63,17 +63,20 @@ fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Hash> {
 fn bitmap_root_row(tx: &impl ReadTransaction, t: &IndexTerm) -> (golemdb_storage::Table, Vec<u8>) {
     let value = tx.get(tables::INDEX, t.as_bytes()).unwrap().unwrap();
     let ns = t.routing_path(&HASH);
-    let trie = PayloadTrie::new(
+    let trie = PayloadTrie::namespaced(
         tables::BITMAP_TRIE,
         tables::BITMAP_CONTAINER,
+        ns,
         BITMAP_BRANCH_DOMAIN,
         &HASH,
-    )
-    .in_namespace(ns);
+    );
     match RootRef::<6>::decode(&value).unwrap() {
-        RootRef::Branch(branch) => (tables::BITMAP_TRIE, trie.node_key(branch.commit, &[])),
+        RootRef::Branch(branch) => (
+            tables::BITMAP_TRIE.table(),
+            trie.node_key(branch.commit, &[]),
+        ),
         RootRef::Leaf(leaf) => (
-            tables::BITMAP_CONTAINER,
+            tables::BITMAP_CONTAINER.table(),
             trie.leaf_key(leaf.commit, &leaf.path),
         ),
         RootRef::Empty => unreachable!("Index rows hold nonempty roots"),
@@ -146,8 +149,8 @@ fn empty_singleton_branches_and_last_posting_removal() {
     assert!(matches!(update.root, RootRef::Leaf(_)));
     assert_eq!(update.changed_terms.len(), 1);
     assert_eq!(update.changed_terms[0].before, None);
-    assert!(rows(&tx, tables::BITMAP_TRIE).is_empty());
-    assert!(rows(&tx, tables::INDEX_TRIE).is_empty());
+    assert!(rows(&tx, tables::BITMAP_TRIE.table()).is_empty());
+    assert!(rows(&tx, tables::INDEX_TRIE.table()).is_empty());
     let update = index
         .apply(
             &mut tx,
@@ -194,7 +197,7 @@ fn empty_singleton_branches_and_last_posting_removal() {
     assert_eq!(update.root, RootRef::Empty);
     assert_eq!(update.changed_terms[0].after, None);
     assert!(rows(&tx, tables::INDEX).is_empty());
-    assert!(!rows(&tx, tables::BITMAP_CONTAINER).is_empty()); // immutable history retained
+    assert!(!rows(&tx, tables::BITMAP_CONTAINER.table()).is_empty()); // immutable history retained
 }
 
 #[test]
@@ -213,7 +216,7 @@ fn duplicate_changes_cancel_and_equal_terms_keep_separate_rows() {
         )
         .unwrap();
     // Identical containers of different terms are separate rows, one per term.
-    assert_eq!(rows(&tx, tables::BITMAP_CONTAINER).len(), 2);
+    assert_eq!(rows(&tx, tables::BITMAP_CONTAINER.table()).len(), 2);
     assert_eq!(root_for(&tx, &a), root_for(&tx, &b));
     let before = root_for(&tx, &a);
     let noop = index
@@ -517,7 +520,7 @@ fn corrupt_missing_and_mismatched_state_is_not_absence() {
     );
     assert!(index.validate_root(&tx, RootRef::Empty).is_err());
     let (table, container) = bitmap_root_row(&tx, &t);
-    assert_eq!(table, tables::BITMAP_CONTAINER);
+    assert_eq!(table, tables::BITMAP_CONTAINER.table());
     let original = tx.get(table, &container).unwrap().unwrap();
     tx.delete(table, &container).unwrap();
     assert!(index.bitmap(&tx, &t).is_err());
@@ -540,7 +543,7 @@ fn corrupt_missing_and_mismatched_state_is_not_absence() {
     let root_row =
         Trie::<_, INDEX_TRIE_PATH_BYTES>::new(tables::INDEX_TRIE, INDEX_BRANCH_DOMAIN, &HASH)
             .node_key(branch.commit, &[]);
-    tx.delete(tables::INDEX_TRIE, &root_row).unwrap();
+    tx.delete(tables::INDEX_TRIE.table(), &root_row).unwrap();
     // A missing branch row is never mistaken for an empty or singleton root.
     assert!(index.validate_root(&tx, root).is_err());
     assert!(
@@ -549,7 +552,7 @@ fn corrupt_missing_and_mismatched_state_is_not_absence() {
             .is_err()
     ); // multiple flat rows cannot be a singleton
     let (table, branch) = bitmap_root_row(&tx, &t);
-    assert_eq!(table, tables::BITMAP_TRIE);
+    assert_eq!(table, tables::BITMAP_TRIE.table());
     tx.delete(table, &branch).unwrap();
     assert!(index.bitmap(&tx, &t).is_err());
 }

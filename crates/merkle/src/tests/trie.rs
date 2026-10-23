@@ -4,12 +4,13 @@ use std::{
 };
 
 use crate::{
-    BranchNodeCompact, Hash, HashProvider, Keccak256Hasher, LeafRef, MerkleError, RootRef, Trie,
+    BranchNodeCompact, HASH_BYTES, Hash, HashProvider, Keccak256Hasher, LeafRef, MerkleError,
+    RootRef, Trie, TrieTable,
 };
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
 
-const TABLE: Table = Table("TestBranches");
+const TABLE: TrieTable = TrieTable::new(Table("TestBranches"));
 const TEST_LEAF_DOMAIN: u8 = 0x04;
 const TEST_BRANCH_DOMAIN: u8 = 0x05;
 
@@ -149,7 +150,7 @@ fn branches<const N: usize>(tx: &impl ReadTransaction, root: RootRef<N>) -> BTre
         if let RootRef::Branch(branch) = root {
             let key = trie.node_key(branch.commit, &route);
             let node = BranchNodeCompact::<N>::decode(
-                &tx.get(TABLE, &key).unwrap().unwrap(),
+                &tx.get(TABLE.table(), &key).unwrap().unwrap(),
                 crate::LeafStorage::InNode,
             )
             .unwrap();
@@ -167,7 +168,7 @@ fn branches<const N: usize>(tx: &impl ReadTransaction, root: RootRef<N>) -> BTre
 
 /// Every row of the test branch table.
 fn rows(tx: &impl ReadTransaction) -> BTreeSet<Vec<u8>> {
-    scan_prefix(tx, TABLE, vec![])
+    scan_prefix(tx, TABLE.table(), vec![])
         .unwrap()
         .map(|row| row.unwrap().0)
         .collect()
@@ -643,7 +644,7 @@ fn storage_errors_propagate_and_abort_discards_partial_branches() {
         Err(MerkleError::Storage(_))
     ));
     assert_eq!(tx.writes, 2);
-    let rows = golemdb_storage::scan_prefix(&tx, TABLE, vec![])
+    let rows = golemdb_storage::scan_prefix(&tx, TABLE.table(), vec![])
         .unwrap()
         .collect::<golemdb_storage::Result<Vec<_>>>()
         .unwrap();
@@ -651,7 +652,7 @@ fn storage_errors_propagate_and_abort_discards_partial_branches() {
     tx.abort();
     let read = db.begin_read().unwrap();
     assert_eq!(
-        golemdb_storage::scan_prefix(&read, TABLE, vec![])
+        golemdb_storage::scan_prefix(&read, TABLE.table(), vec![])
             .unwrap()
             .count(),
         1
@@ -713,6 +714,9 @@ fn aborted_rewrite_of_a_committed_row_leaves_it_intact() {
     ));
 }
 
+/// Branches of tries namespaced by a hash.
+const NAMESPACED: TrieTable<HASH_BYTES> = TrieTable::new(Table("TestNamespacedBranches"));
+
 proptest! {
     /// Branch keys of namespaced tries sharing a table never coincide.
     #[test]
@@ -724,7 +728,12 @@ proptest! {
     ) {
         let mut seen = BTreeMap::new();
         for (namespace, route) in &rows {
-            let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).in_namespace(*namespace);
+            let trie = Trie::<_, 6, HASH_BYTES>::namespaced(
+                NAMESPACED,
+                *namespace,
+                TEST_BRANCH_DOMAIN,
+                &HASH,
+            );
             let previous = seen.insert(trie.node_key(1, route), (namespace, route));
             prop_assert!(previous.is_none_or(|row| row == (namespace, route)));
         }
@@ -743,7 +752,7 @@ fn namespaced_tries_sharing_a_table_keep_their_own_rows() {
         .map(|id| leaf::<6>(key(id), id as u32))
         .collect::<Vec<_>>();
     let trie = |namespace: &Hash| {
-        Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH).in_namespace(*namespace)
+        Trie::<_, 6, HASH_BYTES>::namespaced(NAMESPACED, *namespace, TEST_BRANCH_DOMAIN, &HASH)
     };
     let roots = namespaces.each_ref().map(|namespace| {
         let edits = leaves.iter().map(|leaf| (leaf.path, Some(leaf.hash)));
@@ -789,7 +798,7 @@ fn roots_with_32_byte_paths_and_the_empty_root_round_trip() {
     }
 }
 
-const LEAVES: Table = Table("TestLeaves");
+const LEAVES: TrieTable = TrieTable::new(Table("TestLeaves"));
 
 #[test]
 #[should_panic(expected = "leaf rows need a table of their own")]
@@ -816,11 +825,14 @@ fn payload_tries_store_rows_and_skip_unchanged_leaves() {
             (0..4).map(|id| (key(id), Some(payload(id, 0)))),
         )
         .unwrap();
-    let rows = scan_prefix(&tx, LEAVES, vec![]).unwrap().count();
+    let rows = scan_prefix(&tx, LEAVES.table(), vec![]).unwrap().count();
     // Commit 2 re-applies every payload but changes only leaf 0.
     let edits = (0..4).map(|id| (key(id), Some(payload(id, u8::from(id == 0)))));
     let second = trie.apply(&mut tx, 2, first, edits).unwrap();
-    assert_eq!(scan_prefix(&tx, LEAVES, vec![]).unwrap().count(), rows + 1);
+    assert_eq!(
+        scan_prefix(&tx, LEAVES.table(), vec![]).unwrap().count(),
+        rows + 1
+    );
     let leaves: Vec<_> = trie.walk(&tx, second).map(|leaf| leaf.unwrap()).collect();
     assert_eq!(
         leaves.iter().map(|leaf| leaf.commit).collect::<Vec<_>>(),
