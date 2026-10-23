@@ -1,4 +1,6 @@
-use crate::{BranchNodeCompact, Hash, HashProvider, MerkleError, Result, path};
+use crate::{
+    BranchNodeCompact, Hash, HashProvider, MerkleError, Result, node::check_path_width, path,
+};
 use golemdb_storage::{ReadTransaction, StorageError, Table, WriteTransaction};
 
 /// The owner supplies a hash binding the complete path and its leaf payload.
@@ -44,7 +46,8 @@ pub struct Trie<'h, H: HashProvider, const N: usize> {
 
 impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     /// The owner assigns `domain`, the byte prefixed to every branch hash.
-    /// Configure a trie. Path widths outside 1..=32 bytes fail at compile time.
+    /// Configure a trie. Path widths outside 1..=[`MAX_PATH_BYTES`](crate::MAX_PATH_BYTES)
+    /// fail at compile time.
     ///
     /// ```compile_fail,E0080
     /// use golemdb_merkle::{Keccak256Hasher, Trie};
@@ -54,18 +57,14 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     /// ```
     ///
     /// ```compile_fail,E0080
-    /// use golemdb_merkle::{Keccak256Hasher, Trie};
+    /// use golemdb_merkle::{Keccak256Hasher, MAX_PATH_BYTES, Trie};
     /// use golemdb_storage::Table;
     /// const EXAMPLE_BRANCH_DOMAIN: u8 = 0x03;
-    /// let _ = Trie::<_, 33>::new(Table("Branches"), EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
+    /// type TooWide<'h> = Trie<'h, Keccak256Hasher, { MAX_PATH_BYTES + 1 }>;
+    /// let _ = TooWide::new(Table("Branches"), EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
     /// ```
     pub fn new(table: Table, domain: u8, hasher: &'h H) -> Self {
-        const {
-            assert!(
-                N >= 1 && N <= 32,
-                "Merkle paths must contain between 1 and 32 bytes"
-            )
-        };
+        const { check_path_width::<N>() };
         Self {
             table,
             domain,
