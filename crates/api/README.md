@@ -117,6 +117,13 @@ and failures before selecting a snapshot have no pricing commit. `receipt.detail
 counts actual user-cell changes and encoded bytes; it excludes system cells,
 no-ops, failed writes and reads. Rollback does not revoke earlier receipts.
 
+`receipt.ledger` contains charged units per weight name, in name order. It is
+separate from `details`: admission, reads and system mutations can be charged
+without changing user data. `Ledger` and `WeightName` are re-exported by the API.
+The standalone metering core now calculates costs and ledgers; database calls
+still return an empty ledger until their planner is connected to it. Outcome-to-API
+conversion already forwards accounting on both success and failure.
+
 Every request constructor requires `Budget::Limited(n)` or `Budget::Unlimited`:
 `RecordOp::create(key, budget)`, `patch(key, budget)`, `get(key, budget)`,
 `delete(key, budget)`, `QueryOp::from_filter(filter, budget)` and

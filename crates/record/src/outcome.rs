@@ -1,5 +1,6 @@
 use golemdb_branch::CommitId;
 use golemdb_cells::{CellName, CellValue};
+use golemdb_metering::{Accounting, MeteringFailure};
 
 use crate::{RecordError, Result};
 
@@ -11,6 +12,7 @@ pub struct Outcome<T, E> {
     pub result: std::result::Result<T, E>,
     pub priced_at: Option<CommitId>,
     pub effects: Effects,
+    pub accounting: Accounting,
 }
 
 impl<T, E> Outcome<T, E> {
@@ -28,7 +30,27 @@ impl<T, E> Outcome<T, E> {
             result,
             priced_at,
             effects,
+            accounting: Accounting::default(),
         }
+    }
+
+    /// Charges survive failure even though applied effects do not.
+    pub fn with_accounting(mut self, accounting: Accounting) -> Self {
+        self.accounting = accounting;
+        self
+    }
+}
+
+impl<T> Outcome<T, RecordError> {
+    /// Preserve both budget diagnostics and completed work from the meter.
+    pub fn metering_failure(priced_at: Option<CommitId>, failure: MeteringFailure) -> Self {
+        let accounting = failure.accounting.clone();
+        Self::new(
+            Err(RecordError::Metering(failure)),
+            priced_at,
+            Effects::default(),
+        )
+        .with_accounting(accounting)
     }
 }
 

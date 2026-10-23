@@ -31,6 +31,7 @@ fn filter(name: &str) -> Filter {
 
 fn unchanged<T>(call: &Metered<T>, head: Option<CommitId>) {
     assert_eq!(call.receipt.cost, 0);
+    assert!(call.receipt.ledger.is_empty());
     assert_eq!(call.receipt.priced_at, head);
     assert_eq!(call.receipt.details, Details::default());
 }

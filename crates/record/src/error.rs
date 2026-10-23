@@ -18,6 +18,8 @@ pub enum RecordError {
     },
     #[error("record effect count overflow")]
     AccountingOverflow,
+    #[error(transparent)]
+    Metering(#[from] golemdb_metering::MeteringFailure),
     #[error("missing or inconsistent initialized record state: {0}")]
     CorruptState(&'static str),
     #[error("record ID space exhausted")]

@@ -27,7 +27,8 @@
 //!
 //! Every CRUD operation requires an explicit [`golemdb_metering::Budget`] and
 //! returns an [`Outcome`] with execution context and actual user effects for
-//! API receipts. Pricing and budget enforcement remain deferred.
+//! API receipts. Outcomes can carry the meter's cost and ledger, including on
+//! failure; connecting actual CRUD planning to pricing remains deferred.
 //! [`ReadTarget::Head`] selects and reads the current head in one snapshot.
 //! Commit-targeted reads support the head only and explicitly reject other
 //! commits until history is available. Deletes enumerate and tombstone every

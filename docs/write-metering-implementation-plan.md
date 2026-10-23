@@ -1,8 +1,8 @@
 # Write metering implementation plan
 
-Implement the public receipt contract first, then per-record metadata, then budgeted write planning and execution. Metering orchestration belongs in `golemdb-record`; `golemdb-metering` owns the shared `Budget` type and will own pricing rules, weights and budget accounting. The branch crate continues to provide state access, isolation, rollback and commit.
+Implement the public receipt contract first, then per-record metadata, then budgeted write planning and execution. Metering orchestration belongs in `golemdb-record`; `golemdb-metering` owns `Budget`, pricing rules, weights, ledgers and budget accounting. The branch crate continues to provide state access, isolation, rollback and commit.
 
-This plan covers `create`, `patch` and `delete`, including their planning reads. `get`, `query` and `count` receive the new result shape immediately, but their pricing remains deferred until the read-metering design is complete. Returning a receipt does not yet imply that a call enforces a work budget.
+This plan covers `create`, `patch` and `delete`, including their planning reads. `get`, `query` and `count` receive the new result shape immediately, but their pricing remains outside this write-metering implementation. Returning a receipt does not yet imply that a call enforces a work budget.
 
 **Release scope:** iterations **1–6 are priority 1 for the Mumbai release**. Iterations **7–9 are after Mumbai and are not priority 1**: estimation/deletion bounds, runtime model and weight updates, and broader calibration/verification. The focused acceptance tests in iterations 1–6 remain part of Mumbai scope.
 
@@ -17,7 +17,7 @@ Sources: [metering specification](golemdb-metering.md), [API receipts](golemdb-a
 - Define `Budget` in the metering crate and re-export it from API and query. Keep `QueryOp` and `CountOp` in query for now; moving their public builders into API is deferred.
 - Planning reads are budgeted while the plan is being built. Building an unrestricted plan and pricing it afterward would not meet the specification.
 - Use index-term existence at the branch base for the initial creation surcharge. Do not implement a branch-aware index overlay for pricing in this work.
-- Keep actual index maintenance and global population counts exact. The pricing simplification does not change committed database contents.
+- Keep actual index maintenance exact. Use the named `INITIAL_DEPTHS` constant (6 for both tries) initially; database-wide population counters and D3 depth selection are deferred. The pricing simplifications do not change committed user data or index contents.
 - Leave public read pricing, immutable-data pricing, and unrelated API features outside this work. In particular, this plan does not require implementing generated record keys or a new query planner.
 
 ## 2. Ownership and interfaces
@@ -26,7 +26,7 @@ Sources: [metering specification](golemdb-metering.md), [API receipts](golemdb-a
 | --- | --- |
 | `api` | Public CRUD requests, query/count and `Budget` re-exports, `Metered<T>`, receipts and error conversion; genesis/admin integration and database construction. |
 | `record` | Admission, record semantics, metered planning reads, `WritePlan`, metadata and effect calculation, final approval and application. |
-| `metering` | Shared `Budget` type now; typed schedules, supported model identifiers, checked cost arithmetic, modeled depths, logical operation prices and per-call budget accounting in iteration 3. |
+| `metering` | `Budget`, immutable schedules, supported code identifiers, checked pricing/count arithmetic, explicit modeled depths, ledgers and per-call accounting. No database dependencies. |
 | `branch` | A stable state view while planning/applying, origin/head validation, overlay mutation, rollback, sealing and commit; access to base state needed by record planning. |
 | `cells` / `index` | Encodings and storage primitives, including a point lookup that checks whether a term exists without loading its posting list. Record calls using these primitives are charged through the meter; the storage crates neither choose prices nor track a caller's budget. |
 | `query` | Query/count request builders, existing query planning/execution and receipt context now; its own metered execution later. |
@@ -47,95 +47,105 @@ The old user-cell value comes from current branch state, including earlier write
 
 `WritePlan` belongs to the record crate. A future plan for record reads, if needed, would also belong there; a query plan belongs to the query crate. Write-planning reads do not require a separate `ReadPlan` object: the write planner performs them incrementally through metered helpers. The metering crate accepts charge descriptions and has no executable read or write plans.
 
-### Proposed metering interface
+### Metering interface (iteration 3)
 
-The following describes responsibilities rather than a final Rust API. One `WriteMeter` instance owns all accounting for one call: its budget, completed planning cost (`spent`), prospective mutation cost, and optional diagnostic counts. The record layer owns and uses that instance but does not maintain a second balance or manually subtract charges.
-
-```rust
-enum PlanningStep {
-    AdmissionBase,
-    AdmissionEntry,
-    AdmissionBytes(u64),
-    RecordBase(RecordOpKind),
-    CellRead,
-    IndexRead,
-}
-
-enum MutationCharge {
-    Cell { kind: CellMutationKind, bytes_written: u64 },
-    Index {
-        kind: IndexMutationKind,
-        bytes_written: u64,
-        charge_term_creation: bool,
-    },
-}
-
-struct ModeledDepths {
-    cell_trie: u8,
-    index_trie: u8,
-}
-
-// Opaque, single-use approval for one planning step; fields are private.
-// Exact representation is an implementation choice.
-struct StepCharge {
-    step: PlanningStep,
-    amount: u64,
-}
-
-// Conceptual methods; signatures and ownership can follow crate conventions.
-WriteMeter::new(schedule, modeled_depths, budget)
-meter.check_step(step) -> StepCharge | MeteringFailure
-meter.complete_step(charge)
-meter.add_planned_mutation(mutation) -> () | MeteringFailure
-meter.spent() -> u64 // Completed planning cost, including on a non-budget error.
-meter.finish() -> ApprovedCost | MeteringFailure
-```
-
-`modeled_depths` contains the cell-trie and index-trie pricing depths from D3. Derive them from the committed `#alloc.#liveCells` and `#alloc.#indexTerms` counters at the branch base using the pinned table (depths 4, 5, 6 or 7). These are pricing approximations, not measurements of actual traversed paths. For example, the cell path charge is `cell_trie * w_cell_trie_update`. The counters are not implemented in the current crates; iteration 5 adds their initialization, persistence and maintenance. The arithmetic can be implemented and tested with supplied counts in iteration 3.
-
-`PlanningStep` describes work actually performed while building the plan: input checks, the binding lookup, and cell/index reads. It does not describe a future mutation. For each step:
-
-1. `check_step(step)` looks up its price, checks arithmetic and verifies that `spent + price` fits the limited budget. On failure it returns `OutOfBudget` before the step runs. On success it returns a `StepCharge` containing the approved amount and the step kind for accounting/diagnostics. It does not yet add that amount to `spent`.
-2. The record helper performs the approved work.
-3. `complete_step(charge)` consumes the approval and records its amount in the meter's `spent`. It does not calculate a second price, ask the record layer to update a balance, or charge twice.
-
-`StepCharge` is an internal approval token, not a receipt or a separate budget. It must be single-use, completed on the meter that issued it, and used in a serialized check/work/complete sequence. Hide this sequence behind a helper or guard; callers must not accumulate multiple approvals against the same unchanged balance. The exact token/guard representation can be chosen during implementation.
-
-A successful read returning “missing” is a completed, charged read. A validation check that detects invalid input is also completed and must be charged before its domain error is propagated. Local storage faults are operational failures, not deterministic validation outcomes; define their accounting at the helper boundary rather than letting an incidental early return decide it.
-
-`add_planned_mutation` accumulates prospective write cost without adding it to `spent`. `finish` compares the complete total with the budget. It either approves application or returns `OutOfBudget` with the completed planning cost and `required: Some(total)`. An earlier budget stop, missing required weight or overflow returns `required: None`. No extra reads run just to discover a full required price after an early stop.
-
-For example, with budget `10`, planning `spent = 4`, and `w_cell_read = 2`, `check_step(CellRead)` approves `2` while `spent` stays `4`. After the read, `complete_step` advances `spent` to `6`. A later planned mutation costing `5` leaves `spent` at `6` and makes the proposed total `11`; final approval fails with receipt cost `6` and `required: Some(11)`. With budget `11`, application succeeds and the receipt cost is `11`, including the planning cost once.
-
-The core crate also exposes pure pricing/size-independent arithmetic helpers and schedule validation. It must distinguish a missing weight from an explicit zero. `Unlimited` disables budget comparisons only; validation and checked arithmetic still apply.
-
-Keep `CommitId` and database access outside this core: `CommitId` currently belongs to the branch crate. A record integration context can combine the origin commit, an immutable schedule and modeled depths. Avoid creating a dependency from `metering` back to `record`, `branch` or `api`.
-
-### Record-side planning reads
-
-Add a small record-side adapter over the existing branch read view and `WriteMeter`:
+One `WriteMeter` owns one call's budget, completed planning accounting and prospective
+mutation accounting. `Accounting` contains a `cost` and a `Ledger`: counts per exact
+weight name, in name order. `Details` continues to describe user-data effects. System
+mutations and reads appear in the ledger even though they are absent from effects.
+Internally, `planning_accounting` holds charged admission and planning work, while
+`mutation_accounting` holds prospective mutation charges. Combined overflow checks
+compute a temporary total without changing either accounting value.
 
 ```text
-check logical read charge
-perform the corresponding state read
-record the completed charge
-return the observed value to the planner
+PlanningStep:
+    AdmissionBase | AdmissionEntry | AdmissionBytes(count)
+    RecordBase(Create | Patch | Delete) | CellRead | TermRead
+
+MutationCharge:
+    CellCreate(bytes_written) | CellUpdate(bytes_written) | CellDelete
+    IndexJoin(bytes_written, create_term) | IndexLeave
+
+WriteMeter.new(schedule, modeled_depths, budget)
+meter.run_step(step, action) -> action result | MeteringFailure
+meter.add_planned_mutation(mutation) -> () | MeteringFailure
+meter.into_accounting() -> completed planning cost and ledger; discard planned writes
+meter.finish() -> approved total Accounting | MeteringFailure; consumes meter
 ```
 
-Conceptually, the adapter's cell-read helper contains:
+`Schedule` has immutable named `u64` weights and a supported write code identifier.
+The initial identifier is `WRITE_CODE_VERSION`; it identifies the pricing code, not
+an activated database model version. Missing weights remain absent, explicit zero
+weights remain valid, and duplicate names and unsupported code versions are rejected.
+Extra names, including host weights, remain inspectable but the write meter selects
+only its own declared weights. Genesis/name declarations and activation validation
+remain iteration 5/8 responsibilities. A failure retains the missing weight name for
+integration-layer diagnostics.
 
-```rust
-let charge = meter.check_step(PlanningStep::CellRead)?;
-let old_value = reader.get(key)?; // A successful None is still a completed read.
-meter.complete_step(charge);
-Ok(old_value)
+`ModeledDepths` is passed explicitly. `INITIAL_DEPTHS` is the temporary named constant
+`{ cell_trie: 6, index_trie: 6 }` for initial integration. Tests may provide other
+values; the worked example below deliberately retains depth 4. There is no database
+counter lookup or population-to-depth function in iteration 3. Restoring D3's 4–7
+table later changes the model's counting rules. The cell path charge is
+`depths.cell_trie × write.cell_trie_update`.
+
+`run_step` implements one atomic check-and-charge-before-work checkpoint:
+
+1. Price all components, check cost and ledger-count arithmetic, and verify that the
+   whole step fits the remaining limited budget. `RecordBase(op)` is the indivisible
+   sum `read.key + write.record.{op}`; neither component can be charged alone.
+2. Record the charge and ledger counts, then invoke the action once. No action runs
+   and no charge is added if the checkpoint fails.
+3. Return the action's result. An absent lookup or a validation error still costs the
+   performed step. An action returning a domain `Result` yields a nested result;
+   the record adapter must propagate that error before attempting any later step.
+
+This combines the earlier `check_step`/`complete_step` proposal into one helper. It
+prevents reused or uncompleted approval tokens and follows D6.3's charge-before-work
+convention. An operational storage fault or panic retains a started step's charge;
+these faults are outside deterministic validation/fee policy. The action itself has
+no access to the mutably borrowed meter. A metering failure stops that meter permanently.
+
+`add_planned_mutation` checks prices and arithmetic without spending mutations or
+comparing their prospective total with the budget. `finish` approves the complete
+representable total, or returns completed planning accounting with
+`required: Some(total)`. Earlier budget stops, missing weights or overflow return
+`required: None`. No extra work runs to discover a total after a failure. Mutations
+are absent from a failure's ledger. `Unlimited` skips budget comparisons only.
+
+For example, with budget `10`, spent `4` and `read.cell = 2`, a funded `CellRead`
+records cost `6` and performs the read. A planned mutation priced at `5` leaves spent
+at `6`; final refusal reports cost `6` and `required: Some(11)`. Budget `11` succeeds
+with cost `11`, including planning only once. All count additions, products and sums
+are checked, including counts whose weights are zero.
+
+`Outcome` carries accounting separately from effects. The API forwards it to
+`Receipt.cost` and `Receipt.ledger`; metering failures map to the existing
+`OutOfBudget { required }`. Other failures also retain their charged work, while
+failed effects remain zero. Unintegrated database calls still produce zero cost and
+an empty ledger. Public request signatures and `Budget` are unchanged. Read-related
+`evaluated_at` changes remain deferred.
+
+Keep `CommitId` and database access outside the metering core. Record integration
+combines the pricing commit, immutable schedule and depths. Persisting this context
+is iteration 5; supplying logical work from real CRUD execution is iteration 4.
+
+### Record-side planning reads (iteration 4)
+
+Use a small record adapter around the existing branch read view and the meter:
+
+```text
+read_cell_metered(key):
+    result = meter.run_step(CellRead, read key from branch state)
+    return result or its error
 ```
 
-This illustrates the normal read path; the helper must also explicitly handle the local-storage-fault policy described above. Record planning calls `read_cell_metered(...)` rather than repeating this sequence throughout CRUD. Whether a missing cell means create, no-op or `CellNotFound` is decided after this read has been charged. For admission validation, record the completed check before returning the validation error.
-
-Use it for `#meta`, touched user cells and index terms. The binding lookup is covered by `w_rec[op]`. Configuration reads and existing identity/integrity checks need an explicit mapping to the reference procedure; do not automatically charge every physical `get` as `w_cell_read`.
-
-This is the read machinery needed first. It is small and reusable in principle, but it does not depend on finalizing Get/Query read prices, sorting, intersections or pagination accounting.
+Use `CellRead` for `#meta` and touched cells, `TermRead` for index-term lookups, and
+`RecordBase(op)` for the binding lookup plus fixed record work. Required reads pay
+when missing too. Configuration reads and identity checks need an explicit mapping
+to the reference procedure; not every physical get is a separate `read.cell`.
+Write planning uses the shared `read.key`, `read.cell` and `read.term` vocabulary,
+without public get/query metering or `read.byte` charges for caller-returned data.
 
 ## 3. Simplified index-term pricing
 
@@ -159,7 +169,7 @@ The repeated-join case implements the accepted overcharging. The remove/recreate
 
 Expose a point lookup of the term's existence in the origin index through the branch read context. Do not load the full posting bitmap to answer this question or reconstruct index state by replaying the branch journal.
 
-The receipt's `index_joins` remains the actual number of logical joins. Do not label the number of creation surcharges as “terms created.” The committed `#indexTerms` counter comes from actual net index changes at seal time.
+The receipt's `index_joins` remains the actual number of logical joins. Do not label the number of creation surcharges as “terms created.” When population counters are implemented later, `#indexTerms` must come from actual net index changes at seal time.
 
 ## 4. Worked example — creating a record in the record crate
 
@@ -174,14 +184,12 @@ Assume the key is unused, the next internal record ID is `42`, and the `color = 
 
 ### Planning and execution
 
-This pseudocode runs in the record crate. A helper keeps each planning step in the required check/work/complete order:
+This pseudocode runs in the record crate. A helper keeps each planning step behind its charge checkpoint:
 
 ```text
 charged_step(step, action):
-    approval = meter.check_step(step)     // Stop before work if unaffordable.
-    outcome = perform action
-    meter.complete_step(approval)        // Record completed work, including a
-    return outcome or its error          // check that detects invalid input.
+    outcome = meter.run_step(step, action) // Check and charge before action.
+    return outcome or its error             // Rejected validation is charged.
 ```
 
 The meter tracks all costs; record code builds the plan and performs the work. Local storage faults follow the separate operational-failure policy described earlier.
@@ -196,7 +204,7 @@ create(request, branch):
     meter = WriteMeter.new(pricing.schedule, pricing.depths, request.budget)
     plan = empty create plan
 
-    PLAN — read state and prepare changes; do not write anything:
+    ADMISSION — inspect the request and immutable configuration; no record reads:
         charged_step(AdmissionBase, validate fixed request fields)
         for each input entry in caller order:
             charged_step(AdmissionEntry, validate header and declared lengths)
@@ -204,6 +212,7 @@ create(request, branch):
             charged_step(AdmissionBytes(n), validate bytes and requested kind,
                          reject duplicates and prepare the validated entry)
 
+    STATE-DEPENDENT PLAN — read state and prepare changes; do not write anything:
         binding = charged_step(RecordBase(Create), read key binding)
         if binding exists: fail with AlreadyExists
 
@@ -213,7 +222,7 @@ create(request, branch):
         for each user cell in name order:
             Add its create to the plan and update user-effect/metadata counts.
             if it is an attribute:
-                exists = charged_step(IndexRead, look up its term at branch base)
+                exists = charged_step(TermRead, look up its term at branch base)
                 Add a planned join, with creation surcharge when not exists.
 
         Check the resulting metadata against the record caps.
@@ -236,11 +245,11 @@ create(request, branch):
         Return the record key, approved total cost, pricing commit, user effects.
 ```
 
-On an early failure, completed cost comes from `meter.spent()`; a `finish` failure carries it in the failure result. Planned mutation costs are not spent until successful application. Application reuses the prepared values and makes no further pricing decisions or state reads.
+On an ordinary planning failure, `meter.into_accounting()` returns the completed planning cost and ledger. Metering failures, including final budget refusal from `finish`, carry that accounting in `MeteringFailure.accounting`. Planned mutation costs are not spent until successful application. Application reuses the prepared values and makes no further pricing decisions or state reads.
 
-Allocator work is covered by `w_rec[create]`; the allocator is excluded from the priced cell creates. Persistence of its final value is host-funded. The planned index joins are charged now; sealing later applies the net index changes without charging again. Estimation follows the same flow through approval and skips application.
+In-memory allocator work is covered by `write.record.create`; its separate binding lookup uses `read.key`; the allocator is excluded from the priced cell creates. Persistence of its final value is host-funded. The planned index joins are charged now; sealing later applies the net index changes without charging again. Estimation follows the same flow through approval and skips application.
 
-Admission validates the original entries at their defined checkpoints; builders have done no request validation. Each failed validation check must complete its charge before its error is propagated. Process entries in input order, checking name/value lengths before name grammar, requested kind and duplicates; fixed target checks come first. Its exact counting and limits are pinned in iteration 3. Missing weights and arithmetic overflow also stop planning with only completed work charged.
+Admission validates the original entries at their defined checkpoints; builders have done no request validation. Each failed validation check must complete its charge before its error is propagated. Process entries in input order, checking name/value lengths before name grammar, requested kind and duplicates; fixed target checks come first. Iteration 3 pins checkpoint accounting; iteration 4 must pin request counting and limits alongside the actual admission adapter. Missing weights and arithmetic overflow also stop planning with only completed work charged.
 
 ### Concrete charges and receipts
 
@@ -249,9 +258,9 @@ Use these illustrative test weights, with both modeled depths equal to `4`. For 
 | Component | Test weights / calculation | Cost |
 | --- | --- | --- |
 | Admission | base `2`, entry `1`, byte `1`: `2 + 2 × 1 + 15 × 1` | 19 |
-| Record base | `w_rec[create] = 3` | 3 |
-| Index read | `w_idx_read = 2` | 2 |
-| Cell creates | `w_cell[create] = 5`, trie-node `1`, byte `1`: five cells at `5 + 4 × 1`, plus 173 bytes | 218 |
+| Record base (separate from admission) | `read.key = 1` + `write.record.create = 2` | 3 |
+| Index read | `read.term = 2` | 2 |
+| Cell creates | `write.cell.create = 5`, trie-node `1`, byte `1`: five cells at `5 + 4 × 1`, plus 173 bytes | 218 |
 | Index join | join `3`, trie-node `1`, term-create `7`, byte `1`: `3 + 4 × 1 + 7 + 10 × 1` | 24 |
 | **Total** | **Planning 24 + prospective mutations 242** | **266** |
 
@@ -264,13 +273,27 @@ The five cell sizes are `age: 16`, `color: 17`, `#key: 45`, `#meta: 46`, and the
 | `23`: early refusal | Admission and binding/base work; index read cannot fit | Cost `22`; `OutOfBudget { required: None }`; zero effects. |
 | Sufficient budget, key already exists | Admission and binding lookup only | Cost `22`; `AlreadyExists`; zero effects. |
 
-The API facade maps `RecordOutcome` to public `Metered<T>` without recalculating charges or rereading head. For the successful case at pricing commit `100`, it returns:
+The API facade maps `Outcome` to public `Metered<T>` without recalculating charges or rereading head. For the successful case at pricing commit `100`, it returns:
 
 ```text
 result: Ok(the requested record key)
 receipt:
   cost: 266
   priced_at: Some(100)
+  ledger:
+    read.key: 1
+    read.term: 1
+    write.admission.base: 1
+    write.admission.byte: 15
+    write.admission.entry: 2
+    write.cell.create: 5
+    write.cell_byte: 173
+    write.cell_trie_update: 20
+    write.index.join: 1
+    write.index_byte: 10
+    write.index_term_create: 1
+    write.index_trie_update: 4
+    write.record.create: 1
   details:
     cells_created: 2
     cells_updated: 0
@@ -337,25 +360,37 @@ adds no format-version bump or migration. Pricing and budget enforcement remain 
 
 **Acceptance:** create, update, kind change, removal, no-op, deletion and rollback preserve all four counters; equal-size replacements can leave metadata unchanged; cap failures leave cells and IDs unchanged; patch and delete reject missing or malformed metadata as a state error rather than inventing zero counts.
 
-### Iteration 3 — Metering core and explicit budget plumbing
+### Iteration 3 — Metering core and accounting transport
 
 **Priority:** 1 — Mumbai release.
 
-**Preparation completed:** `golemdb-metering` exists with the shared `Budget` type,
-re-exported from API and query. The API passes budgets and raw record entries into
-execution, where a private admission module performs validation. Pricing, accounting
-and connecting those admission steps to the meter remain for this iteration.
+**Implemented:** a database-independent write meter and receipt accounting path.
+Actual CRUD calls remain unpriced until planner/schedule integration.
 
-**Outcome:** deterministic pricing can be exercised without a database.
+1. Add typed `WeightName` constants using D10's `write.*` and shared `read.*` names,
+   immutable `Schedule`, supported `WRITE_CODE_VERSION`, and checked arithmetic.
+   Host weights remain inspectable but unused by GolemDB write pricing.
+2. Add pure `PlanningStep` and `MutationCharge` pricing with explicit depths and the
+   temporary `INITIAL_DEPTHS` constant. Distinguish an absent weight from zero.
+3. Add `WriteMeter`, separating completed and prospective cost/ledger counts.
+   `run_step` charges a whole checkpoint before work; any metering failure stops
+   further work. `finish` approves total cost or reports only charged planning.
+4. Add per-weight ledgers and accounting propagation through `Outcome` and the public
+   `Receipt`. Preserve cost/ledger on failures while zeroing effects. Map failures
+   to the existing public `OutOfBudget { required }` shape.
+5. Verify the worked example, exact cutoffs, composite record-base charging, system
+   mutation prices, deletion prepayment, missing/zero weights, and overflow under
+   limited and unlimited budgets. Tests reconstruct costs from ledgers.
 
-1. Connect the shared `golemdb-metering::Budget` already passed into record execution to the per-call meter. The workspace crate, API/query re-exports and record dependency are in place. Budgets are currently unenforced.
-2. Implement typed weights, supported model identifiers, immutable schedules, depth selection and checked arithmetic. Keep host weights available in the schedule but unused by GolemDB's own write pricing.
-3. Implement the per-call meter interface described above, separating completed planning cost from prospective mutation cost. The meter owns the budget and all cost totals; the record layer does not duplicate them. Keep step approvals internal and single-use. Retain logical charge counts when diagnostic detail is requested, without changing the computed cost.
-4. Price system-cell mutations as required by D2 even though receipt effects omit them. Do not turn every system-cell cost into admission cost.
-5. Define the reference admission procedure: deterministic validation order, entry/byte counting, checkpoints, hard request-size/change-count limits and execution-time input failures. Guard entry validation, kind conversion, duplicate detection and map preparation before doing the work; do not restore a builder validation path. Charge completed checks even when they reject input. Bound error formatting on early length rejection. Pin planning-read and mutation-evaluation order as part of the model too.
-6. Add fixed test schedules and conformance vectors. These are test weights, not claims of calibrated production prices.
+**Acceptance:** exact-budget equality succeeds; unfunded actions never execute;
+final refusal preserves planning cost and full required total; missing weights and
+overflow stop both budget variants; zero-price steps still count; API conversion
+preserves failure accounting. The original depth-4 example remains 266/24/22.
 
-**Acceptance:** exact-budget equality succeeds; a step exceeding the remaining budget is refused before work; final refusal reports planning `spent` and full `required`; missing weights and overflow fail under both budget variants; explicit zero weights remain valid; modeled-depth thresholds and byte charges match the specification.
+Admission already validates input in record execution. Its integration with these
+checkpoints, exact request byte/entry counting and request caps belong to iteration 4.
+This increment introduces no builder validation, CRUD planner, persisted schedule,
+production enforcement, population counters or public read pricing.
 
 ### Iteration 4 — Record plan/apply separation and metered planning reads
 
@@ -364,7 +399,7 @@ and connecting those admission steps to the meter remain for this iteration.
 **Outcome:** create, patch and delete have a shared, read-only planning path usable for execution and estimation.
 
 1. Refactor current record CRUD, which interleaves reads and overlay writes, into internal planning and application functions. First establish equivalent behavior with a supplied test pricing context.
-2. Implement the record-side metered planning adapter. Check admission before record reads, binding before metadata, and subsequent reads in the pinned order.
+2. Implement the record-side metered planning/admission adapter. Pin deterministic input validation order, byte/entry counting, request-size/change-count limits and bounded error formatting alongside execution. Charge each check before doing it and preserve charges on validation failures. Check admission before record reads, binding before metadata, and subsequent reads/mutation evaluation in the pinned order.
 3. Build user mutations, effects and metadata deltas from the observed values. Derive index charges, including the base-absence creation surcharge.
 4. Add the origin index-term point lookup to the index/branch access interfaces. Keep the branch unaware of metering weights or record-operation budgets.
 5. Make delete enumeration incremental. Do not collect all old cells/values before the budget checkpoints. Audit the merged overlay iterator's skipping of hidden/tombstoned entries so a logical read has a bounded, justified work envelope; counting iterator calls alone is not sufficient evidence.
@@ -374,23 +409,32 @@ and connecting those admission steps to the meter remain for this iteration.
 
 **Acceptance:** an instrumented read source proves that no later logical reads run after a cutoff; early refusal and validation failures change no branch state; no-op patches still perform required reads but create no mutations; all three operations apply exactly their approved plan without a second pricing/validation pass.
 
-### Iteration 5 — Persisted pricing context and global counters
+### Iteration 5 — Persisted initial pricing context
 
 **Priority:** 1 — Mumbai release.
 
-**Outcome:** production calls can derive their schedule and modeled depths from committed state, including after restart.
+**Outcome:** production calls load an initial schedule from committed state,
+including after restart. Depths remain the temporary `INITIAL_DEPTHS` constant.
 
-1. Add genesis encoding/loading of the initial `@meteringModel` and `@modelWeight` records, caps, limits and activation-delay configuration. Cache immutable configuration rather than rereading it as an incidental planning expense.
-2. Construct an immutable pricing context from the committed head and pin it for each call. Keep snapshot loading/storage integration outside the pure metering crate.
-3. Add `#alloc.#liveCells` and `#alloc.#indexTerms`, which are specified but not yet implemented in the current crates. Initialize them at genesis and persist them as committed state. Live-cell counts include all CellTrie leaves, including reserved records, root-history cells and the counters themselves.
-4. Update these populations once per commit from net changes, including actual term-root transitions. Do not sum receipt effects or creation surcharges to obtain committed populations.
-5. Adjust sealing so final global-counter values are included before computing the final cell root. The current seal path applies cells before index changes; account for that ordering explicitly. Do not patch counters after the root has already been computed.
-6. Derive modeled depths from the branch-base populations and keep them fixed for the call/branch origin, even if the branch grows.
-7. Rebuild pricing state on open/recovery. Unsupported active code versions or malformed schedules must prevent priced service; missing individual weights remain absent and fail only operations needing them.
+1. Define genesis encoding/loading of the initial `@meteringModel` and `@modelWeight`
+   admin records and necessary model configuration. Reuse the deployment caps
+   already implemented in iteration 2. Validate declared names and code versions;
+   retain missing weights as unpriced. Cache immutable configuration.
+2. Construct an immutable pricing context with the committed pricing head and
+   schedule, pinned for each call/branch. Keep storage outside the pure meter.
+3. Rebuild pricing state on open/recovery. Unsupported active code versions or
+   malformed schedules prevent priced service; absent individual weights fail only
+   operations needing them. Expose missing-weight diagnostics to operators.
+4. Use fixed depth 6 for both tries. Defer `#liveCells`, `#indexTerms`, their genesis
+   values, net commit tracking, sealing/root changes and population-based depths.
+   Their eventual implementation must count actual net state, not receipt effects.
 
-This iteration can proceed independently of the planner refactor after the core/schema contracts are agreed. Start with the persisted initial model; delayed runtime installation and patches are iteration 8.
+This iteration can proceed separately from the planner refactor. Runtime weight
+patches, model installation and delayed activation remain iteration 8.
 
-**Acceptance:** reopen reconstructs identical prices and depths; empty/admin commits and root-history growth count correctly; create-delete net cancellation and last-member term removal give exact populations; counter cells are included in the committed root; concurrent calls retain a coherent head/schedule pair.
+**Acceptance:** reopening restores identical prices; the context has a coherent
+head/schedule pair; missing weights remain distinguishable from explicit zero;
+unsupported or malformed initial models cannot silently use fallback prices.
 
 ### Iteration 6 — Enforce real CUD prices and budgets
 
@@ -400,7 +444,7 @@ This iteration can proceed independently of the planner refactor after the core/
 
 1. Connect the planner to the persisted pricing context. Enable create, then patch, then delete in reviewable increments; do not claim complete write-budget enforcement until all three paths are covered.
 2. Route admission, base, cell-read and index-read charges through the meter; accumulate the corresponding user/system mutation prices and approve the full total before applying.
-3. Return the full approved cost on success. On planning failure return only completed planning cost, zero effects, and the specified error/`required` value. Expose the specification's optional per-part diagnostic ledger separately from user-effect `Details`; system charges and failed planning can appear in diagnostics even though they are not user effects.
+3. Return the full approved cost on success. On planning failure return only completed planning cost, zero effects, and the specified error/`required` value. Forward the meter's per-weight ledger separately from user-effect `Details`; it is always present in the in-process receipt, including system charges and failed planning.
 4. Preserve receipts across rollback/discard; there are no refunds or additional rollback charges. Commit overhead and final global-counter/allocator persistence do not become additional client-call charges.
 5. Add the simplified index rule to the model documentation and golden examples in the same change that enables it.
 6. Keep `get`, `query` and `count` at zero cost with their correct receipt context. Document that their budgets remain unenforced until read metering lands; do not describe them as budget-bounded reads.
@@ -454,7 +498,7 @@ If some prepaid deferred work is not implemented yet, mark that calibration evid
   -> 2 metadata / caps
     -> 3 metering core
       -> 4 planner and planning reads ----+
-      -> 5 committed pricing / counters -+-> 6 enforced CUD
+      -> 5 persisted initial pricing ----+-> 6 enforced CUD
                                                -> 7 estimation / bounds
                               5 + 6 ----------> 8 schedule lifecycle
                                                -> 9 release checks
@@ -466,4 +510,4 @@ Iterations 4 and 5 can be developed separately against agreed interfaces. Iterat
 
 **After Mumbai:** iterations 7–9 complete the host-facing facilities, runtime lifecycle and broader calibration/verification.
 
-The full plan is complete when every CUD path has deterministic admission and planning charges, checks budgets before charged planning work, applies only a fully approved plan, returns correct receipts on success/failure, maintains metadata and committed populations, and supports execution/estimation and schedule updates from coherent persisted state, with the calibration evidence from iteration 9. API receipts alone, metadata alone, or a pure cost calculator are useful increments but do not meet the Mumbai completion criterion either.
+The full plan is complete when every CUD path has deterministic admission and planning charges, checks budgets before charged planning work, applies only a fully approved plan, returns correct receipts on success/failure, maintains per-record metadata, and supports execution/estimation and schedule updates from coherent persisted state, with the calibration evidence from iteration 9. API receipts alone, metadata alone, or a pure cost calculator are useful increments but do not meet the Mumbai completion criterion either.
