@@ -533,7 +533,7 @@ fn name_scans_hold_the_terms_of_the_name_and_load_each_bitmap() {
             let n = n as u64;
             [add(t, n), add(t, n + (1 << 40))]
         });
-    index.apply(&mut tx, RootRef::Empty, changes).unwrap();
+    index.apply(&mut tx, 0, RootRef::Empty, changes).unwrap();
     let scan = |ty: Option<CellType>| {
         let range = TermRange::of_name(CellNameRef::raw(b"a"), ty).unwrap();
         index
@@ -541,7 +541,7 @@ fn name_scans_hold_the_terms_of_the_name_and_load_each_bitmap() {
             .unwrap()
             .map(|entry| {
                 let (term, root) = entry.unwrap();
-                let bitmap = index.bitmap_at(&tx, root).unwrap();
+                let bitmap = index.bitmap_at(&tx, &term, root).unwrap();
                 let expected = index.bitmap(&tx, &term).unwrap().unwrap();
                 assert_eq!(bitmap.treemap(), expected.treemap());
                 term
