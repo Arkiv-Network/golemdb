@@ -5,6 +5,7 @@ use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 const YAML: &str = r#"
 hash_function: keccak-256
 cell_limits: {max_cell_name_len: 1, max_str_len: 0, max_bytes_len: 0}
+record_limits: {max_cells: 100, max_indexed_cells: 100}
 immutable_data:
   shard_span: 4294967297
   segments:

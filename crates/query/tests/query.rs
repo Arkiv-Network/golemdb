@@ -27,7 +27,15 @@ fn config() -> OpenConfig {
         max_str_len: 64,
         max_bytes_len: 64,
     };
-    OpenConfig::new(Genesis::new(HashAlgorithm::Keccak256, limits, None))
+    OpenConfig::new(Genesis::new(
+        HashAlgorithm::Keccak256,
+        limits,
+        golemdb_api::RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
+        None,
+    ))
 }
 
 /// A page's record keys, in page order, and its `total_matched`.
@@ -557,38 +565,49 @@ fn an_offset_starts_the_page_of_its_queries() {
 }
 
 #[test]
-fn an_indexed_record_without_its_key_is_internal_corruption() {
-    let store = MemoryStore::new();
-    let db = Database::from_store(store.clone(), &config()).unwrap();
-    let branch = db.begin().unwrap();
-    db.create(branch, record(key(1), &[("color", blue())]))
-        .into_result()
-        .unwrap();
-    db.commit(branch).unwrap();
+fn materialization_requires_identity_but_does_not_validate_metadata() {
+    for missing in [reserved::KEY, reserved::META] {
+        let store = MemoryStore::new();
+        let db = Database::from_store(store.clone(), &config()).unwrap();
+        let branch = db.begin().unwrap();
+        db.create(branch, record(key(1), &[("color", blue())]))
+            .into_result()
+            .unwrap();
+        db.commit(branch).unwrap();
 
-    // Corrupt the committed state below the facade: the record keeps its
-    // indexed attribute but loses its `#key` cell.
-    let branches = Branches::new(store, Keccak256Hasher, None).unwrap();
-    let corrupt = branches.begin().unwrap();
-    branches
-        .write(corrupt, |cell_writer| {
-            cell_writer.delete(CellKey::new(FIRST_USER_RECORD_ID, reserved::KEY));
-            Ok::<_, BranchError>(())
-        })
-        .unwrap();
-    branches.commit(corrupt).unwrap();
+        // Remove an engine-owned cell below the facade while keeping the
+        // indexed attribute. Materialization needs #key but does not use #meta.
+        let branches = Branches::new(store, Keccak256Hasher, None).unwrap();
+        let corrupt = branches.begin().unwrap();
+        branches
+            .write(corrupt, |cell_writer| {
+                cell_writer.delete(CellKey::new(FIRST_USER_RECORD_ID, missing));
+                Ok::<_, BranchError>(())
+            })
+            .unwrap();
+        branches.commit(corrupt).unwrap();
 
-    let result = db
-        .query(
-            None,
-            QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX)),
-        )
-        .into_result();
-    let Err(ApiError::Internal { source }) = result else {
-        panic!("expected Internal, got {result:?}");
-    };
-    assert!(matches!(
-        source.downcast_ref::<RecordError>(),
-        Some(RecordError::CorruptState(_))
-    ));
+        let result = db
+            .query(
+                None,
+                QueryOp::from_filter(eq("color", blue()), golemdb_api::Budget::Limited(u64::MAX)),
+            )
+            .into_result();
+        if missing == reserved::KEY {
+            let Err(ApiError::Internal { source }) = result else {
+                panic!("expected Internal, got {result:?}");
+            };
+            assert!(matches!(
+                source.downcast_ref::<RecordError>(),
+                Some(RecordError::CorruptState(_))
+            ));
+        } else {
+            let page = result.unwrap();
+            assert_eq!(page.records.len(), 1);
+            let record = &page.records[0];
+            assert_eq!(record.key, key(1));
+            assert!(!record.cells.contains_key(reserved::META.as_bytes()));
+            assert_eq!(record.meta(), None);
+        }
+    }
 }

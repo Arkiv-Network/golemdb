@@ -1,6 +1,6 @@
 //! Record CRUD over guarded branch cell views.
 //!
-//! Records may have zero user cells; their `#key` and binding preserve identity
+//! Records may have zero user cells; their `#key`, `#meta` and binding preserve identity
 //! until explicit deletion.
 //!
 //! Caller-assigned keys only. Each mutation is one atomic branch operation,
@@ -12,12 +12,18 @@
 //! Opening/initialization belongs to the caller. Every record in
 //! [`golemdb_cells::system::ALL`] must have its bytes32 `#key` and a u64 binding
 //! in `#recordKeys`. The `#params` record must contain u32 `#maxCellNameLen`,
-//! `#maxStrLen`, and `#maxBytesLen` cells; `#alloc.#nextRecordID` must be a u64
+//! `#maxStrLen`, and `#maxBytesLen` cells, and u64 `#maxRecordCells` and
+//! `#maxRecordIndexedCells` caps; `#alloc.#nextRecordID` must be a u64
 //! starting at [`golemdb_cells::system::FIRST_USER_RECORD_ID`]. These system
 //! cells are non-indexed. Initialize the cell trie and head consistently and
 //! validate configured limits against the storage backend's physical ceilings.
 //! No YAML loading, genesis writes, local parameter defaults, or parameter
 //! cache lives here.
+//!
+//! User records carry a [`RecordMeta`] bytes32 field. Counts come from the same
+//! effects as receipts and are updated atomically. Reads return stored cells
+//! without validating `#meta`. Patch and delete validate metadata before using
+//! its counters; missing or malformed metadata and counter underflow are state errors.
 //!
 //! Every CRUD operation requires an explicit [`golemdb_metering::Budget`] and
 //! returns an [`Outcome`] with execution context and actual user effects for
@@ -60,6 +66,7 @@ mod admission;
 mod committed;
 mod crud;
 mod error;
+mod meta;
 mod outcome;
 mod state;
 mod types;
@@ -67,6 +74,7 @@ mod types;
 pub use committed::{committed_snapshot, read_committed_by_id};
 pub use crud::Records;
 pub use error::{RecordError, Result};
+pub use meta::{RecordLimits, RecordMeta};
 pub use outcome::{Effects, Outcome, cell_size, index_size};
 pub use types::{
     CellPatch, CreateEntry, PatchChange, PatchEntry, ReadTarget, Record, RecordCells, RecordKey,

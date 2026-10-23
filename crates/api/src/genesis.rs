@@ -42,6 +42,18 @@ fn initial_cells(config: &Genesis) -> OpenResult<BTreeMap<CellKey, CellValue>> {
             CellValue::from_u32(value),
         );
     }
+    for (name, value) in [
+        (reserved::MAX_RECORD_CELLS, config.record_limits.max_cells),
+        (
+            reserved::MAX_RECORD_INDEXED_CELLS,
+            config.record_limits.max_indexed_cells,
+        ),
+    ] {
+        cells.insert(
+            CellKey::new(system::PARAMS.id, name),
+            CellValue::from_u64(value),
+        );
+    }
     cells.insert(
         allocator_key(),
         CellValue::from_u64(system::FIRST_USER_RECORD_ID),

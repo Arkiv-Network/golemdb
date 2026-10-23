@@ -519,6 +519,10 @@ fn paused_database() -> (Database, PausingStore) {
             max_str_len: 64,
             max_bytes_len: 128,
         },
+        golemdb_api::RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
         None,
     ));
     let db = Database::from_store(store.clone(), &config).unwrap();

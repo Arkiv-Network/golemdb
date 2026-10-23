@@ -9,6 +9,10 @@ fn genesis(hash: HashAlgorithm) -> Genesis {
             max_str_len: 4,
             max_bytes_len: 4,
         },
+        golemdb_api::RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
         Some(ImmutableDataConfig::new(
             2,
             vec![

@@ -66,6 +66,12 @@ fn initialize(db: &impl Store) {
             field(CellType::Uint(Width::W4), &value.to_be_bytes()),
         );
     }
+    for name in [
+        reserved::MAX_RECORD_CELLS,
+        reserved::MAX_RECORD_INDEXED_CELLS,
+    ] {
+        put(system::PARAMS.id, name, u64_value(100));
+    }
     put(system::ALLOC.id, reserved::NEXT_RECORD_ID, u64_value(64));
     let hash = Keccak256Hasher;
     let mut tx = db.begin_write().unwrap();
@@ -277,7 +283,7 @@ fn lifecycle(db: impl Store + Clone) {
             .unwrap()
             .cells
             .len(),
-        2
+        3
     );
     assert!(
         reopened

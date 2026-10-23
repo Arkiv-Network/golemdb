@@ -9,7 +9,7 @@ use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransacti
 
 const SUPERBLOCK: Table = Table("Superblock");
 const KEY: RecordKey = RecordKey([0x42; 32]);
-const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\n";
+const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\nrecord_limits: {max_cells: 100, max_indexed_cells: 100}\n";
 
 fn config() -> OpenConfig {
     OpenConfig::new(Genesis::from_yaml(YAML).unwrap())
@@ -39,7 +39,7 @@ pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
 #[test]
 fn yaml_is_explicit_strict_and_has_canonical_identity() {
     let first = Genesis::from_yaml(YAML).unwrap();
-    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nhash_function: keccak-256\nimmutable_data: null\n").unwrap();
+    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nrecord_limits: {max_indexed_cells: 100, max_cells: 100}\nhash_function: keccak-256\nimmutable_data: null\n").unwrap();
     assert_eq!(first, reordered);
     assert_eq!(
         Database::open_memory(&first).unwrap().info(),
@@ -59,6 +59,15 @@ fn yaml_is_explicit_strict_and_has_canonical_identity() {
         format!("{YAML}unknown: 1\n"),
         YAML.replace("max_str_len: 64", "max_str_len: 64\n  max_str_len: 65"),
         YAML.replace("max_str_len: 64", "max_str_len: -1"),
+        YAML.replace(
+            "record_limits: {max_cells: 100, max_indexed_cells: 100}\n",
+            "",
+        ),
+        YAML.replace("max_cells: 100, ", ""),
+        YAML.replace(", max_indexed_cells: 100", ""),
+        YAML.replace("max_cells: 100", "max_cells: -1"),
+        YAML.replace("max_cells: 100", "max_cells: 100, unknown: 1"),
+        YAML.replace("max_cells: 100", "max_cells: 100, max_cells: 99"),
     ] {
         assert!(Genesis::from_yaml(&bad).is_err());
     }
@@ -86,6 +95,21 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
     assert_eq!(opened.genesis(), &config.genesis);
     let tx = db.begin_read().unwrap();
     let reader = CellReader::new(&tx);
+    for (name, cap) in [
+        (
+            reserved::MAX_RECORD_CELLS,
+            config.genesis.record_limits.max_cells,
+        ),
+        (
+            reserved::MAX_RECORD_INDEXED_CELLS,
+            config.genesis.record_limits.max_indexed_cells,
+        ),
+    ] {
+        assert_eq!(
+            reader.get(&CellKey::new(system::PARAMS.id, name)).unwrap(),
+            Some(CellValue::from_u64(cap))
+        );
+    }
     for record in system::ALL {
         assert_eq!(
             reader.get(&CellKey::new(record.id, reserved::KEY)).unwrap(),
@@ -207,13 +231,15 @@ fn modes(db: impl Store + Clone + Send + Sync + 'static) {
         Database::from_store(db.clone(), &config.clone().with_mode(OpenMode::CreateNew)),
         Err(OpenError::AlreadyInitialized)
     ));
-    for change in 0..4 {
+    for change in 0..6 {
         let mut different = config.clone();
         match change {
             0 => different.genesis.hash_function = HashAlgorithm::Blake3,
             1 => different.genesis.cell_limits.max_cell_name_len += 1,
             2 => different.genesis.cell_limits.max_str_len += 1,
-            _ => different.genesis.cell_limits.max_bytes_len += 1,
+            3 => different.genesis.cell_limits.max_bytes_len += 1,
+            4 => different.genesis.record_limits.max_cells += 1,
+            _ => different.genesis.record_limits.max_indexed_cells += 1,
         }
         assert!(matches!(
             Database::from_store(db.clone(), &different),
@@ -290,6 +316,8 @@ fn missing_or_malformed_metadata_and_reserved_cells_fail_without_repair() {
     }
     for key in [
         CellKey::new(system::PARAMS.id, reserved::MAX_STR_LEN),
+        CellKey::new(system::PARAMS.id, reserved::MAX_RECORD_CELLS),
+        CellKey::new(system::PARAMS.id, reserved::MAX_RECORD_INDEXED_CELLS),
         CellKey::new(system::ALLOC.id, reserved::NEXT_RECORD_ID),
         CellKey::new(system::PARAMS.id, reserved::KEY),
         CellKey::new(
@@ -305,7 +333,7 @@ fn missing_or_malformed_metadata_and_reserved_cells_fail_without_repair() {
                 tx.put(
                     tables::CELL,
                     &key.encode(),
-                    CellValue::from_u64(100).encoded_bytes(),
+                    CellValue::from_u64(101).encoded_bytes(),
                 )
                 .unwrap();
             } else {

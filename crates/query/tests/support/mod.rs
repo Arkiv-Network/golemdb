@@ -24,7 +24,15 @@ impl Default for TestDb {
             max_str_len: 4096,
             max_bytes_len: 64,
         };
-        let genesis = Genesis::new(HashAlgorithm::Keccak256, limits, None);
+        let genesis = Genesis::new(
+            HashAlgorithm::Keccak256,
+            limits,
+            golemdb_api::RecordLimits {
+                max_cells: 100,
+                max_indexed_cells: 100,
+            },
+            None,
+        );
         Self {
             db: Database::open_memory(&genesis).expect("genesis"),
         }
