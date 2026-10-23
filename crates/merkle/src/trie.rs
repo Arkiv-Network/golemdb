@@ -1,3 +1,5 @@
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
+
 use crate::{BranchNodeCompact, Hash, HashProvider, MerkleError, Result, path};
 use golemdb_storage::{ReadTransaction, StorageError, Table, WriteTransaction};
 
@@ -36,10 +38,16 @@ impl<const N: usize> RootRef<N> {
 /// Mutations retain old branches; no operation commits or opens a transaction.
 /// Abort the enclosing write transaction after a mutation error: intermediate
 /// immutable branches may already have been inserted.
+///
+/// An instance remembers the branches it has authenticated, so repeated
+/// lookups and updates within one operation read, decode and hash each branch
+/// once. Rows are immutable and content-addressed; construct a trie per
+/// operation over one snapshot rather than keeping it across commits.
 pub struct Trie<'h, H: HashProvider, const N: usize> {
     table: Table,
     domain: u8,
     hasher: &'h H,
+    verified: RefCell<HashMap<Hash, Arc<BranchNodeCompact<N>>>>,
 }
 
 impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
@@ -70,6 +78,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
             table,
             domain,
             hasher,
+            verified: RefCell::default(),
         }
     }
 
@@ -168,6 +177,23 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     }
 
     fn load(
+        &self,
+        tx: &impl ReadTransaction,
+        hash: Hash,
+        route: &[u8],
+    ) -> Result<Arc<BranchNodeCompact<N>>> {
+        let cached = self.verified.borrow().get(&hash).cloned();
+        if let Some(node) = cached {
+            node.validate_at(route)?;
+            return Ok(node);
+        }
+        let node = Arc::new(self.fetch(tx, hash, route)?);
+        self.verified.borrow_mut().insert(hash, Arc::clone(&node));
+        Ok(node)
+    }
+
+    /// Read, authenticate and route-check one branch row without caching it.
+    fn fetch(
         &self,
         tx: &impl ReadTransaction,
         hash: Hash,
@@ -579,7 +605,8 @@ impl<T: ReadTransaction, H: HashProvider, const N: usize> Iterator for Walk<'_, 
                 RootRef::Empty => (),
                 RootRef::Leaf(leaf) => return Some(Ok(leaf)),
                 RootRef::Branch(hash) => {
-                    let node = match self.trie.load(self.tx, hash, &route) {
+                    // A walk may cover a whole subtrie; keep only its frontier.
+                    let node = match self.trie.fetch(self.tx, hash, &route) {
                         Ok(node) => node,
                         Err(error) => {
                             self.stack.clear();

@@ -110,9 +110,16 @@ fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashP
                 "leaves={count}/{}",
                 if clustered { "clustered" } else { "spread" }
             );
+            // A trie remembers the branches it authenticated; each measured
+            // operation uses a fresh instance so it reads and hashes them.
+            let fresh = || Trie::<_, N>::new(TABLE, BENCH_BRANCH_DOMAIN, hasher);
             for (name, path) in [("get_hit", existing.path), ("get_miss", absent.path)] {
                 group.bench_function(BenchmarkId::new(name, &parameter), |b| {
-                    b.iter(|| trie.get(&read, black_box(root), black_box(&path)).unwrap())
+                    b.iter(|| {
+                        fresh()
+                            .get(&read, black_box(root), black_box(&path))
+                            .unwrap()
+                    })
                 });
             }
             group.bench_function(BenchmarkId::new("walk", &parameter), |b| {
@@ -141,6 +148,7 @@ fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashP
                     b.iter_batched_ref(
                         || db.begin_write().unwrap(),
                         |tx| {
+                            let trie = fresh();
                             black_box(
                                 match operation {
                                     "insert" => trie.insert(tx, black_box(root), black_box(absent)),

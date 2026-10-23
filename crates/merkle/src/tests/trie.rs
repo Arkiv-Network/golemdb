@@ -515,6 +515,8 @@ fn updates_touch_only_affected_branches_and_walk_is_lazy() {
     absent[5] = 1;
     assert_eq!(trie.remove(&mut tx, root, &absent).unwrap(), root);
     assert_eq!(tx.writes, 0);
+    // A fresh instance has not yet authenticated any branch.
+    let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     tx.reads.set(0);
     root = trie.insert(&mut tx, root, leaf([0; 6], 1)).unwrap();
     assert_eq!(tx.writes, 2);
@@ -557,12 +559,43 @@ fn edits_off_a_prefix_cost_the_same_at_any_subtrie_size() {
     assert_eq!((unchanged, tx.reads.get(), tx.writes), (root, 1, 0));
     // An insertion there reads only the root, then writes the root moved one
     // level down with a shorter prefix, and its new parent.
+    let trie = Trie::<_, 32>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
     tx.reads.set(0);
     let split = trie
         .apply(&mut tx, root, [(off.path, Some(off.hash))])
         .unwrap();
     assert_eq!((tx.reads.get(), tx.writes), (1, 2));
     assert_eq!(split, trie.insert(&mut tx, root, off).unwrap());
+}
+
+#[test]
+fn an_instance_reads_each_branch_once_and_walks_do_not_fill_it() {
+    let db = MemoryStore::new();
+    let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
+    let leaves = (0u16..256).map(|i| {
+        let mut path = [0; 6];
+        path[..2].copy_from_slice(&i.to_be_bytes());
+        (path, Some(leaf(path, 0).hash))
+    });
+    let mut tx = db.begin_write().unwrap();
+    let root = trie.apply(&mut tx, RootRef::Empty, leaves).unwrap();
+    tx.commit().unwrap();
+    let tx = Counted {
+        tx: db.begin_write().unwrap(),
+        reads: Cell::new(0),
+        writes: 0,
+        fail_reads: false,
+        fail_write: None,
+    };
+    let trie = Trie::<_, 6>::new(TABLE, TEST_BRANCH_DOMAIN, &HASH);
+    let path = [0, 7, 0, 0, 0, 0];
+    assert_eq!(trie.walk(&tx, root).count(), 256);
+    let walked = tx.reads.get();
+    assert_eq!(trie.get(&tx, root, &path).unwrap(), Some(leaf(path, 0)));
+    let first = tx.reads.get() - walked;
+    assert_eq!(first, 2);
+    assert_eq!(trie.get(&tx, root, &path).unwrap(), Some(leaf(path, 0)));
+    assert_eq!(tx.reads.get() - walked, first);
 }
 
 fn injected_error() -> golemdb_storage::StorageError {
