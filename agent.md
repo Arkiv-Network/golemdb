@@ -13,7 +13,7 @@ and adapters.
 | Crate | Responsibility |
 | --- | --- |
 | `api` | Public `Api` trait, `Database` handle, typed CRUD requests, opening, genesis initialization and validation. |
-| `metering` | Shared `Budget` type, re-exported by API and query; pricing and budget accounting remain deferred. |
+| `metering` | `Budget`, immutable named schedules, checked write pricing, `WriteMeter` and per-weight ledgers. No storage dependency; CRUD planner integration remains deferred. |
 | `record` | Record identity, key bindings, allocation, admission checks, and atomic CRUD over branch cell views. |
 | `branch` | Branch registry, overlays, undo frames, guarded reads and writes, sealing, and atomic publication. |
 | `cells` | Cell names, keys, types, canonical values, deployment limits, reserved-record constants, `Cell` storage and its commitment. |
@@ -308,6 +308,18 @@ no-ops. `priced_at` comes from the same validated branch origin or committed sna
 as execution; unavailable history uses the captured head. Unknown/stale handles and
 sealed writes have no pricing snapshot. `.into_result()` explicitly drops a receipt;
 `map` and `map_err` preserve it. `OutOfBudget { required }` is defined but not emitted yet.
+
+The metering core prices `PlanningStep` and `MutationCharge` against an immutable
+`Schedule`. `WriteMeter::run_step` checks and records a complete charge before its
+action, including failed validation; the record base combines `read.key` and
+`write.record.{op}` atomically. Prospective mutations are separate until `finish`.
+Missing weights and checked cost/count overflow stop the meter, even with Unlimited.
+`INITIAL_DEPTHS` supplies temporary cell/index depth 6; fixtures may supply others.
+Population counters/depth selection and persisted weights are not implemented.
+`Outcome.accounting` carries cost and `Ledger` through API conversion. Receipts
+always have a ledger keyed by `WeightName`, re-exported by API; failed effects stay
+zero while charged work survives. Database calls still produce zero cost/empty
+ledgers until iteration 4/6 integration. Read `evaluated_at` changes are deferred.
 
 Get reads all cells, including `#key`, unless `.only(names)` selects a projection.
 Names may be text or raw bytes; selections are deduplicated and sorted. Missing

@@ -621,6 +621,9 @@ dependencies = [
 [[package]]
 name = "golemdb-metering"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "golemdb-pruning"
