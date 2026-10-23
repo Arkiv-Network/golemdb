@@ -1,20 +1,29 @@
 use crate::{BITMAP_BRANCH_DOMAIN, BITMAP_LEAF_DOMAIN};
-use golemdb_merkle::{Hash, HashProvider, LeafRef, RootRef, Trie};
-use golemdb_storage::{ReadTransaction, StorageError, WriteTransaction};
+use golemdb_merkle::{HASH_BYTES, Hash, HashProvider, LeafPayload, LeafRef, PayloadTrie, RootRef};
+use golemdb_storage::{ReadTransaction, WriteTransaction};
 
 use crate::{
     BITMAP_TRIE_PATH_BYTES, Bitmap, BitmapContainer, BitmapError, IndexError, Result, path, tables,
 };
 
-pub(crate) struct BitmapTrie<'h, H: HashProvider> {
-    trie: Trie<'h, H, BITMAP_TRIE_PATH_BYTES>,
-    hasher: &'h H,
+/// One term's bitmap trie, namespaced by the term's routing path. Containers
+/// are its leaves' payloads, stored under `commit ‖ term ‖ container path`.
+pub(crate) struct BitmapTrie<'a, H: HashProvider> {
+    trie: PayloadTrie<'a, H, BITMAP_TRIE_PATH_BYTES, HASH_BYTES>,
+    hasher: &'a H,
 }
 
-impl<'h, H: HashProvider> BitmapTrie<'h, H> {
-    pub(crate) fn new(hasher: &'h H) -> Self {
+impl<'a, H: HashProvider> BitmapTrie<'a, H> {
+    /// The bitmap trie of the term whose routing path is `term`.
+    pub(crate) fn new(hasher: &'a H, term: &Hash) -> Self {
         Self {
-            trie: Trie::new(tables::BITMAP_TRIE, BITMAP_BRANCH_DOMAIN, hasher),
+            trie: PayloadTrie::namespaced(
+                tables::BITMAP_TRIE,
+                tables::BITMAP_CONTAINER,
+                *term,
+                BITMAP_BRANCH_DOMAIN,
+                hasher,
+            ),
             hasher,
         }
     }
@@ -31,9 +40,8 @@ impl<'h, H: HashProvider> BitmapTrie<'h, H> {
         tx: &impl ReadTransaction,
         leaf: LeafRef<BITMAP_TRIE_PATH_BYTES>,
     ) -> Result<BitmapContainer> {
-        let bytes = tx
-            .get(tables::BITMAP_CONTAINER, &leaf.hash)?
-            .ok_or(IndexError::Corruption("missing container"))?;
+        let bytes =
+            (self.trie.payload(tx, leaf)?).ok_or(IndexError::Corruption("missing container"))?;
         let container = self.decode(leaf.hash, &bytes)?;
         if path::path_bytes(container.path())? != leaf.path {
             return Err(IndexError::Corruption(
@@ -43,36 +51,11 @@ impl<'h, H: HashProvider> BitmapTrie<'h, H> {
         Ok(container)
     }
 
-    // Keep a reopened singleton payload so the operation does not load it twice.
-    fn reopen(
+    pub(crate) fn bitmap(
         &self,
         tx: &impl ReadTransaction,
-        hash: Hash,
-    ) -> Result<(RootRef<BITMAP_TRIE_PATH_BYTES>, Option<BitmapContainer>)> {
-        if hash == self.hasher.hash(&[]) {
-            return Err(IndexError::Corruption("empty bitmap root in Index row"));
-        }
-        if let Some(bytes) = tx.get(tables::BITMAP_CONTAINER, &hash)? {
-            let container = self.decode(hash, &bytes)?;
-            return Ok((
-                RootRef::Leaf(LeafRef {
-                    path: path::path_bytes(container.path())?,
-                    hash,
-                }),
-                Some(container),
-            ));
-        }
-        // A branch miss remains a Merkle error; it never becomes an empty trie.
-        let root = RootRef::Branch(hash);
-        self.trie.validate_root(tx, root)?;
-        Ok((root, None))
-    }
-
-    pub(crate) fn bitmap(&self, tx: &impl ReadTransaction, hash: Hash) -> Result<Bitmap> {
-        let (root, cached) = self.reopen(tx, hash)?;
-        if let Some(container) = cached {
-            return Ok(Bitmap::from_containers([container])?);
-        }
+        root: RootRef<BITMAP_TRIE_PATH_BYTES>,
+    ) -> Result<Bitmap> {
         let containers = self
             .trie
             .walk(tx, root)
@@ -88,13 +71,11 @@ impl<'h, H: HashProvider> BitmapTrie<'h, H> {
     pub(crate) fn apply(
         &self,
         tx: &mut impl WriteTransaction,
-        before: Option<Hash>,
+        commit: u64,
+        before: Option<RootRef<BITMAP_TRIE_PATH_BYTES>>,
         changes: impl IntoIterator<Item = (u64, u16, bool)>,
-    ) -> Result<Option<Hash>> {
-        let (root, mut cached) = match before {
-            Some(hash) => self.reopen(tx, hash)?,
-            None => (RootRef::Empty, None),
-        };
+    ) -> Result<Option<RootRef<BITMAP_TRIE_PATH_BYTES>>> {
+        let root = before.unwrap_or(RootRef::Empty);
         let mut changes = changes.into_iter().peekable();
         let mut edits = Vec::new();
         let mut previous = None;
@@ -106,12 +87,8 @@ impl<'h, H: HashProvider> BitmapTrie<'h, H> {
             }
             previous = Some(hi);
             let path = path::path_bytes(hi)?;
-            let old = self.trie.get(tx, root, &path)?;
-            let mut container = match old {
-                Some(leaf) => match cached.take() {
-                    Some(container) => container,
-                    None => self.load(tx, leaf)?,
-                },
+            let mut container = match self.trie.get(tx, root, &path)? {
+                Some(leaf) => self.load(tx, leaf)?,
                 None => BitmapContainer::empty(hi)?,
             };
             let mut changed = false;
@@ -130,21 +107,10 @@ impl<'h, H: HashProvider> BitmapTrie<'h, H> {
             } else {
                 let bytes = container.canonical_bytes()?;
                 let hash = self.hasher.hash_parts(&[&[BITMAP_LEAF_DOMAIN], &bytes]);
-                match tx.insert(tables::BITMAP_CONTAINER, &hash, &bytes) {
-                    Ok(()) => (),
-                    Err(StorageError::AlreadyExists) => {
-                        if tx.get(tables::BITMAP_CONTAINER, &hash)?.as_deref()
-                            != Some(bytes.as_slice())
-                        {
-                            return Err(IndexError::ConflictingContent);
-                        }
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-                edits.push((path, Some(hash)));
+                edits.push((path, Some(LeafPayload { hash, bytes })));
             }
         }
-        let root = self.trie.apply(tx, root, edits)?;
-        Ok((root != RootRef::Empty).then(|| root.hash(self.hasher)))
+        let root = self.trie.apply(tx, commit, root, edits)?;
+        Ok((root != RootRef::Empty).then_some(root))
     }
 }

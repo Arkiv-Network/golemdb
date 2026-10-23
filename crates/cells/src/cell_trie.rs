@@ -24,12 +24,11 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
     /// cell value: `H(CELL_LEAF_DOMAIN || path || typeTag || value)`.
     /// The caller supplies `path = H(encoded CellKey)`; no leaf row is written.
     fn leaf(&self, path: Hash, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
-        LeafRef {
+        LeafRef::new(
             path,
-            hash: self
-                .hasher
+            self.hasher
                 .hash_parts(&[&[CELL_LEAF_DOMAIN], &path, value.encoded_bytes()]),
-        }
+        )
     }
 
     /// Verify that the leaf at `H(key)` commits to the value read from the `Cell` table.
@@ -58,6 +57,7 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
     pub(crate) fn set<'a>(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
         changes: impl IntoIterator<Item = (&'a [u8], Option<&'a CellValue>)>,
     ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
@@ -65,45 +65,39 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
             let path = self.hasher.hash(key);
             (path, value.map(|value| self.leaf(path, value).hash))
         });
-        Ok(self.trie.apply(tx, root, edits)?)
+        Ok(self.trie.apply(tx, commit, root, edits)?)
     }
 
-    /// Recover root metadata from a digest and the transaction's snapshot.
-    /// The empty-root digest requires an empty `Cell` table. An existing branch
-    /// is validated at its root row only, without auditing its subtree or the
-    /// `Cell` table. Otherwise the `Cell` table must contain exactly one valid
-    /// row whose key and value reconstruct the singleton hash.
-    /// Historical singleton recovery needs historical cell data or a retained
-    /// `RootRef`; an absent branch row alone never establishes a singleton.
-    pub(crate) fn reopen(
+    /// Validate a stored root against the transaction's snapshot.
+    /// An empty root requires an empty `Cell` table. A branch is validated at
+    /// its root row only, without auditing its subtree or the `Cell` table. A
+    /// singleton needs exactly one valid `Cell` row that reconstructs its leaf.
+    /// Historical singletons need historical cell data.
+    pub(crate) fn validate_root(
         &self,
         tx: &impl ReadTransaction,
-        hash: Hash,
-    ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
-        if hash == self.hasher.hash(&[]) {
-            if tx.cursor(tables::CELL, b"")?.next()?.is_some() {
-                return Err(CellError::RootMismatch);
+        root: RootRef<CELL_TRIE_PATH_BYTES>,
+    ) -> Result<()> {
+        match root {
+            RootRef::Branch(_) => self.trie.validate_root(tx, root)?,
+            RootRef::Empty => {
+                if tx.cursor(tables::CELL, b"")?.next()?.is_some() {
+                    return Err(CellError::RootMismatch);
+                }
             }
-            return Ok(RootRef::Empty);
+            RootRef::Leaf(leaf) => {
+                let mut cursor = tx.cursor(tables::CELL, b"")?;
+                let (key, value) = cursor.next()?.ok_or(CellError::RootMismatch)?;
+                if cursor.next()?.is_some() {
+                    return Err(CellError::RootMismatch);
+                }
+                CellKey::decode(&key)?;
+                let value = CellValue::parse(value)?;
+                if self.leaf(self.hasher.hash(&key), &value) != leaf {
+                    return Err(CellError::RootMismatch);
+                }
+            }
         }
-        if tx.get(tables::CELL_TRIE, &hash)?.is_some() {
-            let root = RootRef::Branch(hash);
-            self.trie.validate_root(tx, root)?;
-            return Ok(root);
-        }
-        // A missing branch is a singleton only when exactly one current row
-        // independently reconstructs the requested digest.
-        let mut cursor = tx.cursor(tables::CELL, b"")?;
-        let (key, value) = cursor.next()?.ok_or(CellError::RootMismatch)?;
-        if cursor.next()?.is_some() {
-            return Err(CellError::RootMismatch);
-        }
-        CellKey::decode(&key)?;
-        let value = CellValue::parse(value)?;
-        let leaf = self.leaf(self.hasher.hash(&key), &value);
-        if leaf.hash != hash {
-            return Err(CellError::RootMismatch);
-        }
-        Ok(RootRef::Leaf(leaf))
+        Ok(())
     }
 }

@@ -88,8 +88,9 @@ struct Inner<S, H> {
 /// This increment does not initialize genesis, validate format/hash settings,
 /// authenticate entire tries, maintain history, or rewind the store. The supplied hash
 /// provider must match the deployment and is shared by all branch seals. External writers
-/// must publish cells and a strictly increasing head atomically; changing cells
-/// under an unchanged head or rewinding it violates this manager's contract.
+/// must publish cells, the head's `Roots` row (optional for an empty head) and a strictly
+/// increasing head atomically ([`crate::advance_head`] writes both); changing cells under an
+/// unchanged head or rewinding it violates this manager's contract.
 /// When physical immutable storage is attached, only this manager and its clones
 /// may publish head or immutable metadata; independent publishers are unsupported.
 ///
@@ -387,6 +388,7 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
                         &sealed,
                         &state.immutable_data,
                         &self.inner.immutable_segments,
+                        &self.inner.hasher,
                     )
                 }));
                 drop(writer);
@@ -396,7 +398,12 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
                 }
             } else {
                 // Without immutable files, the store writer serializes commits.
-                crate::commit::persist(self.inner.store.begin_write()?, state.commit_id, &sealed)
+                crate::commit::persist(
+                    self.inner.store.begin_write()?,
+                    state.commit_id,
+                    &sealed,
+                    &self.inner.hasher,
+                )
             };
             match outcome {
                 Ok(commit_id) => {

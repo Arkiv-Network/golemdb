@@ -12,20 +12,21 @@
 //! preimage includes the full path; production owners supply their own codecs.
 //!
 //! ```
-//! use golemdb_merkle::{Keccak256Hasher, HashProvider, LeafRef, RootRef, Trie};
+//! use golemdb_merkle::{Keccak256Hasher, HashProvider, RootRef, Trie, TrieTable};
 //! use golemdb_storage::{Store, MemoryStore, Table, WriteTransaction};
 //!
 //! const EXAMPLE_LEAF_DOMAIN: u8 = 0x04;
 //! const EXAMPLE_BRANCH_DOMAIN: u8 = 0x05;
+//! const EXAMPLE_BRANCHES: TrieTable = TrieTable::new(Table("ExampleBranches"));
 //!
 //! let store = MemoryStore::new();
 //! let hash = Keccak256Hasher;
-//! let trie = Trie::<_, 6>::new(Table("ExampleBranches"), EXAMPLE_BRANCH_DOMAIN, &hash);
+//! let trie = Trie::<_, 6>::new(EXAMPLE_BRANCHES, EXAMPLE_BRANCH_DOMAIN, &hash);
 //! let mut tx = store.begin_write()?;
 //! let mut root = RootRef::Empty;
 //! for path in [[0; 6], [1; 6]] {
-//!     let leaf = LeafRef { path, hash: hash.hash_parts(&[&[EXAMPLE_LEAF_DOMAIN], &path, b"payload"]) };
-//!     root = trie.insert(&mut tx, root, leaf)?;
+//!     let leaf = hash.hash_parts(&[&[EXAMPLE_LEAF_DOMAIN], &path, b"payload"]);
+//!     root = trie.insert(&mut tx, 1, root, &path, leaf)?;
 //! }
 //! tx.commit()?;
 //! let read = store.begin_read()?;
@@ -39,13 +40,17 @@ mod error;
 mod hash;
 mod node;
 mod path;
+mod payload_trie;
+mod table;
 mod trie;
 
 pub use config::{ConfigError, HashConfig};
 pub use error::{MerkleError, Result};
-pub use hash::{Blake3Hasher, Hash, HashAlgorithm, HashProvider, Keccak256Hasher};
-pub use node::BranchNodeCompact;
-pub use trie::{LeafRef, RootRef, Trie, Walk};
+pub use hash::{Blake3Hasher, HASH_BYTES, Hash, HashAlgorithm, HashProvider, Keccak256Hasher};
+pub use node::{BRANCH_SLOTS, BranchNodeCompact, LeafStorage};
+pub use payload_trie::{LeafPayload, PayloadTrie};
+pub use table::TrieTable;
+pub use trie::{BRANCH_ROOT_BYTES, BranchRef, COMMIT_BYTES, LeafRef, RootRef, Trie, Walk};
 
 #[cfg(test)]
 mod tests;

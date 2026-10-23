@@ -96,6 +96,7 @@ fn one_chunk_update_does_not_rebuild_256_chunk_postings() {
     let update = index
         .apply(
             &mut tx,
+            0,
             RootRef::Empty,
             (0u64..256).flat_map(|hi| [add(term(0), hi << 16), add(term(1), hi << 16)]),
         )
@@ -104,26 +105,30 @@ fn one_chunk_update_does_not_rebuild_256_chunk_postings() {
     let update = index
         .apply(
             &mut tx,
+            0,
             update.root,
             [add(term(0), 1), add(term(0), 2), add(term(0), 1)],
         )
         .unwrap();
     assert_eq!(
-        tx.counts.borrow().hits.get(&tables::BITMAP_CONTAINER),
+        tx.counts
+            .borrow()
+            .hits
+            .get(&tables::BITMAP_CONTAINER.table()),
         Some(&1)
     );
     assert_eq!(
         tx.counts.borrow().writes,
         BTreeMap::from([
-            (tables::BITMAP_CONTAINER, 1),
-            (tables::BITMAP_TRIE, 2),
-            (tables::INDEX_TRIE, 1),
+            (tables::BITMAP_CONTAINER.table(), 1),
+            (tables::BITMAP_TRIE.table(), 2),
+            (tables::INDEX_TRIE.table(), 1),
             (tables::INDEX, 1)
         ])
     );
     tx.reset();
     let noop = index
-        .apply(&mut tx, update.root, [add(term(0), 1), add(term(0), 2)])
+        .apply(&mut tx, 0, update.root, [add(term(0), 1), add(term(0), 2)])
         .unwrap();
     assert!(noop.changed_terms.is_empty());
     assert!(tx.counts.borrow().writes.is_empty());
@@ -131,7 +136,10 @@ fn one_chunk_update_does_not_rebuild_256_chunk_postings() {
     let bitmap = index.bitmap(&tx, &term(0)).unwrap().unwrap();
     assert!(bitmap.treemap().contains(2));
     assert_eq!(
-        tx.counts.borrow().hits.get(&tables::BITMAP_CONTAINER),
+        tx.counts
+            .borrow()
+            .hits
+            .get(&tables::BITMAP_CONTAINER.table()),
         Some(&256)
     );
     assert!(tx.counts.borrow().writes.is_empty());
@@ -143,39 +151,50 @@ fn reopened_singleton_loads_and_finalizes_its_container_once() {
     let index = Index::new(&HASH);
     let mut tx = Observed::new(db.begin_write().unwrap());
     let root = index
-        .apply(&mut tx, RootRef::Empty, [add(term(0), 1)])
+        .apply(&mut tx, 0, RootRef::Empty, [add(term(0), 1)])
         .unwrap()
         .root;
     tx.reset();
     index
-        .apply(&mut tx, root, [add(term(0), 2), add(term(0), 3)])
+        .apply(&mut tx, 0, root, [add(term(0), 2), add(term(0), 3)])
         .unwrap();
     assert_eq!(
-        tx.counts.borrow().hits.get(&tables::BITMAP_CONTAINER),
+        tx.counts
+            .borrow()
+            .hits
+            .get(&tables::BITMAP_CONTAINER.table()),
         Some(&1)
     );
     assert_eq!(
-        tx.counts.borrow().writes.get(&tables::BITMAP_CONTAINER),
+        tx.counts
+            .borrow()
+            .writes
+            .get(&tables::BITMAP_CONTAINER.table()),
         Some(&1)
     );
 }
 
 #[test]
-fn failure_after_both_tries_change_is_rolled_back_with_flat_state() {
+fn failure_in_the_last_write_is_rolled_back_with_flat_state() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     let root = index
-        .apply(&mut tx, RootRef::Empty, [add(term(0), 1), add(term(1), 1)])
+        .apply(
+            &mut tx,
+            0,
+            RootRef::Empty,
+            [add(term(0), 1), add(term(1), 1)],
+        )
         .unwrap()
         .root;
     tx.commit().unwrap();
     let snapshot = db.begin_read().unwrap();
     let all_tables = [
         tables::INDEX,
-        tables::INDEX_TRIE,
-        tables::BITMAP_TRIE,
-        tables::BITMAP_CONTAINER,
+        tables::INDEX_TRIE.table(),
+        tables::BITMAP_TRIE.table(),
+        tables::BITMAP_CONTAINER.table(),
     ];
     let before = all_tables.map(|table| {
         scan_prefix(&snapshot, table, vec![])
@@ -184,16 +203,21 @@ fn failure_after_both_tries_change_is_rolled_back_with_flat_state() {
             .unwrap()
     });
     let mut tx = Observed::new(db.begin_write().unwrap());
-    tx.fail_table = Some(tables::INDEX);
+    // The index trie is written last, after the bitmap trie and the Index row.
+    tx.fail_table = Some(tables::INDEX_TRIE.table());
     assert!(matches!(
-        index.apply(&mut tx, root, [add(term(0), 65536)]),
-        Err(IndexError::Storage(_))
+        index.apply(&mut tx, 0, root, [add(term(0), 65536)]),
+        Err(IndexError::Merkle(golemdb_merkle::MerkleError::Storage(_)))
     ));
     assert_eq!(
-        tx.counts.borrow().writes.get(&tables::BITMAP_TRIE),
+        tx.counts.borrow().writes.get(&tables::BITMAP_TRIE.table()),
         Some(&1)
     );
-    assert_eq!(tx.counts.borrow().writes.get(&tables::INDEX_TRIE), Some(&1));
+    assert_eq!(tx.counts.borrow().writes.get(&tables::INDEX), Some(&1));
+    assert_eq!(
+        tx.counts.borrow().writes.get(&tables::INDEX_TRIE.table()),
+        Some(&1)
+    );
     tx.abort();
     let latest = db.begin_read().unwrap();
     for (table, old) in all_tables.into_iter().zip(before) {
@@ -205,7 +229,7 @@ fn failure_after_both_tries_change_is_rolled_back_with_flat_state() {
             old
         );
     }
-    assert_eq!(index.reopen(&latest, root.hash(&HASH)).unwrap(), root);
+    index.validate_root(&latest, root).unwrap();
     let bitmap = index.bitmap(&latest, &term(0)).unwrap().unwrap();
     assert!(!bitmap.treemap().contains(65536));
     assert!(bitmap.treemap().contains(1));

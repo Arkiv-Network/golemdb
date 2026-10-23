@@ -33,6 +33,41 @@ fn crud() {
     assert_eq!(read.get(B, b"a").unwrap(), Some(b"other table".to_vec()));
 }
 
+fn append_accepts_only_keys_after_the_last(db: &impl Store) {
+    let mut tx = db.begin_write().unwrap();
+    tx.append(A, b"b", b"1").unwrap();
+    tx.append(A, b"c", b"2").unwrap();
+    tx.commit().unwrap();
+    let mut tx = db.begin_write().unwrap();
+    // An equal key would overwrite a stored row, and a smaller one is out of order.
+    assert!(matches!(
+        tx.append(A, b"c", b"x"),
+        Err(StorageError::AlreadyExists)
+    ));
+    assert!(matches!(
+        tx.append(A, b"a", b"x"),
+        Err(StorageError::OutOfOrder)
+    ));
+    assert_eq!(tx.get(A, b"c").unwrap(), Some(b"2".to_vec()));
+    assert_eq!(tx.get(A, b"a").unwrap(), None);
+    tx.append(A, b"d", b"3").unwrap();
+    tx.commit().unwrap();
+    let read = db.begin_read().unwrap();
+    assert_eq!(read.get(A, b"c").unwrap(), Some(b"2".to_vec()));
+    assert_eq!(read.get(A, b"d").unwrap(), Some(b"3".to_vec()));
+}
+
+#[test]
+fn mdbx_append_accepts_only_keys_after_the_last() {
+    let dir = tempfile::tempdir().unwrap();
+    append_accepts_only_keys_after_the_last(&MdbxStore::open(dir.path()).unwrap());
+}
+
+#[test]
+fn memory_append_accepts_only_keys_after_the_last() {
+    append_accepts_only_keys_after_the_last(&MemoryStore::new());
+}
+
 #[test]
 fn snapshots_and_abort() {
     let dir = tempfile::tempdir().unwrap();

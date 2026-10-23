@@ -16,8 +16,6 @@ pub enum IndexError {
     Corruption(&'static str),
     #[error("index root disagrees with the flat term table")]
     RootMismatch,
-    #[error("different immutable bytes already stored under the same hash")]
-    ConflictingContent,
 }
 
 #[derive(Debug)]

@@ -268,18 +268,18 @@ proptest! {
 fn bitmap_trie_rejects_containers_out_of_order() {
     let db = golemdb_storage::MemoryStore::new();
     let mut tx = golemdb_storage::Store::begin_write(&db).unwrap();
-    let trie = crate::bitmap_trie::BitmapTrie::new(&golemdb_merkle::Keccak256Hasher);
+    let trie = crate::bitmap_trie::BitmapTrie::new(&golemdb_merkle::Keccak256Hasher, &[0; 32]);
     // Batching reads every container from the original root, so a container
     // visited twice would lose its first changes.
     assert!(matches!(
-        trie.apply(&mut tx, None, [(1, 0, true), (0, 0, true)]),
+        trie.apply(&mut tx, 0, None, [(1, 0, true), (0, 0, true)]),
         Err(crate::IndexError::Bitmap(BitmapError::UnsortedPaths {
             previous: 1,
             path: 0
         }))
     ));
     assert!(matches!(
-        trie.apply(&mut tx, None, [(1, 0, true), (2, 0, true), (1, 1, true)]),
+        trie.apply(&mut tx, 0, None, [(1, 0, true), (2, 0, true), (1, 1, true)]),
         Err(crate::IndexError::Bitmap(BitmapError::UnsortedPaths {
             previous: 2,
             path: 1

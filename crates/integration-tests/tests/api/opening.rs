@@ -20,11 +20,11 @@ pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
     [
         SUPERBLOCK,
         tables::CELL,
-        tables::CELL_TRIE,
+        tables::CELL_TRIE.table(),
         golemdb_index::tables::INDEX,
-        golemdb_index::tables::INDEX_TRIE,
-        golemdb_index::tables::BITMAP_TRIE,
-        golemdb_index::tables::BITMAP_CONTAINER,
+        golemdb_index::tables::INDEX_TRIE.table(),
+        golemdb_index::tables::BITMAP_TRIE.table(),
+        golemdb_index::tables::BITMAP_CONTAINER.table(),
     ]
     .into_iter()
     .map(|table| {
@@ -200,6 +200,15 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
             .as_bytes(),
         Some([genesis.state_root, genesis.index_root].concat().as_slice())
     );
+    // `#roots` commits the hashes; the Roots table locates both commits' tries.
+    let roots = |commit| golemdb_branch::read_roots(&tx, golemdb_branch::CommitId::new(commit));
+    let first = roots(0).unwrap().unwrap();
+    assert_eq!(first.state.hash(&hasher), genesis.state_root);
+    assert_eq!(first.index, golemdb_merkle::RootRef::Empty);
+    assert_eq!(
+        roots(1).unwrap().unwrap().state.hash(&hasher),
+        reopened.info().state_root
+    );
     genesis
 }
 
@@ -259,7 +268,7 @@ fn partial_or_foreign_state_is_never_initialized() {
     for table in [
         SUPERBLOCK,
         tables::CELL,
-        tables::CELL_TRIE,
+        tables::CELL_TRIE.table(),
         Table("Foreign"),
     ] {
         for delete in [false, true] {
@@ -368,10 +377,16 @@ fn unsupported_format_ids_and_missing_trie_roots_are_rejected() {
         ));
     }
     let db = MemoryStore::new();
-    let opened = Database::from_store(db.clone(), &config()).unwrap();
-    let root = opened.info().state_root;
+    Database::from_store(db.clone(), &config()).unwrap();
+    // The genesis state root is a branch stored at commit 0, at the empty route.
+    let trie = golemdb_merkle::Trie::<_, { golemdb_cells::CELL_TRIE_PATH_BYTES }>::new(
+        tables::CELL_TRIE,
+        golemdb_cells::CELL_BRANCH_DOMAIN,
+        &Keccak256Hasher,
+    );
+    let root = trie.node_key(0, &[]);
     let mut tx = db.begin_write().unwrap();
-    assert!(tx.delete(tables::CELL_TRIE, &root).unwrap());
+    assert!(tx.delete(tables::CELL_TRIE.table(), &root).unwrap());
     tx.commit().unwrap();
     assert!(Database::from_store(db, &config()).is_err());
 }

@@ -1,6 +1,6 @@
 use std::iter::FusedIterator;
 
-use golemdb_merkle::{Hash, HashProvider, RootRef};
+use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::{ReadCursor, ReadTransaction, Scan, WriteTransaction, scan_prefix};
 
 use crate::{CELL_TRIE_PATH_BYTES, CellKey, CellValue, Result, cell_trie::CellTrie, tables};
@@ -62,25 +62,29 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         CellReader::new(tx).scan_record(record_id)
     }
 
-    /// Recover root metadata. Empty/singleton recovery uses the `Cell` table from
-    /// the same snapshot; a branch root's own row is validated, not its entire
-    /// subtree or correspondence with all `Cell` rows. Historical singleton
-    /// recovery needs historical values or retained `RootRef` metadata.
-    pub fn reopen(
+    /// Validate a stored root, such as one read from `Roots`. Empty/singleton
+    /// roots are checked against the `Cell` table from the same snapshot; a
+    /// branch root's own row is validated, not its entire subtree or
+    /// correspondence with all `Cell` rows.
+    pub fn validate_root(
         &self,
         tx: &impl ReadTransaction,
-        hash: Hash,
-    ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
-        self.trie.reopen(tx, hash)
+        root: RootRef<CELL_TRIE_PATH_BYTES>,
+    ) -> Result<()> {
+        self.trie.validate_root(tx, root)
     }
 
     /// Apply each key's final value once, skipping no-ops and absent deletions.
     /// Affected commitments are checked against the original `Cell` values even
     /// for no-ops. This is not a whole-state audit; the caller must supply the
-    /// matching root. Errors require aborting the enclosing transaction.
+    /// matching root. New trie rows are stored under `commit`, the commit this
+    /// batch publishes; a second batch at the same commit replaces rows, so
+    /// only its root stays valid. Errors require aborting the enclosing
+    /// transaction.
     pub fn apply(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
         changes: impl IntoIterator<Item = CellChange>,
     ) -> Result<CellsUpdate> {
@@ -93,7 +97,7 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         // One trie update for the whole batch writes each touched branch once.
         let edits =
             (changes_by_key.iter()).map(|(key, change)| (key.as_slice(), change.after.as_ref()));
-        let root = self.trie.set(tx, root, edits)?;
+        let root = self.trie.set(tx, commit, root, edits)?;
         write_values(tx, &changes_by_key)?;
         Ok(CellsUpdate {
             root,

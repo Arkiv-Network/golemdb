@@ -4,9 +4,9 @@ use golemdb_cells::{
     CellChange, CellKey, CellName, CellNameRef, CellType, CellValue, CellValueRef, Cells, Width,
     reserved, system,
 };
-use golemdb_merkle::{HashProvider, Keccak256Hasher, RootRef};
+use golemdb_merkle::{Keccak256Hasher, RootRef};
 use golemdb_metering::Budget;
-use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction};
+use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
 const OTHER: RecordKey = RecordKey([0x43; 32]);
@@ -176,19 +176,13 @@ fn initialize(db: &impl Store) {
     let hash = Keccak256Hasher;
     let mut tx = db.begin_write().unwrap();
     let update = Cells::new(&hash)
-        .apply(&mut tx, RootRef::Empty, changes)
+        .apply(&mut tx, 0, RootRef::Empty, changes)
         .unwrap();
-    tx.put(
-        Table("Superblock"),
-        b"head",
-        &[
-            0u64.to_be_bytes().as_slice(),
-            &update.root.hash(&hash),
-            &hash.hash(&[]),
-        ]
-        .concat(),
-    )
-    .unwrap();
+    let roots = golemdb_branch::Roots {
+        state: update.root,
+        index: RootRef::Empty,
+    };
+    golemdb_branch::init_head(&mut tx, &roots, &hash).unwrap();
     tx.commit().unwrap();
 }
 

@@ -1,12 +1,48 @@
-use crate::{BranchNodeCompact, Hash, HashProvider, MerkleError, Result, path};
-use golemdb_storage::{ReadTransaction, StorageError, Table, WriteTransaction};
+use crate::{
+    BranchNodeCompact, HASH_BYTES, Hash, HashProvider, LeafStorage, MerkleError, Result, TrieTable,
+    node::{BRANCH_SLOTS, MAX_PATH_BYTES},
+    path::{self, NIBBLES_PER_BYTE},
+};
+use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
 /// The owner supplies a hash binding the complete path and its leaf payload.
 /// `N` is the full routing path width in bytes, not the trie depth.
+/// `commit` locates a leaf stored as its own row ([`crate::PayloadTrie`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LeafRef<const N: usize> {
     pub path: [u8; N],
     pub hash: Hash,
+    pub commit: u64,
+}
+
+impl<const N: usize> LeafRef<N> {
+    /// A leaf without a row of its own (commit 0: no row to locate).
+    pub fn new(path: [u8; N], hash: Hash) -> Self {
+        Self {
+            path,
+            hash,
+            commit: 0,
+        }
+    }
+}
+
+/// A stored branch: its hash, and the commit that stored its row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BranchRef {
+    pub hash: Hash,
+    pub commit: u64,
+}
+
+/// Bytes of a big-endian commit number: the start of every row key, and the
+/// field after the hash in an encoded root.
+pub const COMMIT_BYTES: usize = size_of::<u64>();
+
+/// An encoded branch root, `hash ‖ commit`; a leaf root appends its path.
+pub const BRANCH_ROOT_BYTES: usize = HASH_BYTES + COMMIT_BYTES;
+
+/// Row key: the writing commit first, so each commit's rows are contiguous.
+fn version_key(commit: u64, namespace: &[u8], position: &[u8]) -> Vec<u8> {
+    [&commit.to_be_bytes()[..], namespace, position].concat()
 }
 
 /// `N` is the full routing path width in bytes, not the trie depth.
@@ -17,29 +53,73 @@ pub enum RootRef<const N: usize> {
     #[default]
     Empty,
     Leaf(LeafRef<N>),
-    Branch(Hash),
+    Branch(BranchRef),
 }
 
 impl<const N: usize> RootRef<N> {
+    /// Bytes of the longest encoding, a leaf root's.
+    pub const MAX_ENCODED_BYTES: usize = BRANCH_ROOT_BYTES + N;
+
     /// Empty root = H(empty bytes); singleton root = its leaf hash.
     pub fn hash(&self, hasher: &impl HashProvider) -> Hash {
         match self {
             Self::Empty => hasher.hash(&[]),
             Self::Leaf(leaf) => leaf.hash,
-            Self::Branch(hash) => *hash,
+            Self::Branch(branch) => branch.hash,
+        }
+    }
+
+    /// Everything needed to reopen the root: nothing for an empty root,
+    /// `hash ‖ commit` for a branch, `hash ‖ commit ‖ path` for a leaf.
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::Branch(branch) => [&branch.hash[..], &branch.commit.to_be_bytes()].concat(),
+            Self::Leaf(leaf) => [&leaf.hash[..], &leaf.commit.to_be_bytes(), &leaf.path].concat(),
+        }
+    }
+
+    /// Reverse [`RootRef::encode`]: empty bytes are the empty root, exactly
+    /// [`BRANCH_ROOT_BYTES`] a branch, and `N` more bytes a leaf with its path.
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.is_empty() {
+            return Ok(Self::Empty);
+        }
+        let invalid = MerkleError::InvalidNode("invalid root encoding");
+        let Some((hash, rest)) = bytes.split_first_chunk::<HASH_BYTES>() else {
+            return Err(invalid);
+        };
+        let Some((commit, path)) = rest.split_first_chunk::<COMMIT_BYTES>() else {
+            return Err(invalid);
+        };
+        let (hash, commit) = (*hash, u64::from_be_bytes(*commit));
+        match path {
+            [] => Ok(Self::Branch(BranchRef { hash, commit })),
+            path => Ok(Self::Leaf(LeafRef {
+                path: path.try_into().map_err(|_| invalid)?,
+                hash,
+                commit,
+            })),
         }
     }
 }
 
 /// Branch-only compressed hexary trie over the caller's storage transaction.
 /// Each table fixes a path width, domain, hash algorithm and canonical codec.
-/// Mutations retain old branches; no operation commits or opens a transaction.
-/// Abort the enclosing write transaction after a mutation error: intermediate
-/// immutable branches may already have been inserted.
-pub struct Trie<'h, H: HashProvider, const N: usize> {
+/// Branches are stored under `commit ‖ namespace ‖ route` and never overwritten
+/// by later commits. Every write names the commit that owns its new rows. Rows
+/// rewritten within one commit replace each other, so only that commit's final
+/// root stays valid.
+/// No operation commits or opens a transaction. Abort the enclosing write
+/// transaction after a mutation error: intermediate branches may be stored.
+/// `NS` is the namespace width in bytes, fixed by the [`TrieTable`]; 0 for an
+/// unnamespaced trie.
+pub struct Trie<'h, H: HashProvider, const N: usize, const NS: usize = 0> {
     table: Table,
     domain: u8,
     hasher: &'h H,
+    namespace: [u8; NS],
+    leaf_storage: LeafStorage,
 }
 
 impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
@@ -47,38 +127,86 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     /// Configure a trie. Path widths outside 1..=32 bytes fail at compile time.
     ///
     /// ```compile_fail,E0080
-    /// use golemdb_merkle::{Keccak256Hasher, Trie};
+    /// use golemdb_merkle::{Keccak256Hasher, Trie, TrieTable};
     /// use golemdb_storage::Table;
     /// const EXAMPLE_BRANCH_DOMAIN: u8 = 0x03;
-    /// let _ = Trie::<_, 0>::new(Table("Branches"), EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
+    /// const BRANCHES: TrieTable = TrieTable::new(Table("Branches"));
+    /// let _ = Trie::<_, 0>::new(BRANCHES, EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
     /// ```
     ///
     /// ```compile_fail,E0080
-    /// use golemdb_merkle::{Keccak256Hasher, Trie};
+    /// use golemdb_merkle::{Keccak256Hasher, Trie, TrieTable};
     /// use golemdb_storage::Table;
     /// const EXAMPLE_BRANCH_DOMAIN: u8 = 0x03;
-    /// let _ = Trie::<_, 33>::new(Table("Branches"), EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
+    /// const BRANCHES: TrieTable = TrieTable::new(Table("Branches"));
+    /// let _ = Trie::<_, 33>::new(BRANCHES, EXAMPLE_BRANCH_DOMAIN, &Keccak256Hasher);
     /// ```
-    pub fn new(table: Table, domain: u8, hasher: &'h H) -> Self {
+    pub fn new(table: TrieTable, domain: u8, hasher: &'h H) -> Self {
+        Self::namespaced(table, [], domain, hasher)
+    }
+}
+
+impl<'h, H: HashProvider, const N: usize, const NS: usize> Trie<'h, H, N, NS> {
+    /// As [`Trie::new`], keying rows under `namespace` for several tries
+    /// sharing `table`, whose width keeps keys of different namespaces apart.
+    pub fn namespaced(
+        table: TrieTable<NS>,
+        namespace: [u8; NS],
+        domain: u8,
+        hasher: &'h H,
+    ) -> Self {
         const {
             assert!(
-                N >= 1 && N <= 32,
+                N >= 1 && N <= MAX_PATH_BYTES,
                 "Merkle paths must contain between 1 and 32 bytes"
             )
         };
         Self {
-            table,
+            table: table.table(),
             domain,
             hasher,
+            namespace,
+            leaf_storage: LeafStorage::InNode,
         }
+    }
+
+    /// Leaves are rows of their own, so branches record their commits too.
+    /// [`crate::PayloadTrie`] writes those rows.
+    pub(crate) fn with_leaf_rows(mut self) -> Self {
+        self.leaf_storage = LeafStorage::Rows;
+        self
+    }
+
+    /// Row key of the branch at `route` (nibbles from the root) written at
+    /// `commit`.
+    pub fn node_key(&self, commit: u64, route: &[u8]) -> Vec<u8> {
+        // A route has at most `N` bytes of nibbles, so its length fits the byte.
+        const { assert!(NIBBLES_PER_BYTE * N <= u8::MAX as usize) };
+        let position = [&[route.len() as u8][..], &path::pack(route)].concat();
+        version_key(commit, &self.namespace, &position)
+    }
+
+    /// Row key of a leaf stored as its own row ([`crate::PayloadTrie`]): the
+    /// leaf's full path written at `commit`.
+    pub(crate) fn leaf_key(&self, commit: u64, path: &[u8; N]) -> Vec<u8> {
+        version_key(commit, &self.namespace, path)
+    }
+
+    /// A leaf being written: its row, if any, belongs to the write commit.
+    fn leaf(&self, commit: u64, path: [u8; N], hash: Hash) -> LeafRef<N> {
+        let commit = match self.leaf_storage {
+            LeafStorage::Rows => commit,
+            LeafStorage::InNode => 0,
+        };
+        LeafRef { path, hash, commit }
     }
 
     /// Validate a branch root's row, hash and routing at depth zero without
     /// traversing descendants. Empty/leaf references have no branch to load;
     /// authenticating a leaf payload remains the owner's responsibility.
     pub fn validate_root(&self, tx: &impl ReadTransaction, root: RootRef<N>) -> Result<()> {
-        if let RootRef::Branch(hash) = root {
-            self.load(tx, hash, &[])?;
+        if let RootRef::Branch(branch) = root {
+            self.load(tx, branch, &[])?;
         }
         Ok(())
     }
@@ -95,8 +223,8 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
             match root {
                 RootRef::Empty => return Ok(None),
                 RootRef::Leaf(leaf) => return Ok((leaf.path == *path).then_some(leaf)),
-                RootRef::Branch(hash) => {
-                    let node = self.load(tx, hash, &route)?;
+                RootRef::Branch(branch) => {
+                    let node = self.load(tx, branch, &route)?;
                     route.extend(node.unpack_prefix());
                     if !target.starts_with(&route) {
                         return Ok(None);
@@ -109,22 +237,30 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         }
     }
 
+    /// Insert or replace the leaf hash at `path`. With leaf rows, the leaf's
+    /// row belongs to `commit`.
     pub fn insert(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         root: RootRef<N>,
-        leaf: LeafRef<N>,
+        path: &[u8; N],
+        hash: Hash,
     ) -> Result<RootRef<N>> {
-        self.edit(tx, root, &leaf.path, Some(leaf), &[])
+        let leaf = self.leaf(commit, *path, hash);
+        self.edit(tx, commit, root, path, Some(leaf), &[])
     }
 
+    /// Remove the leaf at `path`, if present, merging a branch left with one
+    /// child into its parent. New rows belong to `commit`.
     pub fn remove(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         root: RootRef<N>,
         path: &[u8; N],
     ) -> Result<RootRef<N>> {
-        self.edit(tx, root, path, None, &[])
+        self.edit(tx, commit, root, path, None, &[])
     }
 
     /// Set the leaf hash at each path, or remove the path for `None`; the last
@@ -134,9 +270,22 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     pub fn apply(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         root: RootRef<N>,
         edits: impl IntoIterator<Item = ([u8; N], Option<Hash>)>,
     ) -> Result<RootRef<N>> {
+        Ok(self.apply_leaves(tx, commit, root, edits)?.0)
+    }
+
+    /// As [`Trie::apply`], also returning the paths of the leaves it created:
+    /// an edit setting a leaf's current hash keeps the leaf and its commit.
+    pub(crate) fn apply_leaves(
+        &self,
+        tx: &mut impl WriteTransaction,
+        commit: u64,
+        root: RootRef<N>,
+        edits: impl IntoIterator<Item = ([u8; N], Option<Hash>)>,
+    ) -> Result<(RootRef<N>, Vec<[u8; N]>)> {
         let mut edits: Vec<_> = edits.into_iter().collect();
         // Stable sorting preserves input order for each path: the last edit wins.
         edits.sort_by_key(|edit| edit.0);
@@ -149,8 +298,9 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
                 false
             }
         });
-        let edited = self.apply_at(tx, Edited::Stored(root), &edits, &[])?;
-        self.store_edited(tx, edited, &[])
+        let mut created = Vec::new();
+        let edited = self.apply_at(tx, commit, Edited::Stored(root), &edits, &[], &mut created)?;
+        Ok((self.store_edited(tx, commit, edited, &[])?, created))
     }
 
     /// Lazy ascending path traversal. Storage/corruption errors are yielded once
@@ -159,7 +309,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         &'a self,
         tx: &'a T,
         root: RootRef<N>,
-    ) -> Walk<'a, T, H, N> {
+    ) -> Walk<'a, T, H, N, NS> {
         Walk {
             trie: self,
             tx,
@@ -170,44 +320,40 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     fn load(
         &self,
         tx: &impl ReadTransaction,
-        hash: Hash,
+        branch: BranchRef,
         route: &[u8],
     ) -> Result<BranchNodeCompact<N>> {
         let bytes = tx
-            .get(self.table, &hash)?
-            .ok_or(MerkleError::MissingBranch(hash))?;
-        let node = BranchNodeCompact::decode(&bytes)?;
-        if node.hash(self.domain, self.hasher) != hash {
+            .get(self.table, &self.node_key(branch.commit, route))?
+            .ok_or(MerkleError::MissingBranch(branch.hash))?;
+        let node = BranchNodeCompact::decode(&bytes, self.leaf_storage)?;
+        if node.hash(self.domain, self.hasher) != branch.hash {
             return Err(MerkleError::HashMismatch);
         }
         node.validate_at(route)?;
         Ok(node)
     }
 
+    /// Store the branch over `children` with `prefix` at `route`.
     fn store(
         &self,
         tx: &mut impl WriteTransaction,
-        node: BranchNodeCompact<N>,
+        commit: u64,
+        prefix: &[u8],
+        children: &[RootRef<N>; BRANCH_SLOTS],
         route: &[u8],
     ) -> Result<RootRef<N>> {
+        let node = BranchNodeCompact::from_children(prefix, children, self.leaf_storage)?;
         node.validate_at(route)?;
         let hash = node.hash(self.domain, self.hasher);
-        let bytes = node.encode();
-        match tx.insert(self.table, &hash, &bytes) {
-            Ok(()) => (),
-            Err(StorageError::AlreadyExists) => {
-                if tx.get(self.table, &hash)?.as_deref() != Some(bytes.as_slice()) {
-                    return Err(MerkleError::ConflictingBranch);
-                }
-            }
-            Err(error) => return Err(error.into()),
-        }
-        Ok(RootRef::Branch(hash))
+        tx.put(self.table, &self.node_key(commit, route), &node.encode())?;
+        Ok(RootRef::Branch(BranchRef { hash, commit }))
     }
 
     fn edit(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         root: RootRef<N>,
         target: &[u8; N],
         replacement: Option<LeafRef<N>>,
@@ -215,8 +361,10 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     ) -> Result<RootRef<N>> {
         match root {
             RootRef::Empty => Ok(replacement.map(RootRef::Leaf).unwrap_or(RootRef::Empty)),
-            RootRef::Leaf(leaf) => self.edit_leaf(tx, leaf, target, replacement, route),
-            RootRef::Branch(hash) => self.edit_branch(tx, hash, target, replacement, route),
+            RootRef::Leaf(leaf) => self.edit_leaf(tx, commit, leaf, target, replacement, route),
+            RootRef::Branch(branch) => {
+                self.edit_branch(tx, commit, branch, target, replacement, route)
+            }
         }
     }
 
@@ -224,6 +372,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     fn edit_leaf(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         old: LeafRef<N>,
         target: &[u8; N],
         replacement: Option<LeafRef<N>>,
@@ -237,29 +386,26 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
         };
         let old_path = path::nibbles(&old.path);
         let new_path = path::nibbles(target);
-        let depth = (route.len()..N * 2)
+        let depth = (route.len()..N * NIBBLES_PER_BYTE)
             .find(|&i| old_path[i] != new_path[i])
             .unwrap();
-        let mut children = [RootRef::Empty; 16];
+        let mut children = [RootRef::Empty; BRANCH_SLOTS];
         children[old_path[depth] as usize] = RootRef::Leaf(old);
         children[new_path[depth] as usize] = RootRef::Leaf(new);
-        self.store(
-            tx,
-            BranchNodeCompact::from_children(&new_path[route.len()..depth], &children)?,
-            route,
-        )
+        self.store(tx, commit, &new_path[route.len()..depth], &children, route)
     }
 
     /// Split a divergent prefix or recursively edit the matching child.
     fn edit_branch(
         &self,
         tx: &mut impl WriteTransaction,
-        hash: Hash,
+        commit: u64,
+        branch: BranchRef,
         target: &[u8; N],
         replacement: Option<LeafRef<N>>,
         route: &[u8],
     ) -> Result<RootRef<N>> {
-        let node = self.load(tx, hash, route)?;
+        let node = self.load(tx, branch, route)?;
         let prefix = node.unpack_prefix();
         let target_path = path::nibbles(target);
         let shared = prefix
@@ -269,21 +415,28 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
             .count();
         if shared != prefix.len() {
             let Some(new) = replacement else {
-                return Ok(RootRef::Branch(hash));
+                return Ok(RootRef::Branch(branch));
             };
-            return self.split_branch(tx, &node, &prefix, new, shared, route);
+            return self.split_branch(tx, commit, &node, new, shared, route);
         }
         let mut child_route = route.to_vec();
         child_route.extend_from_slice(&prefix);
         let slot = target_path[child_route.len()] as usize;
         child_route.push(slot as u8);
         let mut children = node.children();
-        let changed = self.edit(tx, children[slot], target, replacement, &child_route)?;
+        let changed = self.edit(
+            tx,
+            commit,
+            children[slot],
+            target,
+            replacement,
+            &child_route,
+        )?;
         if changed == children[slot] {
-            return Ok(RootRef::Branch(hash));
+            return Ok(RootRef::Branch(branch));
         }
         children[slot] = changed;
-        self.rebuild_branch(tx, prefix, &children, route)
+        self.rebuild_branch(tx, commit, prefix, &children, route)
     }
 
     /// Insert a leaf diverging within this branch's prefix. Store the shortened
@@ -291,27 +444,26 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     fn split_branch(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         node: &BranchNodeCompact<N>,
-        prefix: &[u8],
         new: LeafRef<N>,
         shared: usize,
         route: &[u8],
     ) -> Result<RootRef<N>> {
+        let prefix = node.unpack_prefix();
         let mut old_route = route.to_vec();
         old_route.extend_from_slice(&prefix[..shared + 1]);
         let old = self.store(
             tx,
-            BranchNodeCompact::from_children(&prefix[shared + 1..], &node.children())?,
+            commit,
+            &prefix[shared + 1..],
+            &node.children(),
             &old_route,
         )?;
-        let mut children = [RootRef::Empty; 16];
+        let mut children = [RootRef::Empty; BRANCH_SLOTS];
         children[prefix[shared] as usize] = old;
         children[path::nibble(&new.path, route.len() + shared) as usize] = RootRef::Leaf(new);
-        self.store(
-            tx,
-            BranchNodeCompact::from_children(&prefix[..shared], &children)?,
-            route,
-        )
+        self.store(tx, commit, &prefix[..shared], &children, route)
     }
 
     /// Store updated children, promoting a lone leaf or merging a lone branch's
@@ -319,8 +471,9 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     fn rebuild_branch(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         prefix: Vec<u8>,
-        children: &[RootRef<N>; 16],
+        children: &[RootRef<N>; BRANCH_SLOTS],
         route: &[u8],
     ) -> Result<RootRef<N>> {
         let active: Vec<_> = children
@@ -329,28 +482,20 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
             .filter(|(_, child)| **child != RootRef::Empty)
             .collect();
         if let [(slot, only)] = active.as_slice() {
-            if let RootRef::Branch(hash) = **only {
+            if let RootRef::Branch(branch) = **only {
                 let mut child_route = route.to_vec();
                 child_route.extend_from_slice(&prefix);
                 child_route.push(*slot as u8);
-                let child = self.load(tx, hash, &child_route)?;
+                let child = self.load(tx, branch, &child_route)?;
                 let mut merged = prefix;
                 merged.push(*slot as u8);
                 merged.extend(child.unpack_prefix());
-                self.store(
-                    tx,
-                    BranchNodeCompact::from_children(&merged, &child.children())?,
-                    route,
-                )
+                self.store(tx, commit, &merged, &child.children(), route)
             } else {
                 Ok(**only)
             }
         } else {
-            self.store(
-                tx,
-                BranchNodeCompact::from_children(&prefix, children)?,
-                route,
-            )
+            self.store(tx, commit, &prefix, children, route)
         }
     }
 
@@ -361,18 +506,22 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     fn apply_at(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         subtrie: Edited<N>,
         edits: &[Edit<N>],
         route: &[u8],
+        created: &mut Vec<[u8; N]>,
     ) -> Result<Edited<N>> {
         let (stored, mut prefix, children) = match subtrie {
-            Edited::Stored(RootRef::Empty) => return self.rebuild(tx, None, edits, route),
-            Edited::Stored(RootRef::Leaf(leaf)) => {
-                return self.rebuild(tx, Some(leaf), edits, route);
+            Edited::Stored(RootRef::Empty) => {
+                return self.rebuild(tx, commit, None, edits, route, created);
             }
-            Edited::Stored(RootRef::Branch(hash)) => {
-                let node = self.load(tx, hash, route)?;
-                (Some(hash), node.unpack_prefix(), node.children())
+            Edited::Stored(RootRef::Leaf(leaf)) => {
+                return self.rebuild(tx, commit, Some(leaf), edits, route, created);
+            }
+            Edited::Stored(RootRef::Branch(branch)) => {
+                let node = self.load(tx, branch, route)?;
+                (Some(branch), node.unpack_prefix(), node.children())
             }
             Edited::New(prefix, children) => (None, prefix, *children),
         };
@@ -387,7 +536,8 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
             child_route.push(slot as u8);
             let child =
                 std::mem::replace(&mut edited_children[slot], Edited::Stored(RootRef::Empty));
-            edited_children[slot] = self.apply_at(tx, child, group, &child_route)?;
+            edited_children[slot] =
+                self.apply_at(tx, commit, child, group, &child_route, created)?;
             child_route.pop();
         }
         let unchanged = !was_split
@@ -395,11 +545,11 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
                 .all(|(edited, child)| *edited == Edited::Stored(child));
         if unchanged {
             return Ok(match stored {
-                Some(hash) => Edited::Stored(RootRef::Branch(hash)),
+                Some(branch) => Edited::Stored(RootRef::Branch(branch)),
                 None => Edited::New(prefix, Box::new(children)),
             });
         }
-        self.collapse(tx, prefix, edited_children, child_route)
+        self.collapse(tx, commit, prefix, edited_children, child_route)
     }
 
     /// Form the edited branch from its edited children, keeping the trie free
@@ -409,11 +559,12 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     fn collapse(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         prefix: Vec<u8>,
-        mut edited_children: [Edited<N>; 16],
+        mut edited_children: [Edited<N>; BRANCH_SLOTS],
         mut child_route: Vec<u8>,
     ) -> Result<Edited<N>> {
-        let active: Vec<_> = (0..16)
+        let active: Vec<_> = (0..BRANCH_SLOTS)
             .filter(|&slot| edited_children[slot] != Edited::Stored(RootRef::Empty))
             .collect();
         match active[..] {
@@ -423,9 +574,9 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
                     std::mem::replace(&mut edited_children[slot], Edited::Stored(RootRef::Empty));
                 let (child_prefix, grandchildren) = match only {
                     Edited::New(child_prefix, grandchildren) => (child_prefix, grandchildren),
-                    Edited::Stored(RootRef::Branch(hash)) => {
+                    Edited::Stored(RootRef::Branch(branch)) => {
                         child_route.push(slot as u8);
-                        let child = self.load(tx, hash, &child_route)?;
+                        let child = self.load(tx, branch, &child_route)?;
                         (child.unpack_prefix(), Box::new(child.children()))
                     }
                     leaf => return Ok(leaf),
@@ -434,10 +585,10 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
                 Ok(Edited::New(merged, grandchildren))
             }
             _ => {
-                let mut children = [RootRef::Empty; 16];
+                let mut children = [RootRef::Empty; BRANCH_SLOTS];
                 for (slot, edited) in edited_children.into_iter().enumerate() {
                     child_route.push(slot as u8);
-                    children[slot] = self.store_edited(tx, edited, &child_route)?;
+                    children[slot] = self.store_edited(tx, commit, edited, &child_route)?;
                     child_route.pop();
                 }
                 Ok(Edited::New(prefix, Box::new(children)))
@@ -450,24 +601,35 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     fn rebuild(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         old: Option<LeafRef<N>>,
         edits: &[Edit<N>],
         route: &[u8],
+        created: &mut Vec<[u8; N]>,
     ) -> Result<Edited<N>> {
-        let mut leaves: Vec<_> = (edits.iter())
-            .filter_map(|&(path, hash)| hash.map(|hash| LeafRef { path, hash }))
-            .collect();
+        let mut leaves = Vec::new();
+        for &(path, hash) in edits {
+            let Some(hash) = hash else { continue };
+            leaves.push(match old {
+                Some(old) if old.path == path && old.hash == hash => old,
+                _ => {
+                    created.push(path);
+                    self.leaf(commit, path, hash)
+                }
+            });
+        }
         if let Some(old) = old.filter(|old| edits.iter().all(|(path, _)| *path != old.path)) {
             leaves.push(old);
             leaves.sort_by_key(|leaf| leaf.path);
         }
-        self.build(tx, &leaves, route)
+        self.build(tx, commit, &leaves, route)
     }
 
     /// The canonical subtrie at `route` for leaves sorted by path.
     fn build(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         leaves: &[LeafRef<N>],
         route: &[u8],
     ) -> Result<Edited<N>> {
@@ -476,15 +638,18 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
             [only] => return Ok(Edited::Stored(RootRef::Leaf(*only))),
             [first, .., last] => (path::nibbles(&first.path), path::nibbles(&last.path)),
         };
-        let depth = (route.len()..N * 2).find(|&i| first[i] != last[i]).unwrap();
-        let mut children = [RootRef::Empty; 16];
+        let depth = (route.len()..N * NIBBLES_PER_BYTE)
+            .find(|&i| first[i] != last[i])
+            .unwrap();
+        let mut children = [RootRef::Empty; BRANCH_SLOTS];
         let mut child_route = first[..depth].to_vec();
         for group in
             leaves.chunk_by(|a, b| path::nibble(&a.path, depth) == path::nibble(&b.path, depth))
         {
             child_route.push(path::nibble(&group[0].path, depth));
-            let child = self.build(tx, group, &child_route)?;
-            children[child_route[depth] as usize] = self.store_edited(tx, child, &child_route)?;
+            let child = self.build(tx, commit, group, &child_route)?;
+            children[child_route[depth] as usize] =
+                self.store_edited(tx, commit, child, &child_route)?;
             child_route.pop();
         }
         Ok(Edited::New(
@@ -498,16 +663,13 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     fn store_edited(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         edited: Edited<N>,
         route: &[u8],
     ) -> Result<RootRef<N>> {
         match edited {
             Edited::Stored(root) => Ok(root),
-            Edited::New(prefix, children) => self.store(
-                tx,
-                BranchNodeCompact::from_children(&prefix, &children)?,
-                route,
-            ),
+            Edited::New(prefix, children) => self.store(tx, commit, &prefix, &children, route),
         }
     }
 }
@@ -518,7 +680,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
 #[derive(PartialEq)]
 enum Edited<const N: usize> {
     Stored(RootRef<N>),
-    New(Vec<u8>, Box<[RootRef<N>; 16]>),
+    New(Vec<u8>, Box<[RootRef<N>; BRANCH_SLOTS]>),
 }
 
 /// One batch edit: the leaf hash to set at a path, or `None` to remove it.
@@ -531,10 +693,10 @@ type Edit<const N: usize> = ([u8; N], Option<Hash>);
 /// its own children unchanged.
 fn split_prefix<const N: usize>(
     prefix: &[u8],
-    children: [RootRef<N>; 16],
+    children: [RootRef<N>; BRANCH_SLOTS],
     edits: &[Edit<N>],
     depth: usize,
-) -> (usize, [Edited<N>; 16]) {
+) -> (usize, [Edited<N>; BRANCH_SLOTS]) {
     let kept = (edits.iter())
         .filter(|(_, hash)| hash.is_some())
         .map(|(path, _)| path::matched(prefix, path, depth))
@@ -543,7 +705,8 @@ fn split_prefix<const N: usize>(
     if kept == prefix.len() {
         return (kept, children.map(Edited::Stored));
     }
-    let mut split: [Edited<N>; 16] = std::array::from_fn(|_| Edited::Stored(RootRef::Empty));
+    let mut split: [Edited<N>; BRANCH_SLOTS] =
+        std::array::from_fn(|_| Edited::Stored(RootRef::Empty));
     split[prefix[kept] as usize] = Edited::New(prefix[kept + 1..].to_vec(), Box::new(children));
     (kept, split)
 }
@@ -564,13 +727,15 @@ fn following<'e, const N: usize>(
     &edits[start..end]
 }
 
-pub struct Walk<'a, T: ReadTransaction, H: HashProvider, const N: usize> {
-    trie: &'a Trie<'a, H, N>,
+pub struct Walk<'a, T: ReadTransaction, H: HashProvider, const N: usize, const NS: usize = 0> {
+    trie: &'a Trie<'a, H, N, NS>,
     tx: &'a T,
     stack: Vec<(RootRef<N>, Vec<u8>)>,
 }
 
-impl<T: ReadTransaction, H: HashProvider, const N: usize> Iterator for Walk<'_, T, H, N> {
+impl<T: ReadTransaction, H: HashProvider, const N: usize, const NS: usize> Iterator
+    for Walk<'_, T, H, N, NS>
+{
     type Item = Result<LeafRef<N>>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -578,8 +743,8 @@ impl<T: ReadTransaction, H: HashProvider, const N: usize> Iterator for Walk<'_, 
             match root {
                 RootRef::Empty => (),
                 RootRef::Leaf(leaf) => return Some(Ok(leaf)),
-                RootRef::Branch(hash) => {
-                    let node = match self.trie.load(self.tx, hash, &route) {
+                RootRef::Branch(branch) => {
+                    let node = match self.trie.load(self.tx, branch, &route) {
                         Ok(node) => node,
                         Err(error) => {
                             self.stack.clear();
@@ -587,7 +752,7 @@ impl<T: ReadTransaction, H: HashProvider, const N: usize> Iterator for Walk<'_, 
                         }
                     };
                     route.extend(node.unpack_prefix());
-                    for slot in (0..16).rev() {
+                    for slot in (0..BRANCH_SLOTS as u8).rev() {
                         if let Some(child) = node.child(slot) {
                             let mut child_route = route.clone();
                             child_route.push(slot);
@@ -601,7 +766,7 @@ impl<T: ReadTransaction, H: HashProvider, const N: usize> Iterator for Walk<'_, 
     }
 }
 
-impl<T: ReadTransaction, H: HashProvider, const N: usize> std::iter::FusedIterator
-    for Walk<'_, T, H, N>
+impl<T: ReadTransaction, H: HashProvider, const N: usize, const NS: usize> std::iter::FusedIterator
+    for Walk<'_, T, H, N, NS>
 {
 }

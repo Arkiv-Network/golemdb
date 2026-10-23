@@ -2,7 +2,8 @@ use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use golemdb_merkle::{
-    Blake3Hasher, BranchNodeCompact, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie,
+    Blake3Hasher, BranchNodeCompact, HashProvider, Keccak256Hasher, LeafRef, LeafStorage, RootRef,
+    Trie, TrieTable,
 };
 use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction};
 
@@ -11,7 +12,7 @@ const BENCH_LEAF_DOMAIN: u8 = 0x04;
 const BENCH_BRANCH_DOMAIN: u8 = 0x05;
 const BENCH_NODE_DOMAIN: u8 = 0x03;
 
-const TABLE: Table = Table("BenchBranches");
+const TABLE: TrieTable = TrieTable::new(Table("BenchBranches"));
 
 fn branches(c: &mut Criterion) {
     let mut group = c.benchmark_group("merkle/branch");
@@ -34,9 +35,22 @@ fn branches(c: &mut Criterion) {
             }
             let hashes = paths.iter().map(|p| HASH.hash(p)).collect();
             let mask = ((1u32 << count) - 1) as u16;
-            let node = BranchNodeCompact::new(prefix, prefix_len, mask, 0, hashes, paths).unwrap();
+            let node = BranchNodeCompact::new(
+                prefix,
+                prefix_len,
+                mask,
+                0,
+                hashes,
+                paths,
+                vec![],
+                LeafStorage::InNode,
+            )
+            .unwrap();
             let bytes = node.encode();
-            assert_eq!(BranchNodeCompact::<32>::decode(&bytes).unwrap(), node);
+            assert_eq!(
+                BranchNodeCompact::<32>::decode(&bytes, LeafStorage::InNode).unwrap(),
+                node
+            );
             let parameter = format!("children={count}/prefix={prefix_len}");
             group.bench_with_input(BenchmarkId::new("encode", &parameter), &node, |b, node| {
                 b.iter(|| black_box(node).encode())
@@ -44,7 +58,12 @@ fn branches(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new("decode", &parameter),
                 &bytes,
-                |b, bytes| b.iter(|| BranchNodeCompact::<32>::decode(black_box(bytes)).unwrap()),
+                |b, bytes| {
+                    b.iter(|| {
+                        BranchNodeCompact::<32>::decode(black_box(bytes), LeafStorage::InNode)
+                            .unwrap()
+                    })
+                },
             );
             fn hash_node<H: HashProvider>(
                 group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
@@ -78,10 +97,7 @@ fn leaf<const N: usize>(id: u32, clustered: bool, hasher: &impl HashProvider) ->
     }
     // Unique keys even for six-byte paths; clustered keys share the leading bytes.
     path[N - 4..].copy_from_slice(&id.to_be_bytes());
-    LeafRef {
-        path,
-        hash: hasher.hash_parts(&[&[BENCH_LEAF_DOMAIN], &path]),
-    }
+    LeafRef::new(path, hasher.hash_parts(&[&[BENCH_LEAF_DOMAIN], &path]))
 }
 
 fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider) {
@@ -93,9 +109,8 @@ fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashP
             let mut tx = db.begin_write().unwrap();
             let mut root = RootRef::Empty;
             for i in 0..count {
-                root = trie
-                    .insert(&mut tx, root, leaf(i, clustered, hasher))
-                    .unwrap();
+                let new = leaf(i, clustered, hasher);
+                root = trie.insert(&mut tx, 0, root, &new.path, new.hash).unwrap();
             }
             tx.commit().unwrap();
             let read = db.begin_read().unwrap();
@@ -122,15 +137,19 @@ fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashP
                     }
                 })
             });
+            // Timed writes belong to the next commit, as seal's do: new keys after the
+            // fixture's, never overwriting its rows in place.
             for operation in ["insert", "replace", "delete"] {
                 let mut replacement = existing;
                 replacement.hash = hasher.hash(b"replacement payload");
                 // Verify fixture semantics outside measurements.
                 let mut check = db.begin_write().unwrap();
                 let changed = match operation {
-                    "insert" => trie.insert(&mut check, root, absent),
-                    "replace" => trie.insert(&mut check, root, replacement),
-                    _ => trie.remove(&mut check, root, &existing.path),
+                    "insert" => trie.insert(&mut check, 1, root, &absent.path, absent.hash),
+                    "replace" => {
+                        trie.insert(&mut check, 1, root, &replacement.path, replacement.hash)
+                    }
+                    _ => trie.remove(&mut check, 1, root, &existing.path),
                 }
                 .unwrap();
                 assert_ne!(changed, root);
@@ -143,13 +162,26 @@ fn tries<const N: usize>(c: &mut Criterion, algorithm: &str, hasher: &impl HashP
                         |tx| {
                             black_box(
                                 match operation {
-                                    "insert" => trie.insert(tx, black_box(root), black_box(absent)),
-                                    "replace" => {
-                                        trie.insert(tx, black_box(root), black_box(replacement))
-                                    }
-                                    _ => {
-                                        trie.remove(tx, black_box(root), black_box(&existing.path))
-                                    }
+                                    "insert" => trie.insert(
+                                        tx,
+                                        1,
+                                        black_box(root),
+                                        &black_box(absent.path),
+                                        black_box(absent.hash),
+                                    ),
+                                    "replace" => trie.insert(
+                                        tx,
+                                        1,
+                                        black_box(root),
+                                        &black_box(replacement.path),
+                                        black_box(replacement.hash),
+                                    ),
+                                    _ => trie.remove(
+                                        tx,
+                                        1,
+                                        black_box(root),
+                                        black_box(&existing.path),
+                                    ),
                                 }
                                 .unwrap(),
                             )

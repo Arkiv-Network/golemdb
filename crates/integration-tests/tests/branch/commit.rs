@@ -14,14 +14,15 @@ use std::{
 };
 
 const SUPERBLOCK: Table = Table("Superblock");
-const TABLES: [Table; 7] = [
+const TABLES: [Table; 8] = [
     tables::CELL,
-    tables::CELL_TRIE,
+    tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX,
-    golemdb_index::tables::INDEX_TRIE,
-    golemdb_index::tables::BITMAP_TRIE,
-    golemdb_index::tables::BITMAP_CONTAINER,
+    golemdb_index::tables::INDEX_TRIE.table(),
+    golemdb_index::tables::BITMAP_TRIE.table(),
+    golemdb_index::tables::BITMAP_CONTAINER.table(),
     SUPERBLOCK,
+    Table("Roots"),
 ];
 fn key(name: &[u8]) -> CellKey {
     CellKey::new(64, CellNameRef::raw(name))
@@ -140,18 +141,12 @@ fn lifecycle(db: impl Store + Clone, hash: impl HashProvider + Copy) {
         ]
         .concat()
     );
-    assert_eq!(
-        Cells::new(&hash)
-            .reopen(&latest, sealed.state_root)
-            .unwrap(),
-        sealed.cells.root
-    );
-    assert_eq!(
-        Index::new(&hash)
-            .reopen(&latest, sealed.index_root)
-            .unwrap(),
-        sealed.index.root
-    );
+    Cells::new(&hash)
+        .validate_root(&latest, sealed.cells.root)
+        .unwrap();
+    Index::new(&hash)
+        .validate_root(&latest, sealed.index.root)
+        .unwrap();
     let term = IndexTerm::new("name", CellType::Str, b"Alice").unwrap();
     assert_eq!(
         Index::new(&hash)
