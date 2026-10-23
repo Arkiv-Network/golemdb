@@ -1,18 +1,20 @@
 //! What the runtime constructors of [`EqValue`](super::EqValue),
-//! [`InValues`](super::InValues) and [`Bounds`](super::Bounds) check: values
-//! of one indexable type.
+//! [`InValues`](super::InValues), [`Bounds`](super::Bounds) and
+//! [`ExistsType`](super::ExistsType) check: values of one indexable type, or
+//! an indexable type.
 
 use golemdb_cells::{CellKind, CellType, CellValue};
 
 /// Why `CellValue`s cannot be one leaf's values: an `Eq`'s value, an `In`'s
-/// values, or a `Range`'s bounds. The typed constructors cannot produce
-/// either case.
+/// values, or a `Range`'s bounds; or why a `CellType` cannot be an
+/// `Exists`' type. The typed constructors cannot produce either case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ValuesError {
     /// Values of two types: a leaf reads the terms of one type.
     #[error("values of two types, {expected:?} and {found:?}: a leaf reads one type")]
     MixedTypes { expected: CellType, found: CellType },
-    /// Values of variable-length `bytes`, which has no index term.
+    /// Variable-length `bytes`, as values or as an `Exists`' type: it has
+    /// no index term.
     #[error("variable-length `bytes` values have no index term")]
     NotIndexable,
 }
@@ -30,7 +32,12 @@ pub(super) fn of_same_indexable_type<'a>(
     {
         return Err(ValuesError::MixedTypes { expected, found });
     }
-    if expected.can_be_attribute() {
+    indexable(expected)
+}
+
+/// `Ok` when `ty` is indexable: any type but variable-length `bytes`.
+pub(super) fn indexable(ty: CellType) -> Result<(), ValuesError> {
+    if ty.can_be_attribute() {
         Ok(())
     } else {
         Err(ValuesError::NotIndexable)

@@ -5,8 +5,8 @@
 #![allow(dead_code)] // Each test crate uses a different subset.
 
 use golemdb_api::{
-    Api, ApiError, Bounds, CellLimits, CountOp, Database, EqValue, Filter, Genesis, HashAlgorithm,
-    InValues, QueryOp, RecordKey, RecordOp, op,
+    Api, ApiError, Bounds, CellLimits, CountOp, Database, EqValue, ExistsType, Filter, Genesis,
+    HashAlgorithm, InValues, QueryOp, RecordKey, RecordOp, op,
 };
 use std::{cmp::Ordering, ops::Bound};
 
@@ -24,7 +24,15 @@ impl Default for TestDb {
             max_str_len: 4096,
             max_bytes_len: 64,
         };
-        let genesis = Genesis::new(HashAlgorithm::Keccak256, limits, None);
+        let genesis = Genesis::new(
+            HashAlgorithm::Keccak256,
+            limits,
+            golemdb_api::RecordLimits {
+                max_cells: 100,
+                max_indexed_cells: 100,
+            },
+            None,
+        );
         Self {
             db: Database::open_memory(&genesis).expect("genesis"),
         }
@@ -142,6 +150,15 @@ pub fn prefix(field: &str, prefix: &str) -> Filter {
     }
 }
 
+/// Raw, so tests can also build names the grammar rejects. Through the
+/// runtime path: `ty`, when given, must be an indexable type.
+pub fn exists(field: &str, ty: Option<CellType>) -> Filter {
+    Filter::Exists {
+        field: CellNameRef::raw(field.as_bytes()).into(),
+        ty: ty.map(|ty| ExistsType::try_from(ty).expect("an indexable type")),
+    }
+}
+
 /// Whether `value` lies between `lower` and `upper` in the native order of
 /// its type: a value of another type than a bound never does.
 pub fn is_between(value: &CellValue, lower: &Bound<CellValue>, upper: &Bound<CellValue>) -> bool {
@@ -237,6 +254,16 @@ const TYPES: u8 = 23;
 /// A value from a tiny domain per type, so random records and filters collide.
 pub fn small_value() -> impl Strategy<Value = CellValue> {
     (0..TYPES, -2i8..=2).prop_map(|(ty, n)| typed_value(ty, n))
+}
+
+/// One of the types [`small_value`] picks from: any indexable type.
+pub fn indexable_type() -> impl Strategy<Value = CellType> {
+    (0..TYPES).prop_map(|ty| typed_value(ty, 0).cell_type())
+}
+
+/// One value of each type [`small_value`] picks from: every indexable type.
+pub fn value_of_each_type() -> Vec<CellValue> {
+    (0..TYPES).map(|ty| typed_value(ty, 1)).collect()
 }
 
 /// `len` values of one random type, from [`small_value`]'s domain, so

@@ -6,9 +6,9 @@ use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{
     CellPatch, CreateEntry, Effects, Outcome, PatchEntry, ReadTarget, Record, RecordCells,
-    RecordError, RecordKey, Result, admission,
+    RecordError, RecordKey, RecordMeta, Result, admission,
     committed::{committed_snapshot, read_committed_by_key},
-    state,
+    meta, state,
 };
 
 /// Record semantics over guarded branch views. Every operation requires an
@@ -90,6 +90,11 @@ impl<S: Store, H: HashProvider> Records<S, H> {
             if state::resolve(&reader, key)?.is_some() {
                 return Err(RecordError::AlreadyExists);
             }
+            for (name, value) in &values {
+                effects.change(name, None, Some(value))?;
+            }
+            let meta = RecordMeta::default().apply(effects)?;
+            state::record_limits(&reader)?.check(meta)?;
             let (id, next) = state::next_id(&reader)?;
             if reader
                 .scan_prefix(&id.to_be_bytes())?
@@ -102,9 +107,9 @@ impl<S: Store, H: HashProvider> Records<S, H> {
                 ));
             }
             for (name, value) in values {
-                effects.change(&name, None, Some(&value))?;
                 writer.put(CellKey::new(id, name), value);
             }
+            writer.put(CellKey::new(id, reserved::META), meta.encode());
             writer.put(
                 CellKey::new(id, reserved::KEY),
                 CellValue::from_bytes32(key.0),
@@ -131,6 +136,10 @@ impl<S: Store, H: HashProvider> Records<S, H> {
             let limits = state::limits(&reader)?;
             let changes = admission::patch(&limits, entries)?;
             let id = state::resolve(&reader, key)?.ok_or(RecordError::NotFound)?;
+            let meta_key = CellKey::new(id, reserved::META);
+            let before_meta = meta::required(reader.get(&meta_key)?.as_ref())?;
+            let caps = state::record_limits(&reader)?;
+            let mut mutations = Vec::with_capacity(changes.len());
             for (name, change) in changes {
                 let address = CellKey::new(id, name.clone());
                 let before = writer.get(&address)?;
@@ -155,10 +164,18 @@ impl<S: Store, H: HashProvider> Records<S, H> {
                     continue;
                 }
                 effects.change(&name, before.as_ref(), after.as_ref())?;
+                mutations.push((address, after));
+            }
+            let after_meta = before_meta.apply(effects)?;
+            caps.check(after_meta)?;
+            for (address, after) in mutations {
                 match after {
                     Some(value) => writer.put(address, value),
                     None => writer.delete(address),
                 }
+            }
+            if after_meta != before_meta {
+                writer.put(meta_key, after_meta.encode());
             }
             Ok(())
         })
@@ -175,6 +192,7 @@ impl<S: Store, H: HashProvider> Records<S, H> {
             admission::key(key)?;
             let reader = writer.as_read();
             let id = state::resolve(&reader, key)?.ok_or(RecordError::NotFound)?;
+            let meta = meta::required(reader.get(&CellKey::new(id, reserved::META))?.as_ref())?;
             // Finish the read-only scan before mutating the overlay. Retain
             // keys for deletion, but release each scanned value immediately.
             let mut keys = Vec::new();
@@ -182,6 +200,11 @@ impl<S: Store, H: HashProvider> Records<S, H> {
                 let (address, value) = row?;
                 effects.change(&address.name().into(), Some(&value), None)?;
                 keys.push(address);
+            }
+            if meta.apply(effects)? != RecordMeta::default() {
+                return Err(RecordError::CorruptState(
+                    "#meta does not match deleted cells",
+                ));
             }
             for address in keys {
                 writer.delete(address);

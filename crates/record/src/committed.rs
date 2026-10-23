@@ -25,8 +25,8 @@ pub fn committed_snapshot<S: Store>(
 }
 
 /// The committed record `id`, as `get` returns it: every cell including
-/// `#key`, or only the projected cells, with missing ones omitted. The key
-/// comes from the record's own `#key` cell.
+/// `#key` and `#meta`, or only the projected cells, with missing user cells
+/// omitted. The key comes from the record's own `#key` cell.
 ///
 /// For engine readers that already know `id` names a live record, such as a
 /// query taking IDs from the index. Unlike `get`, it does not check the key's

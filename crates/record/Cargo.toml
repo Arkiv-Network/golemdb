@@ -11,4 +11,5 @@ golemdb-branch.workspace = true
 golemdb-storage.workspace = true
 golemdb-merkle.workspace = true
 golemdb-metering.workspace = true
+serde.workspace = true
 thiserror.workspace = true

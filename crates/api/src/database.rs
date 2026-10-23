@@ -210,6 +210,12 @@ impl Api for Database {
 /// and #49.
 const MAX_QUERY_DEPTH: u32 = 64;
 
+/// The most records a query returns: a query with no limit that matches more
+/// returns the first ones in query order, and a larger limit fails as
+/// `LimitExceeded`. Hardcoded for now: it will be read from genesis
+/// (`#maxQueryLimit`) in the scope of issues #48 and #49.
+const MAX_QUERY_LIMIT: u32 = 100;
+
 /// All layers share one store, through clones of its handle, and record and
 /// branch share one branch registry. Immutable reads use the store and reader
 /// directly, with head and metadata taken from the same committed snapshot.
@@ -228,7 +234,12 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
         // Recover before exposing the reader through the completed database handle.
         let branches = Branches::new(store.clone(), hasher.clone(), immutable_data)?;
         let records = Records::new(branches.clone());
-        let queries = Queries::new(store.clone(), hasher, Some(MAX_QUERY_DEPTH));
+        let queries = Queries::new(
+            store.clone(),
+            hasher,
+            Some(MAX_QUERY_DEPTH),
+            Some(MAX_QUERY_LIMIT),
+        );
         Ok(Self {
             store,
             immutable_reader,

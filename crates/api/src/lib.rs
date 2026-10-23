@@ -19,6 +19,7 @@
 //! let config = OpenConfig::new(Genesis::new(HashAlgorithm::Keccak256, CellLimits {
 //!         max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 128,
 //! },
+//!     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
 //!     None,
 //! ));
 //! let db = Database::open_memory(&config.genesis)?;
@@ -70,9 +71,12 @@ pub use golemdb_cells::{
     marker,
 };
 pub use golemdb_query::{
-    Bounds, CountOp, Direction, EqValue, Filter, InValues, QueryOp, QueryPage, SortKey, ValuesError,
+    Bounds, CountOp, Direction, EqValue, ExistsType, Filter, InValues, QueryOp, QueryPage, SortKey,
+    ValuesError,
 };
-pub use golemdb_record::{CreateEntry, PatchChange, PatchEntry, ReadTarget, Record, RecordKey};
+pub use golemdb_record::{
+    CreateEntry, PatchChange, PatchEntry, ReadTarget, Record, RecordKey, RecordLimits, RecordMeta,
+};
 
 /// Synchronous record and branch facade. Builders assist callers; implementations
 /// enforce deployment limits, reserved-record rules, identity, and atomic mutations.
@@ -94,9 +98,14 @@ pub trait Api {
     fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Metered<()>;
 
     /// Committed records matching the operation's filter, in record ID order,
-    /// projected as `get` projects. Matching and materialization share one
-    /// snapshot. `commit` names the commit to read, `None` the head; explicit
-    /// non-head commits are not yet supported; sort, limit and offset return
+    /// projected as `get` projects. A page skips the operation's offset, then
+    /// holds the next matches in that order, up to the operation's limit, or
+    /// with no limit up to the implementation's page size; `total_matched`
+    /// counts every match. An offset past the last match gives an empty page.
+    /// A limit of 0 returns InvalidQuery, and one above the page size
+    /// LimitExceeded, naming the page size. Matching and materialization
+    /// share one snapshot. `commit` names the commit to read, `None` the head;
+    /// explicit non-head commits are not yet supported; sort returns
     /// NotImplemented.
     fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Metered<QueryPage>;
 

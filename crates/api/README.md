@@ -32,6 +32,7 @@ let config = OpenConfig::new(Genesis::new(
         max_str_len: 64,
         max_bytes_len: 128,
     },
+    golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
     None,
 ));
 let db = Database::open("./golemdb-quickstart", &config)?;
@@ -147,10 +148,10 @@ or discard.
 
 ## Empty records
 
-A record may have zero user cells. A full read still contains its system `#key`;
+A record may have zero user cells. A full read still contains its system `#key` and `#meta`;
 its binding and identity remain until `delete`. Removing the last user cell does
 not delete the record. An empty projection returns no cells but still verifies
-that the record exists. `#meta` and operation pricing remain deferred.
+that the record exists. Operation pricing remains deferred.
 
 ```rust
 use golemdb_api::{
@@ -165,6 +166,7 @@ let config = OpenConfig::new(Genesis::new(
         max_str_len: 64,
         max_bytes_len: 128,
     },
+    golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
     None,
 ))
 .with_mode(OpenMode::CreateNew);
@@ -180,8 +182,9 @@ db.patch(branch, RecordOp::patch(key, golemdb_api::Budget::Limited(u64::MAX)).re
 db.commit(branch)?;
 
 let empty = db.get(ReadTarget::Head, RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
-assert_eq!(empty.cells.len(), 1);
+assert_eq!(empty.cells.len(), 2);
 assert_eq!(empty.cells[b"#key".as_slice()].as_bytes32(), Some(key.0));
+assert_eq!(empty.meta(), Some(golemdb_api::RecordMeta::default()));
 
 let branch = db.begin()?;
 db.delete(branch, RecordOp::delete(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
@@ -223,6 +226,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_str_len: 128,
             max_bytes_len: 1024,
         },
+        golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
         None,
     ))
     .with_mode(OpenMode::CreateNew);
@@ -377,6 +381,9 @@ cell_limits:
   max_cell_name_len: 32
   max_str_len: 64
   max_bytes_len: 128
+record_limits:
+  max_cells: 100
+  max_indexed_cells: 100
 immutable_data:
   shard_span: 500000
   segments:
@@ -394,10 +401,26 @@ defaults to `bytes`. Duplicate and unknown fields are rejected.
 Use `Genesis::load(path)` or `Genesis::from_yaml(text)`; the loader
 does not search for files or read environment overrides.
 
-Typed construction uses `Genesis::new(hash, cell_limits, None)` to disable
-immutable data, or `Genesis::new(hash, cell_limits,
+Typed construction uses `Genesis::new(hash, cell_limits, record_limits, None)` to disable
+immutable data, or `Genesis::new(hash, cell_limits, record_limits,
 Some(ImmutableDataConfig::new(shard_span, segments)))` to enable it. These
 configuration types own their declarations and implement `Clone`, not `Copy`.
+
+`RecordLimits { max_cells, max_indexed_cells }` contains explicit `u64` caps,
+stored at genesis as `#params.#maxRecordCells` and `#params.#maxRecordIndexedCells`.
+Creates and patches check the final user-cell counts before writing; violations
+return `InvalidArgument` with zero applied effects and do not consume an ID.
+System and admin records are exempt. Zero caps allow empty user records;
+`max_indexed_cells: 0` allows fields only. The values above are examples, not defaults.
+
+Each user record stores `#meta` as four big-endian `u64` counters in a `bytes32`
+field: `cells`, `cell_bytes`, `indexed_cells`, `index_bytes`. Metadata and receipt
+details use the same user effects and exclude system cells. Patches rewrite
+`#meta` only when a counter changes. Full reads and `.only(["#meta"])` include it.
+Reads return the stored cells without validating metadata. `Record::meta()` returns
+its decoded `RecordMeta`, or `None` if the cell is absent or malformed. Patch and
+delete validate metadata before using its counters: missing or malformed metadata,
+or counter underflow, returns `Internal` without repair.
 
 Segment names match `[a-z][a-z0-9_]{0,63}` and are rejected rather than normalized
 when invalid. Column names use the cell user-name grammar, independently of the
@@ -466,7 +489,7 @@ hash, Roaring, genesis identity, and head metadata before publishing commit 0.
 The two metering records have identities and bindings only; metering is deferred.
 
 The opener validates physical backend ceilings, including complete cell/index
-keys and value tags. Format 1 also requires room for 16 KiB engine values, covering
+keys and value tags. The format also requires room for 16 KiB engine values, covering
 trie nodes and canonical bitmap containers. Limits are user-cell admission policy;
 system root-history bytes do not consume the configured user bytes allowance.
 
@@ -546,18 +569,27 @@ Retention/pruning, key expiry and digests remain deferred.
 
 Typed cells, record CRUD, branch lifecycle, atomic opening/genesis, and typed
 immutable data are implemented behind a cloneable `Database` with shared state.
-Queries support `Eq`, `In`, `Range` and `Prefix` filters, combined by `And` and `Or` trees, with
-full or projected records, and `count`. A filter nests at most 64 `And` / `Or` levels, a
-hardcoded cap until it is read from genesis; a deeper one returns `ApiError::LimitExceeded`.
-A `Prefix` matches `str` values only. `Eq` values, `In` values and `Range` bounds are of one
-indexable type by construction: `EqValue::of(marker::Str, "blue")`,
-`InValues::of(marker::U32, [1, 2])` and `Bounds::new(marker::Str, ..)` take a cell-type marker,
-so mixed types or `bytes` do not compile; `EqValue::try_from`, `InValues::try_from` and
-`Bounds::try_new(ty, ..)` check `CellValue`s at run time (`ValuesError`, which converts into
-`ApiError::InvalidArgument`). A `Range` with two unbounded sides matches every cell of its type.
+Queries support `Eq`, `In`, `Range`, `Prefix` and `Exists` filters, combined by `And` and `Or`
+trees, with full or projected records, and `count`. A filter nests at most 64 `And` / `Or`
+levels, a hardcoded cap until it is read from genesis; a deeper one returns
+`ApiError::LimitExceeded`. A query returns at most 100 records, the first matches in record ID
+order, a hardcoded page size until it is read from genesis; `total_matched` and `count` still
+count every match. `limit(n)` returns at most `n` records: a `limit` of 0 returns
+`ApiError::InvalidQuery`, and one above the page size `ApiError::LimitExceeded`, whose `max` is
+the page size. `offset(n)` starts the page past the first `n` matches, so the next page's
+offset is the previous one plus the records returned; an offset past the last match returns an
+empty page. A `Prefix` matches `str` values only. An `Exists` matches the records
+holding an attribute of its name: of its type, or, with no type, of any type. `Eq` values, `In`
+values, `Range` bounds and `Exists` types are of one indexable type by construction:
+`EqValue::of(marker::Str, "blue")`, `InValues::of(marker::U32, [1, 2])`,
+`Bounds::new(marker::Str, ..)` and `ExistsType::of(marker::U32)` take a cell-type marker, so mixed
+types or `bytes` do not compile; `EqValue::try_from`, `InValues::try_from`,
+`Bounds::try_new(ty, ..)` and `ExistsType::try_from(ty)` check at run time (`ValuesError`, which
+converts into `ApiError::InvalidArgument`). A `Range` with two unbounded sides matches every cell
+of its type.
 Queries read committed state only: `None` reads the head, and an explicit commit
-other than the head returns `ApiError::CommitUnavailable`. Sort, limit and offset
-return `ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost
+other than the head returns `ApiError::CommitUnavailable`. Sort returns
+`ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost
 receipts, generated keys, OCC, and transport serialization are deferred.
 
 Use scripted mocks for consumer error paths behind `Arc<dyn Api + Send + Sync>`. For tests, replace the storage opening with

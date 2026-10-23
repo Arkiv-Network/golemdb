@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use golemdb_cells::CellLimits;
 use golemdb_immutable_data::ImmutableDataConfig;
 use golemdb_merkle::HashAlgorithm;
+use golemdb_record::RecordLimits;
 use serde::{Deserialize, Serialize};
 
 use crate::{OpenError, OpenResult};
@@ -19,6 +20,7 @@ use crate::{OpenError, OpenResult};
 pub struct Genesis {
     pub hash_function: HashAlgorithm,
     pub cell_limits: CellLimits,
+    pub record_limits: RecordLimits,
     /// None disables immutable storage. Some requires at least one segment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub immutable_data: Option<ImmutableDataConfig>,
@@ -28,11 +30,13 @@ impl Genesis {
     pub const fn new(
         hash_function: HashAlgorithm,
         cell_limits: CellLimits,
+        record_limits: RecordLimits,
         immutable_data: Option<ImmutableDataConfig>,
     ) -> Self {
         Self {
             hash_function,
             cell_limits,
+            record_limits,
             immutable_data,
         }
     }
@@ -62,7 +66,7 @@ impl Genesis {
         let key = (name + 8)
             .max(name + 2 + u64::from(limits.max_str_len).max(32))
             .max(40);
-        // Format 1 reserves 16 KiB for fixed engine values: trie nodes, metadata,
+        // The format reserves 16 KiB for fixed engine values: trie nodes, metadata,
         // root pairs, and canonical single-u16-domain Roaring containers.
         let value = (1 + u64::from(limits.max_bytes_len.max(limits.max_str_len))).max(16 * 1024);
         if key > max_key as u64 {

@@ -647,6 +647,7 @@ dependencies = [
  "golemdb-merkle",
  "golemdb-metering",
  "golemdb-storage",
+ "serde",
  "thiserror",
 ]
 

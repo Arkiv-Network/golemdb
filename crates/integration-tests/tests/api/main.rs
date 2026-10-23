@@ -2,6 +2,7 @@ mod facade;
 mod facade_errors;
 mod immutable_data;
 mod immutable_genesis;
+mod metadata;
 mod opening;
 mod opening_failure;
 

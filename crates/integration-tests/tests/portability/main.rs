@@ -85,6 +85,10 @@ fn config(hash: HashAlgorithm, mode: OpenMode) -> OpenConfig {
             max_str_len: MAX_STR_LEN as u32,
             max_bytes_len: MAX_BYTES_LEN as u32,
         },
+        golemdb_api::RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
         None,
     ))
     .with_mode(mode)
