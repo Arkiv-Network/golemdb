@@ -103,14 +103,14 @@ impl<'h, H: HashProvider, const N: usize, const NS: usize> PayloadTrie<'h, H, N,
             (edits.iter()).map(|(path, payload)| (*path, payload.as_ref().map(|p| p.hash)));
         let (root, created) = self.trie.apply_leaves(tx, commit, root, hashes)?;
         for path in created {
-            // Always `Some`: only edits with a payload create leaves.
-            if let Some(Some(payload)) = edits.get(&path) {
-                tx.put(
-                    self.leaf_table,
-                    &self.trie.leaf_key(commit, &path),
-                    &payload.bytes,
-                )?;
-            }
+            // A leaf without its row would only fail when read.
+            let payload = (edits.get(&path).and_then(Option::as_ref))
+                .expect("only edits with a payload create leaves");
+            tx.put(
+                self.leaf_table,
+                &self.trie.leaf_key(commit, &path),
+                &payload.bytes,
+            )?;
         }
         Ok(root)
     }

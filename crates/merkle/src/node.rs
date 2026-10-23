@@ -204,32 +204,29 @@ impl<const N: usize> BranchNodeCompact<N> {
         let bad = || MerkleError::InvalidNode("invalid encoded length");
         let prefix_len = *bytes.first().ok_or_else(bad)?;
         let end = PREFIX_LEN_BYTES + (prefix_len as usize).div_ceil(NIBBLES_PER_BYTE);
-        let tree_at = end + MASK_BYTES;
-        let masks_end = tree_at + MASK_BYTES;
-        let header = bytes.get(..masks_end).ok_or_else(bad)?;
-        let mask = |at: usize| u16::from_be_bytes(header[at..at + MASK_BYTES].try_into().unwrap());
-        let (state_mask, tree_mask) = (mask(end), mask(tree_at));
-        let hash_end = masks_end + state_mask.count_ones() as usize * HASH_BYTES;
+        let masks = bytes.get(end..).ok_or_else(bad)?;
+        let (state_mask, masks) = masks.split_first_chunk::<MASK_BYTES>().ok_or_else(bad)?;
+        let (tree_mask, children) = masks.split_first_chunk::<MASK_BYTES>().ok_or_else(bad)?;
+        let (state_mask, tree_mask) = (
+            u16::from_be_bytes(*state_mask),
+            u16::from_be_bytes(*tree_mask),
+        );
+        // Offsets within `children`: hashes, then leaf paths, then commits.
+        let hash_end = state_mask.count_ones() as usize * HASH_BYTES;
         let paths_end = hash_end + (state_mask & !tree_mask).count_ones() as usize * N;
         let commits_end = paths_end
             + leaf_storage.stored_mask(state_mask, tree_mask).count_ones() as usize * COMMIT_BYTES;
-        if bytes.len() != commits_end {
+        if children.len() != commits_end {
             return Err(bad());
         }
-        let child_hashes = bytes[masks_end..hash_end]
-            .chunks_exact(HASH_BYTES)
-            .map(|b| b.try_into().unwrap())
-            .collect();
-        let leaf_paths = bytes[hash_end..paths_end]
-            .chunks_exact(N)
-            .map(|b| b.try_into().unwrap())
-            .collect();
-        let child_commits = bytes[paths_end..]
-            .chunks_exact(COMMIT_BYTES)
-            .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
+        // Each section is a whole number of chunks, so no remainder is dropped.
+        let child_hashes = children[..hash_end].as_chunks::<HASH_BYTES>().0.to_vec();
+        let leaf_paths = children[hash_end..paths_end].as_chunks::<N>().0.to_vec();
+        let child_commits = (children[paths_end..].as_chunks::<COMMIT_BYTES>().0.iter())
+            .map(|commit| u64::from_be_bytes(*commit))
             .collect();
         Self::new(
-            header[PREFIX_LEN_BYTES..end].to_vec(),
+            bytes[PREFIX_LEN_BYTES..end].to_vec(),
             prefix_len,
             state_mask,
             tree_mask,
