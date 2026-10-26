@@ -33,12 +33,18 @@ impl RecordMeta {
             .as_bytes32()
             .filter(|_| !value.is_indexable())
             .ok_or(RecordError::CorruptState("#meta must be a bytes32 field"))?;
-        let count = |offset| u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        let count = |offset| -> Result<u64> {
+            let word = bytes
+                .get(offset..offset + 8)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or(RecordError::CorruptState("invalid #meta counter encoding"))?;
+            Ok(u64::from_be_bytes(word))
+        };
         let meta = Self {
-            cells: count(0),
-            cell_bytes: count(8),
-            indexed_cells: count(16),
-            index_bytes: count(24),
+            cells: count(0)?,
+            cell_bytes: count(8)?,
+            indexed_cells: count(16)?,
+            index_bytes: count(24)?,
         };
         meta.validate()?;
         Ok(meta)

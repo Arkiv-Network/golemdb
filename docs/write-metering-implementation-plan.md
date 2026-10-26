@@ -39,7 +39,9 @@ The record layer knows what a patch means, which old cells are needed, whether a
 - User-cell mutations and resulting user-effect counts.
 - Per-record system mutations, including `#meta`, `#key` and the binding where applicable.
 - Any proposed allocator change, without changing the allocator during planning. For example, a create can propose record ID `42` and next allocator value `43`; only approved application advances the allocator. Failed planning or estimation leaves ID `42` available. This is the internal numeric record ID, not the caller's record key.
-- The approved total cost and the captured pricing context.
+
+Accounting remains in `WriteMeter`; `Records` holds the immutable `WritePricing`
+configuration. The plan contains the mutations and effects, not the budget or schedule.
 
 Index joins/leaves are derived and priced during planning. Their approved charges are included in the write's receipt, even though the physical index changes happen later during sealing. Sealing derives the final net changes and does not charge them again. For two patches changing an attribute `red -> blue -> green`, each patch pays for its leave and join, while sealing can apply the net `red -> green` change.
 
@@ -122,8 +124,9 @@ are checked, including counts whose weights are zero.
 `Outcome` carries accounting separately from effects. The API forwards it to
 `Receipt.cost` and `Receipt.ledger`; metering failures map to the existing
 `OutOfBudget { required }`. Other failures also retain their charged work, while
-failed effects remain zero. Unintegrated database calls still produce zero cost and
-an empty ledger. Public request signatures and `Budget` are unchanged. Read-related
+failed effects remain zero. Database writes use an explicit zero-weight schedule
+and return full ledgers at zero cost; read calls still return empty ledgers.
+Public request signatures and `Budget` are unchanged. Read-related
 `evaluated_at` changes remain deferred.
 
 Keep `CommitId` and database access outside the metering core. Record integration
@@ -146,6 +149,70 @@ when missing too. Configuration reads and identity checks need an explicit mappi
 to the reference procedure; not every physical get is a separate `read.cell`.
 Write planning uses the shared `read.key`, `read.cell` and `read.term` vocabulary,
 without public get/query metering or `read.byte` charges for caller-returned data.
+
+### Implemented admission and planning order (iteration 4)
+
+The initial write code version fixes the following rules. Input allocation and
+canonical typed-value construction happen before the call and remain host work.
+
+1. After branch admission, `AdmissionBase` checks the reserved key.
+2. Visit entries in caller order, including duplicates. `AdmissionEntry` checks
+   name and value lengths against genesis limits, then counts name bytes plus
+   value payload bytes for admission pricing; remove counts only its name.
+   Type/kind headers and the fixed record key belong to the fixed charges.
+   A rejected length incurs no byte-validation charge. There are no additional
+   request-entry or total-input-byte caps; record caps apply to the resulting state.
+3. `AdmissionBytes(n)` guards name grammar, requested-kind conversion and insertion
+   into the sorted map, including duplicate detection. Invalid diagnostics show
+   at most 64 name bytes. Values already have canonical types and encodings.
+4. `RecordBase(op)` reads and decodes the binding. Create stops on an existing
+   binding; patch/delete stop on an absent one. Create proposes an allocator value
+   and checks its vacancy as fixed `write.record.create` work, without consuming it.
+5. Patch/delete read `#meta`, then `#key`, charging `read.cell` for each. The latter
+   preserves the implementation's existing identity check; it is an explicit
+   additional patch read compared with D2's minimal system-cell table.
+6. User cells are planned in bytewise name order. Patch reads every requested cell,
+   including absent removals and no-ops. For each changed indexed cell, read the old
+   term before the new term, one `read.term` per leave/join. Only joins use the
+   branch-base absence result for the term-creation surcharge. Each completed
+   mutation description is accumulated immediately; caps are checked on the final
+   metadata before system mutation charges and final approval.
+7. Delete scans exactly the user-cell count from `#meta`, one `read.cell` before
+   each step, with index-leave planning after each indexed cell. `#meta` and `#key`
+   are reused from their point reads. One bounded end probe checks for extra cells,
+   covered by the fixed `write.record.delete` scan work; counters are also verified
+   against the resulting effects. Binding, `#key` and `#meta` are then deleted.
+
+`Records::new` requires a `WritePricing` containing the schedule, depths and
+immutable cell/record limits. The API supplies validated genesis limits and
+`Schedule::zero_write` with `INITIAL_DEPTHS` (6). Admission and planning call
+`WriteMeter` directly: there is no optional adapter or unpriced path, and admission
+performs no database reads. Zero weights still produce ledgers and budget checks;
+missing weights remain errors. Persisted schedule loading remains iterations 5/6.
+The example's depth-4 create remains 266 total, with 24 spent planning. Under the
+same fixture, deleting those two cells costs 61 total with 15 spent planning;
+empty-record deletion costs 33.
+
+**Bounded deletion scans.** The branch maintains live overlay keys and coalesced
+intervals of hidden origin rows. Its read-only `RecordScan` merges cells, while
+`locate_cell` returns opaque `CellLocation` metadata describing a key's committed
+position and immediate successor, using at most two origin cursor steps. Neither
+operation makes a mutation or pricing decision. Record obtains this metadata
+within the cell-read checkpoint and creates its own `PlannedDelete`. After budget
+approval, record calls the branch writer's `delete_at`, which applies the tombstone
+and updates the auxiliary indexes in memory without storage reads. The journal
+restores those indexes on rollback or failure.
+
+A user-cell scan step reads at most two origin rows and one live overlay entry,
+regardless of the number of preceding tombstones. Thus a patch removal checkpoint
+covers one point read plus at most two location-read steps; a delete checkpoint
+covers at most four origin steps, including location discovery. These bounded
+implementation costs must be included when calibrating `read.cell`.
+There are no extra receipt counts for tombstones and no second index writer.
+Trusted low-level writers must use `locate_cell` and `delete_at` for user cells that
+will later be scanned by this bounded interface; raw tombstones are rejected there
+instead of silently performing an unbounded scan. The existing general-purpose
+scan is unchanged.
 
 ## 3. Simplified index-term pricing
 
@@ -249,7 +316,7 @@ On an ordinary planning failure, `meter.into_accounting()` returns the completed
 
 In-memory allocator work is covered by `write.record.create`; its separate binding lookup uses `read.key`; the allocator is excluded from the priced cell creates. Persistence of its final value is host-funded. The planned index joins are charged now; sealing later applies the net index changes without charging again. Estimation follows the same flow through approval and skips application.
 
-Admission validates the original entries at their defined checkpoints; builders have done no request validation. Each failed validation check must complete its charge before its error is propagated. Process entries in input order, checking name/value lengths before name grammar, requested kind and duplicates; fixed target checks come first. Iteration 3 pins checkpoint accounting; iteration 4 must pin request counting and limits alongside the actual admission adapter. Missing weights and arithmetic overflow also stop planning with only completed work charged.
+Admission validates the original entries at their defined checkpoints; builders have done no request validation. Each failed validation check must complete its charge before its error is propagated. Process entries in input order, checking name/value lengths before name grammar, requested kind and duplicates; fixed target checks come first. Iteration 3 pins checkpoint accounting; iteration 4 pins request counting and enforces the existing genesis limits alongside the actual admission adapter. Missing weights and arithmetic overflow also stop planning with only completed work charged.
 
 ### Concrete charges and receipts
 
@@ -388,7 +455,7 @@ overflow stop both budget variants; zero-price steps still count; API conversion
 preserves failure accounting. The original depth-4 example remains 266/24/22.
 
 Admission already validates input in record execution. Its integration with these
-checkpoints, exact request byte/entry counting and request caps belong to iteration 4.
+checkpoints and exact request byte/entry counting belong to iteration 4.
 This increment introduces no builder validation, CRUD planner, persisted schedule,
 production enforcement, population counters or public read pricing.
 
@@ -398,14 +465,23 @@ production enforcement, population counters or public read pricing.
 
 **Outcome:** create, patch and delete have a shared, read-only planning path usable for execution and estimation.
 
+**Implemented:** shared CUD planning/application, metered admission and state reads,
+prospective user/system/index charges, bounded live-cell scanning, and the PR #87
+metadata-decoding cleanup. `Records` requires immutable pricing and calls
+`WriteMeter` directly. Public database writes use explicit zero weights with full
+ledgers; tests supply nonzero schedules through the same constructor. Persisted
+schedules and their production connection remain iterations 5/6. Public
+estimation remains iteration 7.
+
 1. Refactor current record CRUD, which interleaves reads and overlay writes, into internal planning and application functions. First establish equivalent behavior with a supplied test pricing context.
-2. Implement the record-side metered planning/admission adapter. Pin deterministic input validation order, byte/entry counting, request-size/change-count limits and bounded error formatting alongside execution. Charge each check before doing it and preserve charges on validation failures. Check admission before record reads, binding before metadata, and subsequent reads/mutation evaluation in the pinned order.
+2. Call `WriteMeter` directly from record planning and admission. Pin deterministic input validation order, byte/entry counting, enforcement of existing genesis limits and bounded error formatting alongside execution. Add no separate request-size or change-count caps. Charge each check before doing it and preserve charges on validation failures. Check admission before record reads, binding before metadata, and subsequent reads/mutation evaluation in the pinned order.
 3. Build user mutations, effects and metadata deltas from the observed values. Derive index charges, including the base-absence creation surcharge.
 4. Add the origin index-term point lookup to the index/branch access interfaces. Keep the branch unaware of metering weights or record-operation budgets.
 5. Make delete enumeration incremental. Do not collect all old cells/values before the budget checkpoints. Audit the merged overlay iterator's skipping of hidden/tombstoned entries so a logical read has a bounded, justified work envelope; counting iterator calls alone is not sufficient evidence.
 6. Retain old values needed by application. Planning must not consume an ID, modify metadata/counters, append undo entries or alter the branch version.
 7. Keep planning, final approval and application inside one existing branch guard. No intervening write may invalidate the plan. Avoid re-entering branch access from inside that guard.
 8. Keep plans internal. The current journal-length branch version can decrease on rollback and is not a unique state identity for a reusable public plan.
+9. Address the deferred [PR #87 review comment](https://github.com/Arkiv-Network/golemdb/pull/87#discussion_r4348012982) in `crates/record/src/meta.rs`: remove the `try_into().unwrap()` from `RecordMeta::decode`, return `RecordError::CorruptState` on conversion failure, and propagate it with `?`. The current `[u8; 32]` input and fixed offsets guarantee eight-byte slices, so this is a production-code cleanup rather than a known malformed-input panic. Preserve the encoding and existing count validation.
 
 **Acceptance:** an instrumented read source proves that no later logical reads run after a cutoff; early refusal and validation failures change no branch state; no-op patches still perform required reads but create no mutations; all three operations apply exactly their approved plan without a second pricing/validation pass.
 
@@ -442,8 +518,8 @@ unsupported or malformed initial models cannot silently use fallback prices.
 
 **Outcome:** all three write operations return actual charges and reject unfunded work before application.
 
-1. Connect the planner to the persisted pricing context. Enable create, then patch, then delete in reviewable increments; do not claim complete write-budget enforcement until all three paths are covered.
-2. Route admission, base, cell-read and index-read charges through the meter; accumulate the corresponding user/system mutation prices and approve the full total before applying.
+1. Replace the API's explicit zero schedule with the persisted pricing context. All CUD paths already use `WriteMeter`; verify their nonzero production prices in reviewable increments.
+2. Verify admission, base, cell-read and index-read charges against the persisted schedule; retain the existing accumulation of user/system mutation prices and final approval before applying.
 3. Return the full approved cost on success. On planning failure return only completed planning cost, zero effects, and the specified error/`required` value. Forward the meter's per-weight ledger separately from user-effect `Details`; it is always present in the in-process receipt, including system charges and failed planning.
 4. Preserve receipts across rollback/discard; there are no refunds or additional rollback charges. Commit overhead and final global-counter/allocator persistence do not become additional client-call charges.
 5. Add the simplified index rule to the model documentation and golden examples in the same change that enables it.

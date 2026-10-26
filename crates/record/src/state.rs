@@ -1,8 +1,8 @@
 use golemdb_branch::CellRead;
-use golemdb_cells::{CellKey, CellLimits, CellNameRef, CellValue, reserved, system};
+use golemdb_cells::{CellKey, CellNameRef, CellValue, reserved, system};
 use golemdb_storage::ReadTransaction;
 
-use crate::{RecordError, RecordKey, RecordLimits, Result};
+use crate::{RecordError, RecordKey, Result};
 
 pub(crate) fn binding(key: RecordKey) -> CellKey {
     CellKey::new(system::RECORD_KEYS.id, CellNameRef::raw(&key.0))
@@ -61,41 +61,8 @@ pub(crate) fn identity_key(identity: &CellValue) -> Option<RecordKey> {
         .map(RecordKey)
 }
 
-pub(crate) fn limits<R: ReadTransaction>(cell_reader: &CellRead<'_, R>) -> Result<CellLimits> {
-    let read = |name| {
-        let value = cell_reader
-            .get(&CellKey::new(system::PARAMS.id, name))?
-            .ok_or(RecordError::CorruptState("required #params cell missing"))?;
-        value
-            .as_u32()
-            .filter(|_| !value.is_indexable())
-            .ok_or(RecordError::CorruptState("invalid #params cell"))
-    };
-    Ok(CellLimits {
-        max_cell_name_len: read(reserved::MAX_CELL_NAME_LEN)?,
-        max_str_len: read(reserved::MAX_STR_LEN)?,
-        max_bytes_len: read(reserved::MAX_BYTES_LEN)?,
-    })
-}
-
 pub(crate) fn allocator_key() -> CellKey {
     CellKey::new(system::ALLOC.id, reserved::NEXT_RECORD_ID)
-}
-
-pub(crate) fn record_limits<R: ReadTransaction>(reader: &CellRead<'_, R>) -> Result<RecordLimits> {
-    let read = |name| {
-        let value = reader
-            .get(&CellKey::new(system::PARAMS.id, name))?
-            .ok_or(RecordError::CorruptState("required record cap missing"))?;
-        value
-            .as_u64()
-            .filter(|_| !value.is_indexable())
-            .ok_or(RecordError::CorruptState("invalid record cap"))
-    };
-    Ok(RecordLimits {
-        max_cells: read(reserved::MAX_RECORD_CELLS)?,
-        max_indexed_cells: read(reserved::MAX_RECORD_INDEXED_CELLS)?,
-    })
 }
 
 pub(crate) fn next_id<R: ReadTransaction>(cell_reader: &CellRead<'_, R>) -> Result<(u64, u64)> {

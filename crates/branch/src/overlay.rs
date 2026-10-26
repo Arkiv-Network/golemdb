@@ -6,6 +6,7 @@ use golemdb_storage::ReadTransaction;
 use crate::{
     CellScan, Result,
     journal::{Journal, WriteMark},
+    record_scan::{CellLocation, RecordScan, ScanIndex},
 };
 
 pub(crate) type Entries = BTreeMap<CellKey, Option<CellValue>>;
@@ -20,6 +21,7 @@ pub(crate) type Entries = BTreeMap<CellKey, Option<CellValue>>;
 pub(crate) struct CellOverlay {
     entries: Entries,
     journal: Journal,
+    scan_index: ScanIndex,
 }
 
 impl CellOverlay {
@@ -95,7 +97,8 @@ impl CellOverlay {
     /// Work is proportional to the journal entries undone (ordered-map updates
     /// add a logarithmic factor); surviving operations are never replayed.
     pub(crate) fn rollback(&mut self) -> Result<()> {
-        self.journal.rollback(&mut self.entries)
+        self.journal
+            .rollback(&mut self.entries, &mut self.scan_index)
     }
 
     /// Final staged values in cell-key order, with at most one change per key.
@@ -126,6 +129,36 @@ impl<'a, R: ReadTransaction> CellRead<'a, R> {
 
     pub fn get(&self, key: &CellKey) -> Result<Option<CellValue>> {
         self.overlay.get(self.origin, key)
+    }
+
+    /// Check one attribute term at this branch's committed origin. Staged cell
+    /// changes do not affect this lookup. No posting list is materialized.
+    pub fn origin_term_exists(
+        &self,
+        name: golemdb_cells::CellNameRef<'_>,
+        value: &CellValue,
+    ) -> Result<bool> {
+        let term = golemdb_index::IndexTerm::from_cell_name(name, value.as_view())?;
+        Ok(golemdb_index::term_exists(self.origin, &term)?)
+    }
+
+    /// Read a key's committed position without changing the overlay or its scan
+    /// indexes. Examines at most two origin rows, even for an overlay-only key.
+    /// This is structural information, not a mutation decision. If passed to
+    /// `CellWrite::delete_at`, use it under this same branch-operation guard.
+    pub fn locate_cell(&self, key: &CellKey) -> Result<CellLocation> {
+        CellLocation::read(self.origin, key)
+    }
+
+    /// Iterate this record's live user cells by merging origin and overlay.
+    /// Borrows the scan indexes read-only; all maintenance belongs to the writer.
+    pub fn scan_user_cells(&self, record: u64) -> Result<RecordScan<'_, R>> {
+        RecordScan::new(
+            self.origin,
+            &self.overlay.entries,
+            &self.overlay.scan_index,
+            record,
+        )
     }
 
     /// Scan cells in encoded key order, including staged writes and excluding
@@ -174,23 +207,46 @@ impl<R: ReadTransaction> CellWrite<'_, R> {
     }
 
     /// Stage an explicit tombstone, including when the cell is already absent.
+    /// For user cells that must support `CellRead::scan_user_cells`, obtain a
+    /// location and use `Self::delete_at` instead; this method records no origin
+    /// position, so that bounded scan rejects its user-cell tombstones.
     pub fn delete(&mut self, key: CellKey) {
         self.set(key, None);
     }
 
+    /// Stage a tombstone at an observed location, updating the scan indexes and
+    /// undo journal together. Performs no storage reads: the location supplies
+    /// the committed position needed to maintain hidden ranges. It must come
+    /// from this branch's reader under the same branch-operation guard.
+    pub fn delete_at(&mut self, location: CellLocation) {
+        self.overlay.journal.record(
+            &mut self.overlay.entries,
+            &mut self.overlay.scan_index,
+            location.key,
+            None,
+            Some(location.origin),
+        );
+    }
+
     fn set(&mut self, key: CellKey, value: Option<CellValue>) {
-        self.overlay
-            .journal
-            .record(&mut self.overlay.entries, key, value);
+        self.overlay.journal.record(
+            &mut self.overlay.entries,
+            &mut self.overlay.scan_index,
+            key,
+            value,
+            None,
+        );
     }
 }
 
 impl<R: ReadTransaction> Drop for CellWrite<'_, R> {
     fn drop(&mut self) {
         if !self.completed {
-            self.overlay
-                .journal
-                .rewind(&mut self.overlay.entries, self.mark);
+            self.overlay.journal.rewind(
+                &mut self.overlay.entries,
+                &mut self.overlay.scan_index,
+                self.mark,
+            );
         }
     }
 }

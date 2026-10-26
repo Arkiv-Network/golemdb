@@ -1,34 +1,43 @@
-use golemdb_branch::{BranchId, Branches, CellRead, CellWrite};
-use golemdb_cells::{CellKey, CellName, CellReader, CellValue, reserved};
+use std::sync::Arc;
+
+use golemdb_branch::{BranchId, Branches, CellRead};
+use golemdb_cells::{CellKey, CellName, CellReader};
 use golemdb_merkle::HashProvider;
-use golemdb_metering::Budget;
+use golemdb_metering::{Accounting, Budget, WriteMeter};
 use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{
-    CellPatch, CreateEntry, Effects, Outcome, PatchEntry, ReadTarget, Record, RecordCells,
-    RecordError, RecordKey, RecordMeta, Result, admission,
+    CreateEntry, Effects, Outcome, PatchEntry, ReadTarget, Record, RecordCells, RecordError,
+    RecordKey, Result, WritePricing, admission,
     committed::{committed_snapshot, read_committed_by_key},
-    meta, state,
+    plan::{self, WritePlan},
+    state,
 };
 
 /// Record semantics over guarded branch views. Every operation requires an
 /// explicit budget and returns an outcome with the selected pricing commit.
-/// Failed writes retain no effects. Charging and enforcement remain deferred.
+/// Failed writes retain no effects. Every write uses the supplied pricing;
+/// explicit zero weights preserve full accounting while keeping calls free.
 pub struct Records<S, H> {
     branches: Branches<S, H>,
+    write_pricing: Arc<WritePricing>,
 }
 
 impl<S, H> Clone for Records<S, H> {
     fn clone(&self) -> Self {
         Self {
             branches: self.branches.clone(),
+            write_pricing: self.write_pricing.clone(),
         }
     }
 }
 
 impl<S: Store, H: HashProvider> Records<S, H> {
-    pub fn new(branches: Branches<S, H>) -> Self {
-        Self { branches }
+    pub fn new(branches: Branches<S, H>, pricing: WritePricing) -> Self {
+        Self {
+            branches,
+            write_pricing: Arc::new(pricing),
+        }
     }
 
     /// Read a full record or a projection from one validated snapshot.
@@ -72,9 +81,8 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         Outcome::new(result, priced_at, Effects::default())
     }
 
-    /// Admit original entries only after handle validation. Budgets are passed
-    /// into execution but charging and enforcement remain unimplemented.
-    /// Entries preserve caller order and duplicates until admission.
+    /// Admit and plan without writes, approve the complete cost, then apply.
+    /// Zero and nonzero schedules use the same metered execution path.
     pub fn create(
         &self,
         branch: BranchId,
@@ -82,47 +90,18 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         entries: Vec<CreateEntry>,
         budget: Budget,
     ) -> Outcome<RecordKey, RecordError> {
-        self.execute_write(branch, budget, |writer, effects| {
-            admission::key(key)?;
-            let reader = writer.as_read();
-            let limits = state::limits(&reader)?;
-            let values = admission::create(&limits, entries)?;
-            if state::resolve(&reader, key)?.is_some() {
-                return Err(RecordError::AlreadyExists);
-            }
-            for (name, value) in &values {
-                effects.change(name, None, Some(value))?;
-            }
-            let meta = RecordMeta::default().apply(effects)?;
-            state::record_limits(&reader)?.check(meta)?;
-            let (id, next) = state::next_id(&reader)?;
-            if reader
-                .scan_prefix(&id.to_be_bytes())?
-                .next()
-                .transpose()?
-                .is_some()
-            {
-                return Err(RecordError::CorruptState(
-                    "allocator points to occupied record",
-                ));
-            }
-            for (name, value) in values {
-                writer.put(CellKey::new(id, name), value);
-            }
-            writer.put(CellKey::new(id, reserved::META), meta.encode());
-            writer.put(
-                CellKey::new(id, reserved::KEY),
-                CellValue::from_bytes32(key.0),
-            );
-            writer.put(state::binding(key), CellValue::from_u64(id));
-            writer.put(state::allocator_key(), CellValue::from_u64(next));
-            Ok(key)
+        self.execute_write(branch, budget, |reader, pricing, meter| {
+            admission::base(key, meter)?;
+            let values = admission::create(&pricing.cell_limits, entries, meter)?;
+            Ok((
+                key,
+                plan::create(reader, key, values, pricing.record_limits, meter)?,
+            ))
         })
     }
 
     /// Explicit writes may change kind; set preserves kind and requires a cell.
-    /// Entries preserve caller order and duplicates until admission.
-    /// No-ops do not write, advance the journal, or contribute effects.
+    /// No-ops pay only for admission and reads, and do not advance the journal.
     pub fn patch(
         &self,
         branch: BranchId,
@@ -130,108 +109,70 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         entries: Vec<PatchEntry>,
         budget: Budget,
     ) -> Outcome<(), RecordError> {
-        self.execute_write(branch, budget, |writer, effects| {
-            admission::key(key)?;
-            let reader = writer.as_read();
-            let limits = state::limits(&reader)?;
-            let changes = admission::patch(&limits, entries)?;
-            let id = state::resolve(&reader, key)?.ok_or(RecordError::NotFound)?;
-            let meta_key = CellKey::new(id, reserved::META);
-            let before_meta = meta::required(reader.get(&meta_key)?.as_ref())?;
-            let caps = state::record_limits(&reader)?;
-            let mut mutations = Vec::with_capacity(changes.len());
-            for (name, change) in changes {
-                let address = CellKey::new(id, name.clone());
-                let before = writer.get(&address)?;
-                let after = match change {
-                    CellPatch::Write(value) => Some(value),
-                    CellPatch::Set(value) => {
-                        let old = before
-                            .as_ref()
-                            .ok_or_else(|| RecordError::CellNotFound { name: name.clone() })?;
-                        Some(value.with_kind(old.kind()).map_err(|source| {
-                            RecordError::InvalidInput {
-                                message: format!(
-                                    "set({name:?}): invalid cell value for stored kind"
-                                ),
-                                source: Some(Box::new(source)),
-                            }
-                        })?)
-                    }
-                    CellPatch::Remove => None,
-                };
-                if before == after {
-                    continue;
-                }
-                effects.change(&name, before.as_ref(), after.as_ref())?;
-                mutations.push((address, after));
-            }
-            let after_meta = before_meta.apply(effects)?;
-            caps.check(after_meta)?;
-            for (address, after) in mutations {
-                match after {
-                    Some(value) => writer.put(address, value),
-                    None => writer.delete(address),
-                }
-            }
-            if after_meta != before_meta {
-                writer.put(meta_key, after_meta.encode());
-            }
-            Ok(())
+        self.execute_write(branch, budget, |reader, pricing, meter| {
+            admission::base(key, meter)?;
+            let changes = admission::patch(&pricing.cell_limits, entries, meter)?;
+            Ok((
+                (),
+                plan::patch(reader, key, changes, pricing.record_limits, meter)?,
+            ))
         })
     }
 
-    /// Delete user cells, identity and binding; never rewind the allocator.
+    /// Delete live cells, identity and binding; never rewind the allocator.
     pub fn delete(
         &self,
         branch: BranchId,
         key: RecordKey,
         budget: Budget,
     ) -> Outcome<(), RecordError> {
-        self.execute_write(branch, budget, |writer, effects| {
-            admission::key(key)?;
-            let reader = writer.as_read();
-            let id = state::resolve(&reader, key)?.ok_or(RecordError::NotFound)?;
-            let meta = meta::required(reader.get(&CellKey::new(id, reserved::META))?.as_ref())?;
-            // Finish the read-only scan before mutating the overlay. Retain
-            // keys for deletion, but release each scanned value immediately.
-            let mut keys = Vec::new();
-            for row in reader.scan_prefix(&id.to_be_bytes())? {
-                let (address, value) = row?;
-                effects.change(&address.name().into(), Some(&value), None)?;
-                keys.push(address);
-            }
-            if meta.apply(effects)? != RecordMeta::default() {
-                return Err(RecordError::CorruptState(
-                    "#meta does not match deleted cells",
-                ));
-            }
-            for address in keys {
-                writer.delete(address);
-            }
-            writer.delete(state::binding(key));
-            Ok(())
+        self.execute_write(branch, budget, |reader, _, meter| {
+            admission::base(key, meter)?;
+            Ok(((), plan::delete(reader, key, meter)?))
         })
     }
 
     fn execute_write<T>(
         &self,
         branch: BranchId,
-        _budget: Budget,
-        operation: impl FnOnce(&mut CellWrite<'_, S::Read<'_>>, &mut Effects) -> Result<T>,
+        budget: Budget,
+        operation: impl FnOnce(
+            &CellRead<'_, S::Read<'_>>,
+            &WritePricing,
+            &mut WriteMeter<'_>,
+        ) -> Result<(T, WritePlan)>,
     ) -> Outcome<T, RecordError> {
         let mut priced_at = None;
         let mut effects = Effects::default();
+        let mut accounting = Accounting::default();
         let result = self
             .branches
             .write_with_origin(branch, |origin, writer| {
                 priced_at = Some(origin);
-                operation(writer, &mut effects)
+                let pricing = &self.write_pricing;
+                let mut meter = WriteMeter::new(&pricing.schedule, pricing.depths, budget);
+                let (value, plan) = match operation(&writer.as_read(), pricing, &mut meter) {
+                    Ok(planned) => planned,
+                    Err(error) => {
+                        accounting = meter.into_accounting();
+                        return Err(error);
+                    }
+                };
+                let approved = match meter.finish() {
+                    Ok(accounting) => accounting,
+                    Err(failure) => {
+                        accounting = failure.accounting.clone();
+                        return Err(failure.into());
+                    }
+                };
+                // The immutable read view is gone. No other operation can change
+                // this branch between planning and application under this guard.
+                effects = plan.apply(writer);
+                accounting = approved;
+                Ok(value)
             })
             .map_err(Into::into);
-        // Branches restores the overlay on error; partial effect counts must
-        // likewise never escape as successful changes.
-        Outcome::new(result, priced_at, effects)
+        Outcome::new(result, priced_at, effects).with_accounting(accounting)
     }
 }
 

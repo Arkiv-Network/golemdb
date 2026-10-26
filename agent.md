@@ -13,8 +13,8 @@ and adapters.
 | Crate | Responsibility |
 | --- | --- |
 | `api` | Public `Api` trait, `Database` handle, typed CRUD requests, opening, genesis initialization and validation. |
-| `metering` | `Budget`, immutable named schedules, checked write pricing, `WriteMeter` and per-weight ledgers. No storage dependency; CRUD planner integration remains deferred. |
-| `record` | Record identity, key bindings, allocation, admission checks, and atomic CRUD over branch cell views. |
+| `metering` | `Budget`, immutable named schedules, checked write pricing, `WriteMeter` and per-weight ledgers. No storage dependency. |
+| `record` | Record identity, admission, metered CUD planning, final approval and atomic plan application over branch cell views. Production pricing context loading remains deferred. |
 | `branch` | Branch registry, overlays, undo frames, guarded reads and writes, sealing, and atomic publication. |
 | `cells` | Cell names, keys, types, canonical values, deployment limits, reserved-record constants, `Cell` storage and its commitment. |
 | `immutable-data` | Typed rows and genesis schemas using cell codecs, NippyJar/memory files, physical reads/recovery and transactional log metadata. |
@@ -291,8 +291,11 @@ The record-owned `CreateEntry` / `PatchEntry` slices are exposed by `entries()` 
 passed with the budget to record execution. Requested kinds remain separate from
 original value kinds until admission. The private record `admission` module checks
 reserved keys, then each entry's lengths, name grammar, requested kind and duplicate
-names before record lookup. Future metering must guard these actual checks; charging
-and total request-size/count caps remain deferred. Input errors retain typed causes.
+names before record lookup. Every write uses `WriteMeter` directly with the pricing
+context supplied at construction. Meter checkpoints guard admission checks, with
+genesis-configured lengths checked before byte traversal; resulting records obey
+the configured cell-count caps. There are no
+additional request-entry or total-input-byte caps. Input errors retain typed causes.
 Patch `.set()` resolves the stored kind during execution and fails with `CellNotFound`
 for a missing cell. Reads retain raw projections until target selection, then normalize.
 There is no create `.insert()`. Patch also has `.remove()`. Operations implement
@@ -303,11 +306,13 @@ There is no create `.insert()`. Patch also has `.remove()`. Operations implement
 the API crate is deferred.
 
 `Metered<T>` holds a result and a receipt on every outcome. Cost remains zero and
-budgets are not enforced yet. User effects exclude system cells, failed writes and
+write budgets are checked against explicit zero prices, while read budgets remain
+unenforced. User effects exclude system cells, failed writes and
 no-ops. `priced_at` comes from the same validated branch origin or committed snapshot
 as execution; unavailable history uses the captured head. Unknown/stale handles and
 sealed writes have no pricing snapshot. `.into_result()` explicitly drops a receipt;
-`map` and `map_err` preserve it. `OutOfBudget { required }` is defined but not emitted yet.
+`map` and `map_err` preserve it. Write budget failures map to `OutOfBudget { required }`;
+the API's explicit zero weights currently make valid writes affordable at any budget.
 
 The metering core prices `PlanningStep` and `MutationCharge` against an immutable
 `Schedule`. `WriteMeter::run_step` checks and records a complete charge before its
@@ -318,8 +323,31 @@ Missing weights and checked cost/count overflow stop the meter, even with Unlimi
 Population counters/depth selection and persisted weights are not implemented.
 `Outcome.accounting` carries cost and `Ledger` through API conversion. Receipts
 always have a ledger keyed by `WeightName`, re-exported by API; failed effects stay
-zero while charged work survives. Database calls still produce zero cost/empty
-ledgers until iteration 4/6 integration. Read `evaluated_at` changes are deferred.
+zero while charged work survives. Database writes use `Schedule::zero_write` and
+produce zero cost with full ledgers. Read costs remain zero and their ledgers empty.
+Persisted scheduling remains iterations 5/6; missing weights never fall back to zero.
+Read `evaluated_at` changes are deferred.
+
+CUD executes one read-only `WritePlan` followed by approval and application under
+the same branch guard. `Records::new(branches, WritePricing)` requires immutable
+configuration; the API supplies zero weights and its validated genesis limits.
+Admission and planning use the metering crate's `WriteMeter` directly, with no
+record-side meter adapter or unpriced path. Patch/delete read #meta
+and then #key before user cells. Every indexed leave/join reads its term at the
+committed origin, without loading postings. The term-creation surcharge uses that
+origin even after earlier joins in the branch. Application has no storage reads.
+
+`RecordScan` skips tombstones using a live-overlay-key set and coalesced intervals
+of hidden origin rows. It is read-only. Branch `locate_cell` returns an opaque
+`CellLocation` describing a key's committed position; it neither plans nor applies
+a mutation. Record obtains it within the cell-read checkpoint and stores it in a
+record-owned `PlannedDelete`. After budget approval, branch `delete_at` applies the
+tombstone and maintains the scan indexes without storage reads. The undo journal
+restores this auxiliary state. Each scan step reads at most two origin rows and
+one overlay value, and location discovery at most two further rows; calibration
+must cover this bounded bookkeeping. Raw user-cell tombstones are rejected by this
+interface; the existing general `CellScan` is unchanged. Delete scans #meta's user-cell count,
+then performs one bounded end probe covered by its record base.
 
 Get reads all cells, including `#key`, unless `.only(names)` selects a projection.
 Names may be text or raw bytes; selections are deduplicated and sorted. Missing

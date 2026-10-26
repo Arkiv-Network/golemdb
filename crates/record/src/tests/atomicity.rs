@@ -3,7 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use super::crud_tests::{create_entries, patch_entries, setup};
+use super::crud_tests::{create_entries, patch_entries, setup, zero_pricing};
 use crate::{CellPatch, Effects, ReadTarget, RecordError, RecordKey, Records};
 use golemdb_branch::Branches;
 use golemdb_cells::{
@@ -102,15 +102,15 @@ fn late_patch_failure(remove: bool) {
     // Minimal read-only origin fixture; this test never seals or commits it.
     let mut tx = db.begin_write().unwrap();
     tx.put(Table("Superblock"), b"head", &[0; 72]).unwrap();
-    for name in [
-        reserved::MAX_STR_LEN,
-        reserved::MAX_BYTES_LEN,
-        reserved::MAX_CELL_NAME_LEN,
+    for (name, limit) in [
+        (reserved::MAX_STR_LEN, 64u32),
+        (reserved::MAX_BYTES_LEN, 128),
+        (reserved::MAX_CELL_NAME_LEN, 32),
     ] {
         tx.put(
             tables::CELL,
             &CellKey::new(system::PARAMS.id, name).encode(),
-            value(CellType::Uint(Width::W4), &64u32.to_be_bytes()).encoded_bytes(),
+            value(CellType::Uint(Width::W4), &limit.to_be_bytes()).encoded_bytes(),
         )
         .unwrap();
     }
@@ -165,7 +165,7 @@ fn late_patch_failure(remove: bool) {
         None,
     )
     .unwrap();
-    let records = Records::new(branches.clone());
+    let records = Records::new(branches.clone(), zero_pricing());
     let b = branches.begin().unwrap();
     branches.checkpoint(b).unwrap();
     branches.rollback(b).unwrap();
@@ -239,7 +239,7 @@ fn late_delete_scan_failure_preserves_cells_effects_and_checkpoint_state() {
         None,
     )
     .unwrap();
-    let records = Records::new(branches.clone());
+    let records = Records::new(branches.clone(), zero_pricing());
     let b = branches.begin().unwrap();
     records
         .patch(

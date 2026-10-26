@@ -186,6 +186,7 @@ mod immutable;
 mod journal;
 mod manager;
 mod overlay;
+mod record_scan;
 mod roots;
 mod scan;
 mod seal;
@@ -195,6 +196,7 @@ pub use error::{BranchError, OperationError, Result};
 pub use head::{Head, advance_head, init_head, read_head, read_head_state, write_head};
 pub use manager::Branches;
 pub use overlay::{CellRead, CellWrite};
+pub use record_scan::{CellLocation, RecordScan};
 pub use roots::{ROOTS, Roots, head_roots, read_roots};
 pub use scan::CellScan;
 pub use seal::SealedCommit;
@@ -209,6 +211,10 @@ mod model_tests;
 #[cfg(test)]
 #[path = "tests/overlay.rs"]
 mod overlay_tests;
+
+#[cfg(test)]
+#[path = "tests/record_scan.rs"]
+mod record_scan_tests;
 
 #[cfg(test)]
 #[path = "tests/lifecycle.rs"]

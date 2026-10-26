@@ -13,7 +13,7 @@ use std::error::Error;
 use super::facade::each_backend;
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
-// A zero budget is explicitly accepted but unenforced in this increment.
+// Writes enforce this budget against explicit zero weights; reads remain unmetered.
 const BUDGET: Budget = Budget::Limited(0);
 
 fn create() -> RecordOp<op::Create> {
@@ -31,7 +31,9 @@ fn filter(name: &str) -> Filter {
 
 fn unchanged<T>(call: &Metered<T>, head: Option<CommitId>) {
     assert_eq!(call.receipt.cost, 0);
-    assert!(call.receipt.ledger.is_empty());
+    if head.is_none() {
+        assert!(call.receipt.ledger.is_empty());
+    }
     assert_eq!(call.receipt.priced_at, head);
     assert_eq!(call.receipt.details, Details::default());
 }
@@ -46,6 +48,11 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
         let details = created.receipt.details;
         assert_eq!(created.receipt.priced_at, Some(head));
         assert_eq!(created.receipt.cost, 0);
+        assert_eq!(created.receipt.ledger.count("write.admission.entry"), 2);
+        assert_eq!(created.receipt.ledger.count("write.admission.byte"), 15);
+        assert_eq!(created.receipt.ledger.count("write.cell.create"), 5);
+        assert_eq!(created.receipt.ledger.count("write.cell_trie_update"), 30);
+        assert_eq!(created.receipt.ledger.count("read.term"), 1);
         assert_eq!(details.cells_created, 2);
         assert_eq!(details.cell_bytes_written, 33);
         assert_eq!(details.index_joins, 1);
@@ -66,6 +73,8 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
             let call = db.patch(branch, patch);
             unchanged(&call, Some(head));
             call.result.unwrap();
+            assert_eq!(call.receipt.ledger.count("write.admission.base"), 1);
+            assert_eq!(call.receipt.ledger.count("write.cell.update"), 0);
             assert_eq!(db.branch_info(branch).unwrap().version, version);
         }
         let changed = db.patch(
@@ -73,6 +82,12 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
             RecordOp::patch(KEY, BUDGET).set("color", CellValue::from_str("blue")),
         );
         changed.result.unwrap();
+        assert_eq!(changed.receipt.cost, 0);
+        assert_eq!(changed.receipt.ledger.count("read.cell"), 3);
+        assert_eq!(changed.receipt.ledger.count("read.term"), 2);
+        assert_eq!(changed.receipt.ledger.count("write.cell.update"), 2);
+        assert_eq!(changed.receipt.ledger.count("write.index.join"), 1);
+        assert_eq!(changed.receipt.ledger.count("write.index.leave"), 1);
         let d = changed.receipt.details;
         assert_eq!(
             (d.cells_updated, d.cell_bytes_written, d.cell_bytes_deleted),
@@ -89,6 +104,7 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
         );
         let before = db.get(ReadTarget::Branch(branch), RecordOp::get(KEY, BUDGET));
         unchanged(&before, Some(head));
+        assert!(before.receipt.ledger.is_empty());
         let before = before.result.unwrap();
         assert_eq!(
             before.cells[b"color".as_slice()].kind(),
@@ -102,6 +118,8 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
                 .set("zzz", CellValue::from_bool(true)),
         );
         unchanged(&failed, Some(head));
+        assert_eq!(failed.receipt.ledger.count("read.cell"), 4);
+        assert_eq!(failed.receipt.ledger.count("write.cell.update"), 0);
         assert!(
             matches!(failed.result, Err(ApiError::CellNotFound { name }) if name.as_bytes() == b"zzz")
         );
@@ -136,6 +154,9 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
         assert_eq!(type_change.receipt.details.cells_updated, 1);
         let deleted = db.delete(branch, RecordOp::delete(KEY, BUDGET));
         deleted.result.unwrap();
+        assert_eq!(deleted.receipt.cost, 0);
+        assert_eq!(deleted.receipt.ledger.count("read.cell"), 4);
+        assert_eq!(deleted.receipt.ledger.count("write.cell.delete"), 5);
         let d = deleted.receipt.details;
         assert_eq!(
             (d.cells_deleted, d.cell_bytes_deleted, d.index_leaves),
@@ -156,6 +177,9 @@ fn handle_then_admission_then_record_state_and_failures_always_have_receipts() {
         let invalid = || RecordOp::create(KEY, BUDGET).field("", CellValue::from_bool(true));
         let rejected = db.create(branch, invalid());
         unchanged(&rejected, Some(head));
+        assert_eq!(rejected.receipt.ledger.count("write.admission.base"), 1);
+        assert_eq!(rejected.receipt.ledger.count("write.admission.entry"), 1);
+        assert_eq!(rejected.receipt.ledger.count("read.key"), 0);
         assert!(matches!(
             rejected.result,
             Err(ApiError::InvalidArgument { .. })
@@ -166,6 +190,8 @@ fn handle_then_admission_then_record_state_and_failures_always_have_receipts() {
             RecordOp::patch(KEY, BUDGET).field(&"a".repeat(33), CellValue::from_bool(true)),
         );
         unchanged(&bad_patch, Some(head));
+        assert_eq!(bad_patch.receipt.ledger.count("write.admission.entry"), 1);
+        assert_eq!(bad_patch.receipt.ledger.count("write.admission.byte"), 0);
         assert!(matches!(
             bad_patch.result,
             Err(ApiError::InvalidArgument { .. })
@@ -364,9 +390,11 @@ fn query_count_and_unavailable_history_report_the_selected_head() {
         let head = db.commit(branch).unwrap();
         let query = db.query(None, QueryOp::from_filter(filter("color"), BUDGET));
         unchanged(&query, Some(head));
+        assert!(query.receipt.ledger.is_empty());
         assert_eq!(query.result.unwrap().records.len(), 1);
         let count = db.count(None, CountOp::filter(filter("color"), BUDGET));
         unchanged(&count, Some(head));
+        assert!(count.receipt.ledger.is_empty());
         assert_eq!(count.result.unwrap(), 1);
         let invalid = db.query(None, QueryOp::from_filter(filter("bad name"), BUDGET));
         unchanged(&invalid, Some(head));
