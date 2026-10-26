@@ -1,6 +1,6 @@
 # Performance benchmarks
 
-The `cells`, `merkle`, and `index` crates use Criterion. Benchmarks measure
+The `cells`, `merkle`, `index` and `query` suites use Criterion. Benchmarks measure
 execution time; correctness tests remain separate. Fixtures include sanity checks
 outside timed sections. Inputs are deterministic and important inputs/outputs
 pass through `std::hint::black_box` in the new suites.
@@ -10,8 +10,8 @@ pass through `std::hint::black_box` in the new suites.
 ```sh
 cargo bench -p golemdb-cells --bench cells
 cargo bench -p golemdb-merkle --bench merkle
-cargo bench -p golemdb-index --bench index
-cargo bench -p golemdb-index --bench index --features mdbx
+cargo bench -p golemdb-integration-tests --bench index
+cargo bench -p golemdb-integration-tests --bench query
 ```
 
 Full runs include many cases and can take several minutes. Select a group or
@@ -19,8 +19,8 @@ case using the filter after `--`:
 
 ```sh
 cargo bench -p golemdb-merkle --bench merkle -- 'merkle/trie/keccak-256/path_bytes=6/replace'
-cargo bench -p golemdb-index --bench index -- 'index/keccak-256/memory/chunks=64/apply_only/one_posting'
-cargo bench -p golemdb-index --bench index --features mdbx -- 'transaction_begin_apply_durable_commit'
+cargo bench -p golemdb-integration-tests --bench index -- 'index/keccak-256/memory/chunks=64/apply_only/one_posting'
+cargo bench -p golemdb-integration-tests --bench index -- 'transaction_begin_apply_durable_commit'
 ```
 
 Compile without running, or execute every fixture once without collecting timing
@@ -29,7 +29,7 @@ statistics:
 ```sh
 cargo bench --workspace --all-features --no-run
 cargo bench -p golemdb-merkle --bench merkle -- --test
-cargo bench -p golemdb-index --bench index --features mdbx -- --test
+cargo bench -p golemdb-integration-tests --bench index -- --test
 ```
 
 Criterion writes results under `target/criterion` (ignored by Git). For a deliberate
@@ -48,6 +48,8 @@ automatic pass/fail gates.
 | `index/term` | String term construction, strict decoding and routing hash at 16/256/1024 value bytes |
 | `index/<algorithm>/memory` and optional `index/<algorithm>/mdbx` | Materialization, four-term prefix scans, and posting batches at 64/256 containers per term |
 | `index/<algorithm>/mdbx/transaction_begin_apply_durable_commit` | One posting change including writer acquisition and durable commit |
+| `query/range` | `number > X` matching the top 1% and 10% of its values, each value held by about five records; the 10% range with `LIMIT 10`, its `count`, and `skewed = 'small-1' AND` the range |
+| `query/eq` | `quarter = 'q0'`, one term holding 25% of records, with the default page, `LIMIT 10` and `count`; `skewed = 'big' AND quarter = 'q0'`, two large terms |
 
 Trie paths are either clustered (zero leading bytes and a unique four-byte suffix)
 or spread (hash-derived leading bytes and the same unique suffix). Both widths
@@ -61,6 +63,13 @@ shuffled postings across four terms and 4096 alternating removals/additions that
 resolve to 16 new postings. Throughput for write groups is reported in input
 posting changes per second, including duplicates. Deletes are covered by the Merkle
 suite; the first index performance suite focuses on additions.
+
+Query fixtures are 262,144 records (four bitmap containers of record IDs) on
+MDBX with Keccak-256, created 1,000 per commit with deterministic `quarter`,
+`skewed` and `number` attributes and no other cells.
+Seeding takes about a minute and is excluded from timing. Query throughput is
+reported in matches per second, the size of the whole match set, through the
+public `Database` API on a warm page cache.
 
 ## Timing boundaries
 
@@ -106,7 +115,7 @@ For short comparisons across both providers:
 
 ```sh
 cargo bench -p golemdb-merkle --bench merkle -- 'merkle/hash/' --warm-up-time 0.5 --measurement-time 1 --sample-size 20
-cargo bench -p golemdb-index --bench index -- 'index/(keccak-256|blake3)/memory/chunks=64/apply_only/one_posting' --warm-up-time 0.5 --measurement-time 1 --sample-size 20
+cargo bench -p golemdb-integration-tests --bench index -- 'index/(keccak-256|blake3)/memory/chunks=64/apply_only/one_posting' --warm-up-time 0.5 --measurement-time 1 --sample-size 20
 ```
 
 Algorithm-labelled groups replace older unlabelled benchmark names, so establish
