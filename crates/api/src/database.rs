@@ -5,6 +5,7 @@ use std::sync::Arc;
 use golemdb_branch::{Branches, read_head};
 use golemdb_immutable_data::{ImmutableDataReader, ImmutableDataStorage};
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher};
+use golemdb_metering::{PricingProvider, PricingSnapshot};
 use golemdb_pruning::PruningConfig;
 use golemdb_query::Queries;
 use golemdb_record::{Records, WritePricing};
@@ -13,8 +14,8 @@ use golemdb_storage::Store;
 use crate::{
     Api, ApiError, BranchId, BranchInfo, CommitId, CountOp, Genesis, HashAlgorithm,
     ImmutableDataAddress, ImmutableDataKey, ImmutableDataOrdinal, ImmutableDataReadOptions,
-    ImmutableDataRow, ImmutableDataSchema, OpenConfig, OpenInfo, OpenResult, QueryOp, QueryPage,
-    ReadTarget, Record, RecordKey, RecordOp, Result, SealInfo, op,
+    ImmutableDataRow, ImmutableDataSchema, MeteringModelInfo, ModelWeights, OpenConfig, OpenInfo,
+    OpenResult, QueryOp, QueryPage, ReadTarget, Record, RecordKey, RecordOp, Result, SealInfo, op,
 };
 
 /// Cloneable public database handle. Clones share one engine and branch registry;
@@ -33,6 +34,7 @@ pub struct Database {
 
 impl Database {
     /// Initialize a fresh memory store. Clone the handle to share its branches.
+    /// For host code declarations, use `from_store(MemoryStore::new(), config)`.
     pub fn open_memory(genesis: &Genesis) -> OpenResult<Self> {
         crate::open::open_store(
             golemdb_storage::MemoryStore::new(),
@@ -99,7 +101,7 @@ impl Database {
         let genesis = opened.genesis().clone();
         let info = *opened.info();
         let pruning = opened.pruning();
-        let store = opened.into_store();
+        let (store, pricing_provider) = opened.into_parts();
         let immutable_data = genesis
             .immutable_data
             .as_ref()
@@ -118,6 +120,7 @@ impl Database {
                 immutable_data,
                 pricing,
                 pruning,
+                pricing_provider,
             )?),
             HashAlgorithm::Blake3 => Arc::new(Inner::new(
                 store,
@@ -125,6 +128,7 @@ impl Database {
                 immutable_data,
                 pricing,
                 pruning,
+                pricing_provider,
             )?),
         };
         Ok(Self {
@@ -153,6 +157,16 @@ impl Api for Database {
     }
     fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Metered<u64> {
         self.inner.count(commit_id, operation)
+    }
+    fn metering_model(&self, commit_id: Option<CommitId>) -> Result<MeteringModelInfo> {
+        self.inner.metering_model(commit_id)
+    }
+    fn model_weights(
+        &self,
+        commit_id: Option<CommitId>,
+        version: Option<u64>,
+    ) -> Result<ModelWeights> {
+        self.inner.model_weights(commit_id, version)
     }
     fn head(&self) -> Result<CommitId> {
         self.inner.head()
@@ -239,6 +253,7 @@ struct Inner<S, H> {
     branches: Branches<S, H>,
     records: Records<S, H>,
     queries: Queries<S, H>,
+    pricing: Arc<PricingProvider>,
 }
 
 impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
@@ -248,6 +263,7 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
         immutable_data: Option<ImmutableDataStorage>,
         pricing: WritePricing,
         pruning: Option<PruningConfig>,
+        pricing_provider: PricingProvider,
     ) -> OpenResult<Self> {
         let immutable_reader = immutable_data.as_ref().map(ImmutableDataStorage::reader);
         // Recover before exposing the reader through the completed database handle.
@@ -265,11 +281,24 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
             branches,
             records,
             queries,
+            pricing: Arc::new(pricing_provider),
         })
     }
 }
 
 impl<S: Store, H: HashProvider> Inner<S, H> {
+    fn pricing_snapshot(&self, commit_id: Option<CommitId>) -> Result<PricingSnapshot> {
+        // Resolve selection once. Ordinary commits keep the initial schedule;
+        // the call's commit changes without reloading or copying its weights.
+        let tx = self.store.begin_read().map_err(ApiError::internal)?;
+        let head = read_head(&tx)?;
+        if let Some(requested) = commit_id
+            && requested != head
+        {
+            return Err(ApiError::CommitUnavailable { requested, head });
+        }
+        self.pricing.snapshot(head.get()).map_err(Into::into)
+    }
     fn immutable_reader(&self) -> Result<&ImmutableDataReader> {
         self.immutable_reader.as_ref().ok_or(ApiError::NotFound)
     }
@@ -304,6 +333,27 @@ impl<S: Store, H: HashProvider> Api for Inner<S, H> {
     }
     fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Metered<u64> {
         self.queries.count_report(commit, operation).into()
+    }
+    fn metering_model(&self, commit_id: Option<CommitId>) -> Result<MeteringModelInfo> {
+        let snapshot = self.pricing_snapshot(commit_id)?;
+        Ok(MeteringModelInfo {
+            commit_id: CommitId::new(snapshot.commit_id),
+            active: snapshot.model.metadata.into(),
+            pending: self.pricing.pending().map(Into::into),
+        })
+    }
+    fn model_weights(
+        &self,
+        commit_id: Option<CommitId>,
+        version: Option<u64>,
+    ) -> Result<ModelWeights> {
+        let snapshot = self.pricing_snapshot(commit_id)?;
+        let version = version.unwrap_or(snapshot.model.metadata.version);
+        Ok(ModelWeights {
+            commit_id: CommitId::new(snapshot.commit_id),
+            version,
+            weights: self.pricing.model_weights(Some(version))?,
+        })
     }
     fn head(&self) -> Result<CommitId> {
         self.branches.head().map_err(Into::into)

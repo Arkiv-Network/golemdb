@@ -90,6 +90,7 @@ fn config(hash: HashAlgorithm, mode: OpenMode) -> OpenConfig {
             max_indexed_cells: 100,
         },
         None,
+        golemdb_api::PricingConfig::zero(),
     ))
     .with_mode(mode)
 }

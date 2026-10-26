@@ -33,6 +33,7 @@ fn genesis(hash: HashAlgorithm) -> Genesis {
                 },
             ],
         )),
+        golemdb_api::PricingConfig::zero(),
     )
 }
 fn row(n: u8) -> ImmutableDataRow {

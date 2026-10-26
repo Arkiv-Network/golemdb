@@ -1,7 +1,9 @@
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use golemdb_branch::Head;
+use golemdb_cells::CellReader;
 use golemdb_merkle::{Blake3Hasher, HashAlgorithm, Keccak256Hasher};
+use golemdb_metering::PricingProvider;
 use golemdb_pruning::PruningConfig;
 use golemdb_storage::{Store, WriteTransaction};
 
@@ -37,6 +39,7 @@ pub(crate) struct OpenedStore<S> {
     genesis: Genesis,
     info: OpenInfo,
     pruning: Option<PruningConfig>,
+    pricing: PricingProvider,
 }
 
 impl<S> OpenedStore<S> {
@@ -51,8 +54,8 @@ impl<S> OpenedStore<S> {
         self.pruning
     }
     /// Hand initialized storage to the engine; low-level writes remain trusted.
-    pub fn into_store(self) -> S {
-        self.store
+    pub fn into_parts(self) -> (S, PricingProvider) {
+        (self.store, self.pricing)
     }
 }
 
@@ -76,11 +79,21 @@ pub(crate) fn open_store<S: Store>(store: S, config: &OpenConfig) -> OpenResult<
         .genesis
         .validate(store.max_key_size(), store.max_value_size())?;
     let mut tx = store.begin_write()?;
-    let prepared = catch_unwind(AssertUnwindSafe(|| match config.genesis.hash_function {
-        HashAlgorithm::Keccak256 => crate::genesis::prepare(&mut tx, config, &Keccak256Hasher),
-        HashAlgorithm::Blake3 => crate::genesis::prepare(&mut tx, config, &Blake3Hasher),
+    let prepared = catch_unwind(AssertUnwindSafe(|| {
+        let info = match config.genesis.hash_function {
+            HashAlgorithm::Keccak256 => crate::genesis::prepare(&mut tx, config, &Keccak256Hasher),
+            HashAlgorithm::Blake3 => crate::genesis::prepare(&mut tx, config, &Blake3Hasher),
+        }?;
+        // Load from the same serialized view used for initialization/validation.
+        // A bad model must fail before a fresh genesis can be published.
+        let pricing = PricingProvider::load(
+            &CellReader::new(&tx),
+            info.commit_id.get(),
+            &config.host_schemas,
+        )?;
+        Ok::<_, crate::OpenError>((info, pricing))
     }));
-    let info = match prepared {
+    let (info, pricing) = match prepared {
         Ok(result) => result?,
         Err(panic) => {
             drop(tx);
@@ -97,6 +110,7 @@ pub(crate) fn open_store<S: Store>(store: S, config: &OpenConfig) -> OpenResult<
         genesis: config.genesis.clone(),
         info,
         pruning: config.pruning,
+        pricing,
     })
 }
 

@@ -1,6 +1,6 @@
 use crate::*;
 
-const PREFIX: &str = "hash_function: keccak-256\ncell_limits: {max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 128}\nrecord_limits: {max_cells: 100, max_indexed_cells: 100}\n";
+const PREFIX: &str = "hash_function: keccak-256\ncell_limits: {max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 128}\nrecord_limits: {max_cells: 100, max_indexed_cells: 100}\nmetering: {golemdb_code_version: 1, host_code_version: 0, weights: {}}\n";
 
 fn yaml(section: &str) -> String {
     format!("{PREFIX}immutable_data:\n{section}\n")
@@ -8,7 +8,7 @@ fn yaml(section: &str) -> String {
 
 #[test]
 fn omitted_and_null_immutable_data_match_explicit_none() {
-    let expected = Genesis::new(
+    let mut expected = Genesis::new(
         HashAlgorithm::Keccak256,
         CellLimits {
             max_cell_name_len: 32,
@@ -20,7 +20,9 @@ fn omitted_and_null_immutable_data_match_explicit_none() {
             max_indexed_cells: 100,
         },
         None,
+        crate::PricingConfig::zero(),
     );
+    expected.metering.weights.clear();
     for yaml in [PREFIX.to_owned(), format!("{PREFIX}immutable_data: null\n")] {
         assert_eq!(Genesis::from_yaml(&yaml).unwrap(), expected);
     }
@@ -119,4 +121,33 @@ fn yaml_resolves_every_cell_type_and_default_bytes() {
         Genesis::from_yaml(&implicit).unwrap(),
         Genesis::from_yaml(&explicit).unwrap()
     );
+}
+
+#[test]
+fn pricing_yaml_requires_explicit_model_and_rejects_duplicate_weights() {
+    let base = PREFIX.replace(
+        "metering: {golemdb_code_version: 1, host_code_version: 0, weights: {}}\n",
+        "",
+    );
+    assert!(Genesis::from_yaml(&base).is_err());
+    for metering in [
+        "null",
+        "{}",
+        "{golemdb_code_version: 1, host_code_version: 0}",
+        "{golemdb_code_version: 1, weights: {}}",
+        "{host_code_version: 0, weights: {}}",
+        "{golemdb_code_version: 1, host_code_version: 0, weights: {read.cell: 1, read.cell: 2}}",
+        "{golemdb_code_version: 1, host_code_version: 0, weights: {read.cell: -1}}",
+        "{golemdb_code_version: 1, host_code_version: 0, weights: {read.cell: 18446744073709551616}}",
+        "{golemdb_code_version: 1, host_code_version: 0, weights: {}, unknown: 0}",
+    ] {
+        assert!(
+            Genesis::from_yaml(&format!("{base}metering: {metering}\n")).is_err(),
+            "{metering}"
+        );
+    }
+    let parsed = Genesis::from_yaml(&format!("{base}metering: {{golemdb_code_version: 1, host_code_version: 0, weights: {{read.cell: 0, read.key: 18446744073709551615}}}}\n")).unwrap();
+    assert_eq!(parsed.metering.weights["read.cell"], 0);
+    assert_eq!(parsed.metering.weights["read.key"], u64::MAX);
+    assert!(!parsed.metering.weights.contains_key("read.term"));
 }

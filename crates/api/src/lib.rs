@@ -21,6 +21,7 @@
 //! },
 //!     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
 //!     None,
+//!     golemdb_api::PricingConfig::zero(),
 //! ));
 //! let db = Database::open_memory(&config.genesis)?;
 //! let branch = db.begin()?;
@@ -43,6 +44,7 @@ mod genesis;
 mod metered;
 mod open;
 mod open_error;
+mod pricing;
 mod record_op;
 mod types;
 
@@ -57,12 +59,13 @@ pub use golemdb_immutable_data::{
     ImmutableDataSegment,
 };
 pub use golemdb_merkle::HashAlgorithm;
-pub use golemdb_metering::{Budget, Ledger, WeightName};
+pub use golemdb_metering::{Budget, HostMeteringSchema, Ledger, PricingConfig, WeightName};
 pub use golemdb_pruning::PruningConfig;
 pub use golemdb_storage_mdbx::MdbxOptions;
 pub use metered::{Details, Metered, Receipt};
 pub use open::OpenInfo;
 pub use open_error::{OpenError, OpenResult};
+pub use pricing::{MeteringModelInfo, MeteringModelMetadata, ModelWeights};
 pub use record_op::{RecordOp, op};
 pub use types::SealInfo;
 
@@ -113,6 +116,18 @@ pub trait Api {
     /// The number of committed records matching the operation's filter, under
     /// the same commit rules as `query`.
     fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Metered<u64>;
+
+    /// Unmetered committed pricing inspection. None selects head; explicit
+    /// non-head commits return CommitUnavailable until historical reads exist.
+    fn metering_model(&self, commit_id: Option<CommitId>) -> Result<MeteringModelInfo>;
+
+    /// Weights (including host.*) at the selected commit. None selects its active
+    /// model. Use the same explicit commit for related model/weight lookups.
+    fn model_weights(
+        &self,
+        commit_id: Option<CommitId>,
+        version: Option<u64>,
+    ) -> Result<ModelWeights>;
 
     // Branch lifecycle. IDs are valid only for their issuing engine.
     fn head(&self) -> Result<CommitId>;

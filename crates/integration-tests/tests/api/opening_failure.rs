@@ -29,6 +29,7 @@ fn config(directory: &std::path::Path) -> OpenConfig {
                 compression: golemdb_api::ImmutableDataCompression::Lz4,
             }],
         )),
+        golemdb_api::PricingConfig::zero(),
     ))
     .with_immutable_data_directory(directory)
 }
@@ -40,6 +41,7 @@ enum Fault {
     Panic(usize),
     Commit,
     Read,
+    PricingReadPanic,
 }
 
 /// Clones share the wrapped store and the switches.
@@ -115,6 +117,12 @@ impl<W: ReadTransaction> ReadTransaction for ControlledWrite<W> {
         self.inner.get(table, key)
     }
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
+        if matches!(self.fault, Fault::PricingReadPanic)
+            && table == golemdb_cells::tables::CELL
+            && key == golemdb_cells::system::METERING_MODEL.id.to_be_bytes()
+        {
+            panic!("injected pricing load panic");
+        }
         self.inner.cursor(table, key)
     }
 }
@@ -217,6 +225,26 @@ fn memory_genesis_is_atomic_at_every_write_and_reopen_is_read_only() {
 fn mdbx_genesis_is_atomic_at_every_write_and_reopen_is_read_only() {
     let dir = tempfile::tempdir().unwrap();
     failures(golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap());
+}
+
+#[test]
+fn panic_loading_initial_pricing_aborts_genesis_without_poisoning_the_store() {
+    let store = MemoryStore::new();
+    let files = tempfile::tempdir().unwrap();
+    assert!(
+        std::panic::catch_unwind(AssertUnwindSafe(|| Database::from_store(
+            Controlled::new(store.clone(), Fault::PricingReadPanic),
+            &config(files.path())
+        )))
+        .is_err()
+    );
+    assert!(store.begin_write().unwrap().is_empty().unwrap());
+    assert!(
+        Database::from_store(store, &config(files.path()))
+            .unwrap()
+            .info()
+            .created
+    );
 }
 
 #[test]

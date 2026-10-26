@@ -4,8 +4,8 @@ use golemdb_metering::{INITIAL_DEPTHS, ModeledDepths, Schedule};
 use crate::RecordLimits;
 
 /// Immutable write configuration supplied by the owning connection layer.
-/// Limits must match the initialized deployment. Persisted schedules and their
-/// activation remain the responsibility of the future pricing loader.
+/// Limits must match the initialized deployment. The metering crate now loads
+/// persisted schedules; connecting its provider to CUD remains iteration 6.
 #[derive(Debug, Clone)]
 pub struct WritePricing {
     pub schedule: Schedule,
