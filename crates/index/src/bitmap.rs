@@ -1,6 +1,6 @@
 use std::ops::{BitAndAssign, BitOrAssign};
 
-use roaring::RoaringTreemap;
+use roaring::{MultiOps, RoaringTreemap};
 
 use crate::{BitmapContainer, BitmapError};
 
@@ -8,7 +8,8 @@ use crate::{BitmapContainer, BitmapError};
 ///
 /// Owns the chunk-to-record-ID conversion, not storage or Merkle hashing.
 /// Set operations are operators on `Bitmap` (`|=` is union, `&=` is
-/// intersection), so callers need not name Roaring; [`Self::treemap`] reads
+/// intersection), with [`Self::union_all`] for many unions at once, so
+/// callers need not name Roaring; [`Self::treemap`] reads
 /// the record IDs, and [`Self::iter_skipping`] reads them past a rank. The
 /// default is the empty bitmap.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -44,6 +45,13 @@ impl Bitmap {
                 .expect("validated paths and offsets are strictly ordered");
         }
         Ok(Self { values })
+    }
+
+    /// The union of `bitmaps`.
+    pub fn union_all(bitmaps: impl IntoIterator<Item = Self>) -> Self {
+        Self {
+            values: bitmaps.into_iter().map(|bitmap| bitmap.values).union(),
+        }
     }
 
     pub fn treemap(&self) -> &RoaringTreemap {

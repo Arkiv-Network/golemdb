@@ -177,6 +177,21 @@ fn materializes_across_roaring_partition_boundaries() {
     assert_eq!(union.len(), 11);
 }
 
+/// An ID in one of three containers, two of them in one treemap bucket, so
+/// sets drawn from it often share containers and merge.
+fn shared_id() -> impl Strategy<Value = u64> {
+    (prop::sample::select(vec![0u64, 1, 1 << 16]), 0u64..300).prop_map(|(hi, lo)| (hi << 16) | lo)
+}
+
+#[test]
+fn union_all_merges_containers_past_the_array_limit() {
+    // Three overlapping sets whose union in container 0 exceeds 4096 IDs,
+    // so it ends as a full bitmap rather than an array.
+    let sets = [0..3000, 2000..5000, 4500..6000].map(bitmap_of);
+    let union = Bitmap::union_all(sets);
+    assert_eq!(union, bitmap_of(0..6000));
+}
+
 /// A bitmap of `ids`, assembled from containers as storage would.
 fn bitmap_of(ids: impl IntoIterator<Item = u64>) -> Bitmap {
     let mut chunks: BTreeMap<u64, Vec<u16>> = BTreeMap::new();
@@ -252,6 +267,14 @@ proptest! {
         let mut union = bitmap_of(a.iter().copied());
         union |= bitmap_of(b.iter().copied());
         prop_assert_eq!(union, bitmap_of(a.into_iter().chain(b)));
+    }
+
+    #[test]
+    fn union_all_is_set_union(
+        sets in prop::collection::vec(prop::collection::vec(shared_id(), 0..50), 0..40),
+    ) {
+        let union = Bitmap::union_all(sets.iter().map(|ids| bitmap_of(ids.iter().copied())));
+        prop_assert_eq!(union, bitmap_of(sets.into_iter().flatten()));
     }
 
     #[test]

@@ -44,17 +44,37 @@ where
     Ok(running)
 }
 
-/// The union of `sets`, taken one after another in the order given: a
-/// leaf's postings as they are read, or an `Or`'s children as they are
-/// evaluated.
-fn union<E>(mut sets: impl Iterator<Item = std::result::Result<Bitmap, E>>) -> Result<Bitmap>
+/// Sets merged by one multi-way union: enough to keep most of its gain over
+/// merging one by one, few enough to bound how many are held at once.
+const UNION_BATCH: usize = 256;
+
+/// Below this many sets, merging one by one is faster than a multi-way union.
+const UNION_FEW: usize = 16;
+
+/// The union of `sets`, taken in the order given: a leaf's postings as they
+/// are read, or an `Or`'s children as they are evaluated. Sets are merged
+/// in batches of [`UNION_BATCH`], so at most one batch is held at a time;
+/// the first failure ends the reading.
+fn union<E>(sets: impl Iterator<Item = std::result::Result<Bitmap, E>>) -> Result<Bitmap>
 where
     QueryError: From<E>,
 {
-    sets.try_fold(Bitmap::default(), |mut union, set| {
-        union |= set?;
-        Ok(union)
-    })
+    let mut union = Bitmap::default();
+    let mut batch = Vec::with_capacity(UNION_BATCH);
+    for set in sets {
+        batch.push(set?);
+        if batch.len() == UNION_BATCH {
+            union |= Bitmap::union_all(batch.drain(..));
+        }
+    }
+    if batch.len() < UNION_FEW {
+        for set in batch {
+            union |= set;
+        }
+    } else {
+        union |= Bitmap::union_all(batch);
+    }
+    Ok(union)
 }
 
 #[cfg(test)]
@@ -716,6 +736,27 @@ mod tests {
         ] {
             let result = evaluate(&FailingSource, &filter);
             assert!(is_injected_failure(&result), "{filter:?}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn unions_merge_across_batches_and_few_sets() {
+        let sizes = [
+            0,
+            1,
+            UNION_FEW - 1,
+            UNION_FEW,
+            UNION_BATCH,
+            UNION_BATCH + UNION_FEW - 1,
+            2 * UNION_BATCH + UNION_FEW,
+        ];
+        for n in sizes {
+            // Each set shares container 0 with the others and adds one ID of
+            // its own in container 1.
+            let set = |i: u64| bitmap([i % 50, (1 << 16) + i]);
+            let sets = (0..n as u64).map(|i| Ok::<_, QueryError>(set(i)));
+            let expected = bitmap((0..n as u64).flat_map(|i| [i % 50, (1 << 16) + i]));
+            assert_eq!(union(sets).unwrap(), expected, "{n}");
         }
     }
 
