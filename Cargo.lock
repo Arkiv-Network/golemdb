@@ -626,6 +626,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "golemdb-pruning"
+version = "0.1.0"
+dependencies = [
+ "golemdb-cells",
+ "golemdb-index",
+ "golemdb-storage",
+ "thiserror",
+]
+
+[[package]]
 name = "golemdb-query"
 version = "0.1.0"
 dependencies = [
