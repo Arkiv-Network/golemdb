@@ -1,18 +1,19 @@
 # Performance benchmarks
 
-The `cells`, `merkle`, and `index` crates use Criterion. Benchmarks measure
-execution time; correctness tests remain separate. Fixtures include sanity checks
-outside timed sections. Inputs are deterministic and important inputs/outputs
-pass through `std::hint::black_box` in the new suites.
+The `cells` and `merkle` crates, and the `integration-tests` `index`, `write`
+and `query` suites, use Criterion. Benchmarks measure execution time;
+correctness tests remain separate. Fixtures include sanity checks outside timed
+sections. Inputs are deterministic and important inputs/outputs pass through
+`std::hint::black_box` in the new suites.
 
 ## Running
 
 ```sh
 cargo bench -p golemdb-cells --bench cells
 cargo bench -p golemdb-merkle --bench merkle
-cargo bench -p golemdb-index --bench index
-cargo bench -p golemdb-index --bench index --features mdbx
+cargo bench -p golemdb-integration-tests --bench index
 cargo bench -p golemdb-integration-tests --bench write
+cargo bench -p golemdb-integration-tests --bench query
 ```
 
 Full runs include many cases and can take several minutes. Select a group or
@@ -20,10 +21,11 @@ case using the filter after `--`:
 
 ```sh
 cargo bench -p golemdb-merkle --bench merkle -- 'merkle/trie/keccak-256/path_bytes=6/replace'
-cargo bench -p golemdb-index --bench index -- 'index/keccak-256/memory/chunks=64/apply_only/one_posting'
-cargo bench -p golemdb-index --bench index --features mdbx -- 'transaction_begin_apply_durable_commit'
+cargo bench -p golemdb-integration-tests --bench index -- 'index/keccak-256/memory/chunks=64/apply_only/one_posting'
+cargo bench -p golemdb-integration-tests --bench index -- 'transaction_begin_apply_durable_commit'
 cargo bench -p golemdb-integration-tests --bench write -- 'seal/create'
 cargo bench -p golemdb-integration-tests --bench write -- 'commit/'
+cargo bench -p golemdb-integration-tests --bench query -- 'query/100k/eq'
 ```
 
 Compile without running, or execute every fixture once without collecting timing
@@ -32,7 +34,7 @@ statistics:
 ```sh
 cargo bench --workspace --all-features --no-run
 cargo bench -p golemdb-merkle --bench merkle -- --test
-cargo bench -p golemdb-index --bench index --features mdbx -- --test
+cargo bench -p golemdb-integration-tests --bench index -- --test
 ```
 
 Criterion writes results under `target/criterion` (ignored by Git). For a deliberate
@@ -75,9 +77,15 @@ amplification even when it hardly moves the times.
 | `merkle/trie/<algorithm>/path_bytes=6` and `32` | Hit/miss lookup, full traversal, insertion, replacement and deletion at 64/1024 leaves |
 | `index/container` | Canonical encoding, strict decoding and leaf hashing of sparse, dense-even, consecutive-run and full containers |
 | `index/term` | String term construction, strict decoding and routing hash at 16/256/1024 value bytes |
-| `index/<algorithm>/memory` and optional `index/<algorithm>/mdbx` | Materialization, four-term prefix scans, and posting batches at 64/256 containers per term |
+| `index/<algorithm>/memory` and `index/<algorithm>/mdbx` | Materialization, four-term prefix scans, and posting batches at 64/256 containers per term |
 | `index/<algorithm>/mdbx/transaction_begin_apply_durable_commit` | One posting change including writer acquisition and durable commit |
 | `write/100k/{seal,commit}/{create,patch,delete,mixed}` | Sealing or committing a 200-operation batch through the public `Api`, on MDBX with 100,000 records |
+| `query/100k/range` | `number > X` matching the top 1% and 10% of its values, each value held by about five records; the same over `unique`, one record per value; the 10% range with `LIMIT 10`, its `count`, and `skewed = 'small-1' AND` the range |
+| `query/100k/eq` | `quarter = 'q0'`, one term holding 25% of records, with the default page, `LIMIT 10`, a page 80% of the way in, and `count`; `skewed = 'big' AND quarter = 'q0'`, two large terms |
+| `query/100k/union` | `IN` over 8, 64 and 512 terms of about five scattered records each, or of 100 consecutive records each; `OR` of three overlapping 20–25% terms |
+| `query/100k/sort` | `quarter = 'q0'` sorted by `number`, its first page and one 80% of the way in |
+| `query/100k/scan` | `Prefix` matching 11 terms, about 18% of records; `Exists` matching every record |
+| `query/100k/get` | `get` by key, a different record each call |
 
 Write cases run on a database preloaded with 100,000 records, then 200 commits
 of 70 creates, 60 patches and 70 deletes, so they measure a database with a
@@ -99,6 +107,16 @@ shuffled postings across four terms and 4096 alternating removals/additions that
 resolve to 16 new postings. Throughput for write groups is reported in input
 posting changes per second, including duplicates. Deletes are covered by the Merkle
 suite; the first index performance suite focuses on additions.
+
+Query fixtures are 100,000 records on MDBX with Keccak-256, created 1,000 per
+commit with deterministic `quarter`, `skewed`, `number`, `block` and `unique`
+attributes, described in `benches/query.rs`. They are a fresh bulk load: record
+IDs are dense and nothing has been patched or deleted. Seeding is excluded from
+timing. Query cases time one call through the public `Database` API on a warm
+page cache. A query returns at most 100 records, so after each case the suite
+prints how many its filter matches. Nothing else is printed: unlike commit
+cases' storage work, a query's work has no counter, so a query regression shows
+only in its time.
 
 ## Timing boundaries
 
@@ -130,6 +148,10 @@ suite; the first index performance suite focuses on additions.
   `--warm-up-time` and `--measurement-time` override. Criterion plans
   iterations from wall time, including each commit's untimed reset, so 10 s of
   measurement runs fewer commits than seals.
+- Query cases time only the `query`, `count` or `get` call; building and
+  cloning the request happen outside timing. They use Criterion's defaults of
+  3 s of warm-up, 5 s of measurement and 100 samples, and treat changes under
+  3% as noise, since warm reads vary less than disk-bound commits.
 
 The suites collect timings, not allocation counts. Only the write suite measures
 storage: for each commit case, the bytes written and syncs per commit and the
@@ -156,7 +178,7 @@ For short comparisons across both providers:
 
 ```sh
 cargo bench -p golemdb-merkle --bench merkle -- 'merkle/hash/' --warm-up-time 0.5 --measurement-time 1 --sample-size 20
-cargo bench -p golemdb-index --bench index -- 'index/(keccak-256|blake3)/memory/chunks=64/apply_only/one_posting' --warm-up-time 0.5 --measurement-time 1 --sample-size 20
+cargo bench -p golemdb-integration-tests --bench index -- 'index/(keccak-256|blake3)/memory/chunks=64/apply_only/one_posting' --warm-up-time 0.5 --measurement-time 1 --sample-size 20
 ```
 
 Algorithm-labelled groups replace older unlabelled benchmark names, so establish
