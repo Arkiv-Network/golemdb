@@ -1,37 +1,49 @@
 //! Execution-only request admission. Called after handle/snapshot selection and
-//! before any record lookup or mutation. The meter will guard the fixed checks,
-//! entry lengths, byte validation and map preparation here; costs remain zero
-//! until pricing and enforcement are implemented. No public validation shortcut.
+//! before any record lookup or mutation. Checks are guarded by the same meter as
+//! state-dependent planning. No public validation shortcut.
 
 use std::collections::{BTreeMap, btree_map::Entry};
 
 use golemdb_cells::{CellKind, CellLimits, CellName, CellNameError, CellValue, system};
+use golemdb_metering::{PlanningStep, WriteMeter};
 
 use crate::{
     CellPatch, CreateEntry, PatchChange, PatchEntry, RecordCells, RecordError, RecordKey,
     RecordPatch, Result,
 };
 
-pub(crate) fn key(key: RecordKey) -> Result<()> {
-    if system::by_key(&key.0).is_some() {
-        Err(RecordError::Reserved)
-    } else {
+pub(crate) fn base(key: RecordKey, meter: &mut WriteMeter<'_>) -> Result<()> {
+    meter.run_step(PlanningStep::AdmissionBase, || {
+        if system::by_key(&key.0).is_some() {
+            return Err(RecordError::Reserved);
+        }
         Ok(())
-    }
+    })?
 }
 
-pub(crate) fn create(limits: &CellLimits, entries: Vec<CreateEntry>) -> Result<RecordCells> {
+pub(crate) fn create(
+    limits: &CellLimits,
+    entries: Vec<CreateEntry>,
+    meter: &mut WriteMeter<'_>,
+) -> Result<RecordCells> {
     let mut cells = RecordCells::new();
     for CreateEntry { name, value, kind } in entries {
         let step = write_step(kind);
-        validate_entry(limits, step, &name, Some(&value))?;
-        let value = with_kind(step, &name, value, kind)?;
-        insert(&mut cells, step, name, value)?;
+        let count = entry(limits, step, &name, Some(&value), meter)?;
+        meter.run_step(PlanningStep::AdmissionBytes(count), || {
+            validate_name(limits, step, &name)?;
+            let value = with_kind(step, &name, value, kind)?;
+            insert(&mut cells, step, name, value)
+        })??;
     }
     Ok(cells)
 }
 
-pub(crate) fn patch(limits: &CellLimits, entries: Vec<PatchEntry>) -> Result<RecordPatch> {
+pub(crate) fn patch(
+    limits: &CellLimits,
+    entries: Vec<PatchEntry>,
+    meter: &mut WriteMeter<'_>,
+) -> Result<RecordPatch> {
     let mut changes = RecordPatch::new();
     for PatchEntry { name, change } in entries {
         let (step, value) = match &change {
@@ -39,15 +51,18 @@ pub(crate) fn patch(limits: &CellLimits, entries: Vec<PatchEntry>) -> Result<Rec
             PatchChange::Set(value) => ("set", Some(value)),
             PatchChange::Remove => ("remove", None),
         };
-        validate_entry(limits, step, &name, value)?;
-        let change = match change {
-            PatchChange::Write { value, kind } => {
-                CellPatch::Write(with_kind(step, &name, value, kind)?)
-            }
-            PatchChange::Set(value) => CellPatch::Set(value),
-            PatchChange::Remove => CellPatch::Remove,
-        };
-        insert(&mut changes, step, name, change)?;
+        let count = entry(limits, step, &name, value, meter)?;
+        meter.run_step(PlanningStep::AdmissionBytes(count), || {
+            validate_name(limits, step, &name)?;
+            let change = match change {
+                PatchChange::Write { value, kind } => {
+                    CellPatch::Write(with_kind(step, &name, value, kind)?)
+                }
+                PatchChange::Set(value) => CellPatch::Set(value),
+                PatchChange::Remove => CellPatch::Remove,
+            };
+            insert(&mut changes, step, name, change)
+        })??;
     }
     Ok(changes)
 }
@@ -69,7 +84,32 @@ fn write_step(kind: CellKind) -> &'static str {
     }
 }
 
-fn validate_entry(
+fn entry(
+    limits: &CellLimits,
+    step: &str,
+    name: &CellName,
+    value: Option<&CellValue>,
+    meter: &mut WriteMeter<'_>,
+) -> Result<u64> {
+    meter.run_step(PlanningStep::AdmissionEntry, || {
+        validate_lengths(limits, step, name, value)?;
+        // Names and payloads count; the fixed-size type/kind header belongs to
+        // AdmissionEntry. Canonical typed value construction is host work.
+        u64::try_from(name.as_bytes().len())
+            .ok()
+            .and_then(|name_bytes| {
+                u64::try_from(value.map_or(0, |v| v.value().len()))
+                    .ok()
+                    .and_then(|value_bytes| name_bytes.checked_add(value_bytes))
+            })
+            .ok_or_else(|| RecordError::InvalidInput {
+                message: "write input byte count overflow".into(),
+                source: None,
+            })
+    })?
+}
+
+fn validate_lengths(
     limits: &CellLimits,
     step: &str,
     name: &CellName,
@@ -93,6 +133,10 @@ fn validate_entry(
             .validate_value(value.as_view())
             .map_err(|source| invalid(step, name, "invalid cell value", Some(Box::new(source))))?;
     }
+    Ok(())
+}
+
+fn validate_name(limits: &CellLimits, step: &str, name: &CellName) -> Result<()> {
     // Name bytes are validated once, within execution. CellValue is already a
     // canonical typed value; construction/transport decoding is host work.
     limits

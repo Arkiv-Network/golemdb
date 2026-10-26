@@ -6,9 +6,9 @@
 //! Prospective mutations stay separate until [`WriteMeter::finish`] approves the
 //! whole cost. A failure reports only planning work charged so far.
 //!
-//! Record execution will supply these logical steps in iteration 4. Public CRUD
-//! calls still return zero cost until that integration and production scheduling
-//! are enabled. Read-call pricing, genesis persistence and model activation are
+//! Record planning supplies these logical steps directly. Public write calls
+//! use [`Schedule::zero_write`] and return full ledgers with zero cost until
+//! persisted scheduling is connected in iterations 5/6. Read-call pricing and model activation are
 //! outside this crate's current execution scope.
 
 mod budget;

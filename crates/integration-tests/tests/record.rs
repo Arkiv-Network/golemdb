@@ -1,16 +1,32 @@
 use golemdb_api::Budget;
 use golemdb_branch::{BranchError, Branches};
 use golemdb_cells::{
-    CellChange, CellKey, CellName, CellNameRef, CellType, CellValue, CellValueRef, Cells, Width,
-    reserved, system,
+    CellChange, CellKey, CellLimits, CellName, CellNameRef, CellType, CellValue, CellValueRef,
+    Cells, Width, reserved, system,
 };
 use golemdb_index::{Index, IndexTerm};
 use golemdb_merkle::{Keccak256Hasher, RootRef};
-use golemdb_record::{CellPatch, ReadTarget, RecordCells, RecordError, RecordKey, Records};
+use golemdb_record::{
+    CellPatch, ReadTarget, RecordCells, RecordError, RecordKey, RecordLimits, Records, WritePricing,
+};
 use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
 const OTHER: RecordKey = RecordKey([0x43; 32]);
+
+fn zero_pricing() -> WritePricing {
+    WritePricing::zero(
+        CellLimits {
+            max_cell_name_len: 32,
+            max_str_len: 64,
+            max_bytes_len: 128,
+        },
+        RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
+    )
+}
 
 fn name(bytes: &[u8]) -> CellName {
     CellNameRef::raw(bytes).into()
@@ -115,7 +131,7 @@ fn id<S: Store>(
 fn lifecycle(db: impl Store + Clone) {
     initialize(&db);
     let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
-    let records = Records::new(branches.clone());
+    let records = Records::new(branches.clone(), zero_pricing());
     let b = branches.begin().unwrap();
     let competitor = branches.begin().unwrap();
     records
@@ -261,7 +277,7 @@ fn lifecycle(db: impl Store + Clone) {
     );
     drop(tx);
     let reopened = Branches::new(db, Keccak256Hasher, None).unwrap();
-    let records = Records::new(reopened.clone());
+    let records = Records::new(reopened.clone(), zero_pricing());
     let b = reopened.begin().unwrap();
     assert_eq!(allocated(&reopened, b), 66);
     assert_eq!(id(&reopened, b, KEY), 65);
@@ -313,7 +329,7 @@ fn mdbx_commit_and_database_reopen() {
     lifecycle(golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap());
     let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
     let branches = Branches::new(db, Keccak256Hasher, None).unwrap();
-    let records = Records::new(branches.clone());
+    let records = Records::new(branches.clone(), zero_pricing());
     let b = branches.begin().unwrap();
     assert_eq!(allocated(&branches, b), 66);
     assert!(matches!(

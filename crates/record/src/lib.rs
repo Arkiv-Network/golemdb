@@ -17,8 +17,9 @@
 //! starting at [`golemdb_cells::system::FIRST_USER_RECORD_ID`]. These system
 //! cells are non-indexed. Initialize the cell trie and head consistently and
 //! validate configured limits against the storage backend's physical ceilings.
-//! No YAML loading, genesis writes, local parameter defaults, or parameter
-//! cache lives here.
+//! The caller supplies matching immutable limits and a schedule through
+//! [`WritePricing`]. No YAML loading, genesis writes or local limit defaults
+//! live here; admission does not reread parameters from the branch.
 //!
 //! User records carry a [`RecordMeta`] bytes32 field. Counts come from the same
 //! effects as receipts and are updated atomically. Reads return stored cells
@@ -28,7 +29,9 @@
 //! Every CRUD operation requires an explicit [`golemdb_metering::Budget`] and
 //! returns an [`Outcome`] with execution context and actual user effects for
 //! API receipts. Outcomes can carry the meter's cost and ledger, including on
-//! failure; connecting actual CRUD planning to pricing remains deferred.
+//! failure. CUD always uses [`golemdb_metering::WriteMeter`] through a shared
+//! admission/plan/approve/apply path. [`WritePricing::zero`] keeps writes free
+//! while recording full ledgers; persisted schedules remain iterations 5/6.
 //! [`ReadTarget::Head`] selects and reads the current head in one snapshot.
 //! Commit-targeted reads support the head only and explicitly reject other
 //! commits until history is available. Deletes enumerate and tombstone every
@@ -39,14 +42,14 @@
 //! use golemdb_cells::{CellKind, CellNameRef, CellValue};
 //! use golemdb_merkle::HashProvider;
 //! use golemdb_metering::Budget;
-//! use golemdb_record::{CreateEntry, ReadTarget, RecordKey, Records};
+//! use golemdb_record::{CreateEntry, ReadTarget, RecordKey, Records, WritePricing};
 //! use golemdb_storage::Store;
 //!
-//! // The connection layer has already initialized the store and parameters.
-//! fn example<S: Store, H: HashProvider>(branches: Branches<S, H>)
+//! // The connection layer initialized the store and supplied matching pricing/limits.
+//! fn example<S: Store, H: HashProvider>(branches: Branches<S, H>, pricing: WritePricing)
 //!     -> Result<(), Box<dyn std::error::Error>>
 //! {
-//!     let records = Records::new(branches.clone());
+//!     let records = Records::new(branches.clone(), pricing);
 //!     let branch = branches.begin()?;
 //!     let key = RecordKey([7; 32]);
 //!     let entries = vec![CreateEntry {
@@ -69,6 +72,8 @@ mod crud;
 mod error;
 mod meta;
 mod outcome;
+mod plan;
+mod pricing;
 mod state;
 mod types;
 
@@ -77,6 +82,7 @@ pub use crud::Records;
 pub use error::{RecordError, Result};
 pub use meta::{RecordLimits, RecordMeta};
 pub use outcome::{Effects, Outcome, cell_size, index_size};
+pub use pricing::WritePricing;
 pub use types::{
     CellPatch, CreateEntry, PatchChange, PatchEntry, ReadTarget, Record, RecordCells, RecordKey,
     RecordPatch,
@@ -89,3 +95,7 @@ mod crud_tests;
 #[cfg(test)]
 #[path = "tests/atomicity.rs"]
 mod atomicity_tests;
+
+#[cfg(test)]
+#[path = "tests/metering.rs"]
+mod metering_tests;

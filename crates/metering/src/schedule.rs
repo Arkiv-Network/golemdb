@@ -34,6 +34,40 @@ pub enum PricingError {
 }
 
 impl Schedule {
+    /// Explicit free prices for every weight used by the current write model,
+    /// including its planning reads. Missing/custom weights stay absent.
+    pub fn zero_write() -> Self {
+        use WeightName as W;
+
+        Self {
+            code_version: WRITE_CODE_VERSION,
+            weights: [
+                W::WRITE_ADMISSION_BASE,
+                W::WRITE_ADMISSION_ENTRY,
+                W::WRITE_ADMISSION_BYTE,
+                W::WRITE_RECORD_CREATE,
+                W::WRITE_RECORD_PATCH,
+                W::WRITE_RECORD_DELETE,
+                W::WRITE_CELL_CREATE,
+                W::WRITE_CELL_UPDATE,
+                W::WRITE_CELL_DELETE,
+                W::WRITE_CELL_TRIE_UPDATE,
+                W::WRITE_CELL_BYTE,
+                W::WRITE_INDEX_JOIN,
+                W::WRITE_INDEX_LEAVE,
+                W::WRITE_INDEX_TERM_CREATE,
+                W::WRITE_INDEX_TRIE_UPDATE,
+                W::WRITE_INDEX_BYTE,
+                W::READ_KEY,
+                W::READ_CELL,
+                W::READ_TERM,
+            ]
+            .into_iter()
+            .map(|name| (name, 0))
+            .collect(),
+        }
+    }
+
     pub fn new(
         code_version: u64,
         weights: impl IntoIterator<Item = (WeightName, u64)>,
@@ -93,7 +127,55 @@ impl Schedule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Budget, INITIAL_DEPTHS, PlanningStep, WeightName as W, WriteMeter};
+    use crate::{
+        Budget, INITIAL_DEPTHS, MutationCharge, PlanningStep, RecordOpKind, WeightName as W,
+        WriteMeter,
+    };
+
+    #[test]
+    fn zero_write_prices_every_supported_step_and_mutation_without_hiding_missing_weights() {
+        let schedule = Schedule::zero_write();
+        let mut meter = WriteMeter::new(&schedule, INITIAL_DEPTHS, Budget::Limited(0));
+        for step in [
+            PlanningStep::AdmissionBase,
+            PlanningStep::AdmissionEntry,
+            PlanningStep::AdmissionBytes(10),
+            PlanningStep::RecordBase(RecordOpKind::Create),
+            PlanningStep::RecordBase(RecordOpKind::Patch),
+            PlanningStep::RecordBase(RecordOpKind::Delete),
+            PlanningStep::CellRead,
+            PlanningStep::TermRead,
+        ] {
+            meter.run_step(step, || ()).unwrap();
+        }
+        for mutation in [
+            MutationCharge::CellCreate { bytes_written: 10 },
+            MutationCharge::CellUpdate { bytes_written: 20 },
+            MutationCharge::CellDelete,
+            MutationCharge::IndexJoin {
+                bytes_written: 5,
+                create_term: false,
+            },
+            MutationCharge::IndexJoin {
+                bytes_written: 6,
+                create_term: true,
+            },
+            MutationCharge::IndexLeave,
+        ] {
+            meter.add_planned_mutation(mutation).unwrap();
+        }
+        let accounting = meter.finish().unwrap();
+        assert_eq!(accounting.cost, 0);
+        assert_eq!(accounting.ledger.iter().count(), schedule.weights().count());
+        assert_eq!(accounting.ledger.count("read.key"), 3);
+        assert_eq!(accounting.ledger.count("write.cell_byte"), 30);
+        assert_eq!(accounting.ledger.count("write.index_term_create"), 1);
+        assert_eq!(schedule.weight("host.custom"), None);
+        assert!(matches!(
+            schedule.price(&Ledger::from_counts([(WeightName::from("host.custom"), 1)])),
+            Err(PricingError::Unpriced(_))
+        ));
+    }
 
     #[test]
     fn rejects_unsupported_code_and_duplicate_names_instead_of_selecting_a_value() {

@@ -10,7 +10,7 @@ use crate::{
 mod reader;
 mod writer;
 
-pub use reader::TermScan;
+pub use reader::{TermScan, term_exists};
 pub use writer::{IndexUpdate, PostingChange, TermRootChange};
 
 /// Index operations over caller-owned transactions. Use the same hash provider

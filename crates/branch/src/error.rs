@@ -2,6 +2,8 @@
 /// moving through frames, or publishing a branch.
 #[derive(Debug, thiserror::Error)]
 pub enum BranchError {
+    #[error("invalid branch scan state: {0}")]
+    InvalidScanState(&'static str),
     #[error("branch ID is unknown, discarded, or no longer over the head")]
     HandleInvalid,
     #[error("branch origin is no longer the head; commit lost the publication race")]

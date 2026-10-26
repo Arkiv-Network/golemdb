@@ -100,9 +100,9 @@ patch actions. Reads expose the original projection through `names()`.
 
 The API transfers these record-owned entries and the budget to execution without
 building a second validated map. The private record admission module prepares that
-map. Metering will check each admission charge before the corresponding work;
-validation that rejects input must still record its charge before returning the
-error. Charging and total request-size/count caps remain planned work. Typed value
+map. Metering checks each admission charge before the corresponding work;
+validation that rejects input records its units before returning the error.
+Writes currently use explicit zero weights. Typed value
 construction, input allocation and transport decoding remain host responsibilities.
 
 ## Receipts and budgets
@@ -120,16 +120,22 @@ no-ops, failed writes and reads. Rollback does not revoke earlier receipts.
 `receipt.ledger` contains charged units per weight name, in name order. It is
 separate from `details`: admission, reads and system mutations can be charged
 without changing user data. `Ledger` and `WeightName` are re-exported by the API.
-The standalone metering core now calculates costs and ledgers; database calls
-still return an empty ledger until their planner is connected to it. Outcome-to-API
-conversion already forwards accounting on both success and failure.
+Record CUD uses admission, planning, approval and application through `WriteMeter`.
+Database construction supplies explicit zero weights and validated genesis limits;
+write ledgers record performed planning and, on success, approved mutations.
+Missing weights remain errors, not implicit zeros. Persisted schedules remain
+iterations 5/6. Outcome-to-API conversion forwards accounting on both success and
+failure. Write admission enforces genesis-configured cell lengths;
+planning enforces the resulting per-record cell caps. There are no additional
+request-entry or total-input-byte caps.
 
 Every request constructor requires `Budget::Limited(n)` or `Budget::Unlimited`:
 `RecordOp::create(key, budget)`, `patch(key, budget)`, `get(key, budget)`,
 `delete(key, budget)`, `QueryOp::from_filter(filter, budget)` and
-`CountOp::filter(filter, budget)`. Budgets are stored but **not enforced** yet,
-including a zero budget. `OutOfBudget { required }` is defined for later enforcement
-and is never returned in this increment. Unlimited use is an explicit host decision.
+`CountOp::filter(filter, budget)`. Write budgets are checked against the zero-weight
+schedule, so even a zero budget funds valid writes. Read budgets remain unenforced
+and read ledgers empty. `OutOfBudget { required }` is used by the write meter for
+unfunded work; zero prices do not exhaust a budget. Unlimited use is an explicit host decision.
 
 `ReadTarget::Branch(id)` reads work in progress. `ReadTarget::Head` resolves head
 and reads the record in one storage snapshot. `ReadTarget::Commit(id)` currently

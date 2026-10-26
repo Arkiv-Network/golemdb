@@ -1,8 +1,10 @@
-use crate::{CellPatch, ReadTarget, RecordCells, RecordError, RecordKey, Records};
+use crate::{
+    CellPatch, ReadTarget, RecordCells, RecordError, RecordKey, RecordLimits, Records, WritePricing,
+};
 use golemdb_branch::Branches;
 use golemdb_cells::{
-    CellChange, CellKey, CellName, CellNameRef, CellType, CellValue, CellValueRef, Cells, Width,
-    reserved, system,
+    CellChange, CellKey, CellLimits, CellName, CellNameRef, CellType, CellValue, CellValueRef,
+    Cells, Width, reserved, system,
 };
 use golemdb_merkle::{Keccak256Hasher, RootRef};
 use golemdb_metering::Budget;
@@ -74,7 +76,7 @@ fn head_selection_and_record_read_share_one_snapshot() {
         None,
     )
     .unwrap();
-    let reader = Records::new(reader_branches.clone());
+    let reader = Records::new(reader_branches.clone(), zero_pricing());
     let writer = branches.clone();
     *reader_branches.store().after_snapshot.lock().unwrap() = Some(Box::new(move || {
         writer.commit(next).unwrap();
@@ -186,6 +188,20 @@ fn initialize(db: &impl Store) {
     tx.commit().unwrap();
 }
 
+pub(super) fn zero_pricing() -> WritePricing {
+    WritePricing::zero(
+        CellLimits {
+            max_cell_name_len: 32,
+            max_str_len: 64,
+            max_bytes_len: 128,
+        },
+        RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
+    )
+}
+
 pub(super) fn setup() -> (
     MemoryStore,
     Branches<MemoryStore, Keccak256Hasher>,
@@ -194,7 +210,7 @@ pub(super) fn setup() -> (
     let db = MemoryStore::new();
     initialize(&db);
     let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
-    let records = Records::new(branches.clone());
+    let records = Records::new(branches.clone(), zero_pricing());
     (db, branches, records)
 }
 fn snapshot<S: Store>(
@@ -708,18 +724,6 @@ fn corrupt_system_state_never_defaults_or_overwrites_records() {
         Err(RecordError::CorruptState(_))
     ));
     assert_eq!(snapshot(&branches, b), before);
-    branches
-        .write(b, |cell_writer| {
-            cell_writer.delete(CellKey::new(system::PARAMS.id, reserved::MAX_STR_LEN));
-            Ok::<_, RecordError>(())
-        })
-        .unwrap();
-    assert!(matches!(
-        records
-            .create(b, OTHER, create_entries(values("x")), Budget::Unlimited)
-            .result,
-        Err(RecordError::CorruptState(_))
-    ));
 }
 
 #[test]

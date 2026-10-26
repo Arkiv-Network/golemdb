@@ -9,6 +9,17 @@ use crate::{
     bitmap_trie::BitmapTrie, index_trie::decode_root, tables,
 };
 
+/// One flat-table lookup, without loading a posting list or traversing a trie.
+/// Validate the encoded root locator without following it. Presence is sufficient
+/// for creation pricing; checking the referenced data remains the responsibility
+/// of index readers/writers that consume the root.
+pub fn term_exists(tx: &impl ReadTransaction, term: &IndexTerm) -> Result<bool> {
+    match tx.get(tables::INDEX, term.as_bytes())? {
+        None => Ok(false),
+        Some(root) => decode_root(&root).map(|_| true),
+    }
+}
+
 impl<H: HashProvider> Index<'_, H> {
     /// Validate a stored root, such as one read from `Roots`. Empty/singleton
     /// roots are checked against the flat table from this snapshot. This does
@@ -96,3 +107,49 @@ impl<C: ReadCursor> Iterator for TermScan<C> {
 }
 
 impl<C: ReadCursor> FusedIterator for TermScan<C> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use golemdb_cells::CellType;
+    use golemdb_merkle::{BranchRef, LeafRef};
+    use golemdb_storage::{MemoryStore, Store, WriteTransaction};
+
+    #[test]
+    fn term_presence_accepts_root_locators_without_loading_postings() {
+        let store = MemoryStore::new();
+        let mut tx = store.begin_write().unwrap();
+        let term = IndexTerm::new("active", CellType::Bool, &[1]).unwrap();
+        assert!(!term_exists(&tx, &term).unwrap());
+
+        // No referenced trie rows or containers exist: presence checks only
+        // decode the flat Index row, including its commit and singleton path.
+        for root in [
+            RootRef::<BITMAP_TRIE_PATH_BYTES>::Branch(BranchRef {
+                hash: [1; 32],
+                commit: 42,
+            }),
+            RootRef::Leaf(LeafRef {
+                path: [0; BITMAP_TRIE_PATH_BYTES],
+                hash: [2; 32],
+                commit: 43,
+            }),
+        ] {
+            tx.put(tables::INDEX, term.as_bytes(), &root.encode())
+                .unwrap();
+            assert!(term_exists(&tx, &term).unwrap());
+        }
+
+        // An empty root and the old hash-only representation are invalid rows.
+        for bytes in [
+            RootRef::<BITMAP_TRIE_PATH_BYTES>::Empty.encode(),
+            vec![1; 32],
+        ] {
+            tx.put(tables::INDEX, term.as_bytes(), &bytes).unwrap();
+            assert!(matches!(
+                term_exists(&tx, &term),
+                Err(crate::IndexError::Corruption(_))
+            ));
+        }
+    }
+}

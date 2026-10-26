@@ -1,11 +1,13 @@
 use golemdb_cells::{CellKey, CellValue};
 
+use crate::record_scan::{OriginPosition, ScanIndex};
 use crate::{BranchError, Result, overlay::Entries};
 
 struct UndoEntry {
     key: CellKey,
     // None restores fall-through. Some(None) restores a tombstone.
     previous: Option<Option<CellValue>>,
+    previous_position: Option<OriginPosition>,
 }
 
 /// State to restore if an atomic write group fails. Writes can reactivate the
@@ -50,13 +52,26 @@ impl Journal {
     /// Apply a write and record its inverse, reusing the current frame after
     /// rollback. An explicit no-op write also reactivates the frame, without
     /// adding an unnecessary undo entry.
-    pub(crate) fn record(&mut self, entries: &mut Entries, key: CellKey, value: Option<CellValue>) {
+    pub(crate) fn record(
+        &mut self,
+        entries: &mut Entries,
+        scan_index: &mut ScanIndex,
+        key: CellKey,
+        value: Option<CellValue>,
+        position: Option<OriginPosition>,
+    ) {
         self.rolled_back = false;
         if entries.get(&key) == Some(&value) {
             return;
         }
+        let previous_position = scan_index.position(&key);
+        scan_index.update(&key, Some(&value), position);
         let previous = entries.insert(key.clone(), value);
-        self.undo.push(UndoEntry { key, previous });
+        self.undo.push(UndoEntry {
+            key,
+            previous,
+            previous_position,
+        });
     }
 
     pub(crate) fn checkpoint(&mut self) {
@@ -68,7 +83,11 @@ impl Journal {
         self.rolled_back = false;
     }
 
-    pub(crate) fn rollback(&mut self, entries: &mut Entries) -> Result<()> {
+    pub(crate) fn rollback(
+        &mut self,
+        entries: &mut Entries,
+        scan_index: &mut ScanIndex,
+    ) -> Result<()> {
         if self.rolled_back {
             if self.frames.len() == 1 {
                 return Err(BranchError::NoFrameToRollback);
@@ -76,19 +95,29 @@ impl Journal {
             self.frames.pop();
         }
         let mark = *self.frames.last().unwrap();
-        self.undo_to(entries, mark);
+        self.undo_to(entries, scan_index, mark);
         self.rolled_back = true;
         Ok(())
     }
 
-    pub(crate) fn rewind(&mut self, entries: &mut Entries, mark: WriteMark) {
-        self.undo_to(entries, mark.undo_len);
+    pub(crate) fn rewind(
+        &mut self,
+        entries: &mut Entries,
+        scan_index: &mut ScanIndex,
+        mark: WriteMark,
+    ) {
+        self.undo_to(entries, scan_index, mark.undo_len);
         self.rolled_back = mark.rolled_back;
     }
 
-    fn undo_to(&mut self, entries: &mut Entries, mark: usize) {
+    fn undo_to(&mut self, entries: &mut Entries, scan_index: &mut ScanIndex, mark: usize) {
         while self.undo.len() > mark {
-            let UndoEntry { key, previous } = self.undo.pop().unwrap();
+            let UndoEntry {
+                key,
+                previous,
+                previous_position,
+            } = self.undo.pop().unwrap();
+            scan_index.update(&key, previous.as_ref(), previous_position);
             match previous {
                 Some(value) => {
                     entries.insert(key, value);

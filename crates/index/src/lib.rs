@@ -59,7 +59,7 @@ mod term_range;
 pub use bitmap::Bitmap;
 pub use container::BitmapContainer;
 pub use error::{BitmapError, IndexError, Result};
-pub use index::{Index, IndexUpdate, PostingChange, TermRootChange, TermScan};
+pub use index::{Index, IndexUpdate, PostingChange, TermRootChange, TermScan, term_exists};
 pub use term::{IndexTerm, TermError};
 pub use term_range::{RangeError, TermRange};
 

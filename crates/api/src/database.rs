@@ -6,7 +6,7 @@ use golemdb_branch::{Branches, read_head};
 use golemdb_immutable_data::{ImmutableDataReader, ImmutableDataStorage};
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher};
 use golemdb_query::Queries;
-use golemdb_record::Records;
+use golemdb_record::{Records, WritePricing};
 use golemdb_storage::Store;
 
 use crate::{
@@ -108,11 +108,14 @@ impl Database {
                 None => ImmutableDataStorage::in_memory(config.clone(), info.genesis_id),
             })
             .transpose()?;
+        let pricing = WritePricing::zero(genesis.cell_limits, genesis.record_limits);
         let inner: Arc<dyn Api + Send + Sync> = match genesis.hash_function {
             HashAlgorithm::Keccak256 => {
-                Arc::new(Inner::new(store, Keccak256Hasher, immutable_data)?)
+                Arc::new(Inner::new(store, Keccak256Hasher, immutable_data, pricing)?)
             }
-            HashAlgorithm::Blake3 => Arc::new(Inner::new(store, Blake3Hasher, immutable_data)?),
+            HashAlgorithm::Blake3 => {
+                Arc::new(Inner::new(store, Blake3Hasher, immutable_data, pricing)?)
+            }
         };
         Ok(Self {
             inner,
@@ -229,11 +232,16 @@ struct Inner<S, H> {
 }
 
 impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
-    fn new(store: S, hasher: H, immutable_data: Option<ImmutableDataStorage>) -> OpenResult<Self> {
+    fn new(
+        store: S,
+        hasher: H,
+        immutable_data: Option<ImmutableDataStorage>,
+        pricing: WritePricing,
+    ) -> OpenResult<Self> {
         let immutable_reader = immutable_data.as_ref().map(ImmutableDataStorage::reader);
         // Recover before exposing the reader through the completed database handle.
         let branches = Branches::new(store.clone(), hasher.clone(), immutable_data)?;
-        let records = Records::new(branches.clone());
+        let records = Records::new(branches.clone(), pricing);
         let queries = Queries::new(
             store.clone(),
             hasher,
