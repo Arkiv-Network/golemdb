@@ -92,18 +92,18 @@ fn reject_noncanonical_and_malformed_storage() {
 #[test]
 fn container_mutations_and_empty_policy() {
     let mut container = BitmapContainer::empty(1).unwrap();
-    let mut bytes = vec![123];
     assert!(matches!(
-        container.encode_into(&mut bytes),
+        container.canonical_bytes(),
         Err(BitmapError::EmptyContainer)
     ));
-    assert_eq!(bytes, [123]);
     assert!(container.insert(42));
     assert!(!container.insert(42));
-    assert_eq!(container.iter().collect::<Vec<_>>(), [65536 + 42]);
+    assert_eq!(
+        container.iter().collect::<Vec<_>>(),
+        [(1 << crate::CHUNK_BITS) + 42]
+    );
     let first = container.canonical_bytes().unwrap();
-    container.encode_into(&mut bytes).unwrap();
-    assert_eq!(&bytes[1..], first);
+    assert_eq!(first[crate::HI48_BYTES..], container.value_bytes().unwrap());
     assert!(container.remove(42));
     assert!(!container.remove(42));
     assert!(container.is_empty());
@@ -262,27 +262,4 @@ proptest! {
         prop_assert_eq!(reverse.canonical_bytes().unwrap(), bytes.clone());
         prop_assert_eq!(BitmapContainer::decode(&bytes).unwrap(), forward);
     }
-}
-
-#[test]
-fn bitmap_trie_rejects_containers_out_of_order() {
-    let db = golemdb_storage::MemoryStore::new();
-    let mut tx = golemdb_storage::Store::begin_write(&db).unwrap();
-    let trie = crate::bitmap_trie::BitmapTrie::new(&golemdb_merkle::Keccak256Hasher, &[0; 32]);
-    // Batching reads every container from the original root, so a container
-    // visited twice would lose its first changes.
-    assert!(matches!(
-        trie.apply(&mut tx, 0, None, [(1, 0, true), (0, 0, true)]),
-        Err(crate::IndexError::Bitmap(BitmapError::UnsortedPaths {
-            previous: 1,
-            path: 0
-        }))
-    ));
-    assert!(matches!(
-        trie.apply(&mut tx, 0, None, [(1, 0, true), (2, 0, true), (1, 1, true)]),
-        Err(crate::IndexError::Bitmap(BitmapError::UnsortedPaths {
-            previous: 2,
-            path: 1
-        }))
-    ));
 }

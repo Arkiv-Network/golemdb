@@ -1,40 +1,64 @@
-use crate::index_trie::decode_root;
-use crate::{BITMAP_TRIE_PATH_BYTES, IndexError};
-use golemdb_merkle::{BRANCH_ROOT_BYTES, BranchRef, HASH_BYTES, Keccak256Hasher, LeafRef, RootRef};
+use std::ops::RangeBounds;
 
-const HASH: Keccak256Hasher = Keccak256Hasher;
+use golemdb_cells::CellType;
+use proptest::prelude::*;
+
+use crate::index_trie::{row_container, row_key, trie_path};
+use crate::{HI48_BYTES, INDEX_TRIE_PATH_BYTES, IndexTerm, TermRange};
 
 #[test]
-fn index_row_locates_branch_and_singleton_roots() {
-    let branch = RootRef::<BITMAP_TRIE_PATH_BYTES>::Branch(BranchRef {
-        hash: [1; 32],
-        commit: 0x0102_0304_0506_0708,
-    });
-    let singleton = RootRef::Leaf(LeafRef {
-        path: [9, 8, 7, 6, 5, 4],
-        hash: [2; 32],
-        commit: 42,
-    });
-    let bytes = branch.encode();
-    assert_eq!(bytes.len(), BRANCH_ROOT_BYTES);
-    assert_eq!(bytes[HASH_BYTES..], 0x0102_0304_0506_0708u64.to_be_bytes());
-    assert_eq!(decode_root(&bytes).unwrap(), branch);
-    let bytes = singleton.encode();
-    assert_eq!(bytes.len(), BRANCH_ROOT_BYTES + BITMAP_TRIE_PATH_BYTES);
-    assert_eq!(bytes[BRANCH_ROOT_BYTES..], [9, 8, 7, 6, 5, 4]);
-    assert_eq!(decode_root(&bytes).unwrap(), singleton);
-    // The committed hash comes first, whatever the location says.
-    assert_eq!(decode_root(&bytes).unwrap().hash(&HASH), [2; 32]);
+fn container_trie_paths_are_the_term_path_then_the_container_path() {
+    let path = trie_path(&[7; 32], 0x0102_0304).unwrap();
+    assert_eq!(path.len(), INDEX_TRIE_PATH_BYTES);
+    assert_eq!(path[..32], [7; 32]);
+    assert_eq!(path[32..].len(), HI48_BYTES);
+    assert!(trie_path(&[0; 32], u64::MAX).is_err());
+    let key = row_key(b"term", 0x0102_0304).unwrap();
+    assert_eq!(key[4..], path[32..]);
+    assert_eq!(row_container(&key[4..]).unwrap(), 0x0102_0304);
+    assert!(row_container(&[0; 2]).is_err());
+}
+
+fn str_term(value: &[u8]) -> IndexTerm {
+    IndexTerm::new("s", CellType::Str, value).unwrap()
 }
 
 #[test]
-fn malformed_index_rows_are_corruption() {
-    let good = RootRef::<BITMAP_TRIE_PATH_BYTES>::Leaf(LeafRef::new([0; 6], [3; 32])).encode();
-    for len in [0, 32, 39, 41, 45, 47, 72] {
-        let bytes: Vec<u8> = good.iter().copied().cycle().take(len).collect();
-        assert!(matches!(
-            decode_root(&bytes),
-            Err(IndexError::Corruption(_))
-        ));
+fn string_keys_escape_zeros_and_end_with_a_terminator() {
+    let prefix = IndexTerm::prefix("s", CellType::Str).unwrap();
+    let key = str_term(b"a\0b").key();
+    assert_eq!(key, [&prefix[..], b"a\0\xffb\0\x01"].concat());
+    let fixed = IndexTerm::new("n", CellType::Uint(golemdb_cells::Width::W8), &[0; 8]);
+    let fixed = fixed.unwrap();
+    assert_eq!(fixed.key(), fixed.as_bytes());
+    for tail in [&b""[..], b"a", b"a\0", b"a\0\x02"] {
+        let bad = [&prefix[..], tail].concat();
+        assert!(IndexTerm::split_key(&bad).is_err(), "{bad:?}");
+    }
+    assert!(IndexTerm::split_key(b"s").is_err());
+    assert!(IndexTerm::split_key(b"s\0").is_err());
+}
+
+proptest! {
+    #[test]
+    fn container_keys_keep_term_order_and_split_back(
+        a in prop::collection::vec(prop::sample::select(&[0u8, 1, b'a', b'b'][..]), 0..5),
+        b in prop::collection::vec(prop::sample::select(&[0u8, 1, b'a', b'b'][..]), 0..5),
+        ha in 0u64..4, hb in 0u64..4,
+    ) {
+        let (ta, tb) = (str_term(&a), str_term(&b));
+        let (ka, kb) = (row_key(&ta.key(), ha).unwrap(), row_key(&tb.key(), hb).unwrap());
+        // Containers of a term are contiguous, ordered by term, then path.
+        prop_assert_eq!(ka.cmp(&kb), (&ta, ha).cmp(&(&tb, hb)));
+        let (term, rest) = IndexTerm::split_key(&ka).unwrap();
+        prop_assert_eq!(term, ta.clone());
+        prop_assert_eq!(row_container(rest).unwrap(), ha);
+        // Every key-space range holds exactly the containers of its terms.
+        let prefix = String::from_utf8_lossy(&b).into_owned();
+        if prefix.as_bytes() == b.as_slice() {
+            let range = TermRange::with_prefix(golemdb_cells::CellNameRef::raw(b"s"), &prefix).unwrap();
+            let (lower, upper) = range.into_key_bounds();
+            prop_assert_eq!((lower, upper).contains(&ka), a.starts_with(&b));
+        }
     }
 }

@@ -14,7 +14,7 @@ pub enum IndexError {
     Term(#[from] crate::TermError),
     #[error("corrupt index: {0}")]
     Corruption(&'static str),
-    #[error("index root disagrees with the flat term table")]
+    #[error("index root disagrees with the container table")]
     RootMismatch,
 }
 
@@ -33,14 +33,18 @@ pub enum BitmapError {
 impl fmt::Display for BitmapError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PathOutOfRange { path } => write!(f, "bitmap path {path} exceeds 48 bits"),
-            Self::OffsetOutOfRange { value } => write!(f, "bitmap offset {value} exceeds 16 bits"),
+            Self::PathOutOfRange { path } => {
+                write!(f, "bitmap path {path} exceeds 48 bits")
+            }
+            Self::OffsetOutOfRange { value } => {
+                write!(f, "bitmap offset {value} exceeds the container width")
+            }
             Self::DuplicatePath { path } => write!(f, "duplicate bitmap path {path}"),
             Self::UnsortedPaths { previous, path } => {
                 write!(f, "bitmap path {path} follows larger path {previous}")
             }
             Self::EmptyContainer => f.write_str("empty containers have no persisted encoding"),
-            Self::TruncatedPath => f.write_str("container is missing its six-byte path"),
+            Self::TruncatedPath => f.write_str("container is missing its path"),
             Self::NonCanonicalEncoding => f.write_str("noncanonical container encoding"),
             Self::Decode(source) => write!(f, "invalid Roaring container: {source}"),
         }

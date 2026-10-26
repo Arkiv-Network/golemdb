@@ -3,10 +3,8 @@ use golemdb_cells::{
     CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, tables,
 };
 use golemdb_index::{Index, IndexTerm, PostingChange};
-use golemdb_merkle::{
-    BRANCH_ROOT_BYTES, Blake3Hasher, HASH_BYTES, HashProvider, Keccak256Hasher, RootRef,
-};
-use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
+use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher, RootRef};
+use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction, scan_prefix};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -16,13 +14,11 @@ use std::{
 };
 
 const SUPERBLOCK: Table = Table("Superblock");
-const TABLES: [Table; 8] = [
+const TABLES: [Table; 6] = [
     tables::CELL,
     tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX,
     golemdb_index::tables::INDEX_TRIE.table(),
-    golemdb_index::tables::BITMAP_TRIE.table(),
-    golemdb_index::tables::BITMAP_CONTAINER.table(),
     SUPERBLOCK,
     Table("Roots"),
 ];
@@ -40,7 +36,7 @@ fn head(
     hash: &impl HashProvider,
     id: u64,
     state: RootRef<32>,
-    index: RootRef<32>,
+    index: RootRef<{ golemdb_index::INDEX_TRIE_PATH_BYTES }>,
 ) {
     let roots = golemdb_branch::Roots { state, index };
     golemdb_branch::write_head(tx, golemdb_branch::CommitId::new(id), &roots, hash).unwrap();
@@ -236,6 +232,13 @@ fn compare_with_rebuild(db: impl Store + Clone + 'static, hash: impl HashProvide
     ));
 }
 
+fn table_rows(tx: &impl golemdb_storage::ReadTransaction, table: Table) -> Vec<(Vec<u8>, Vec<u8>)> {
+    scan_prefix(tx, table, vec![])
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 fn verify_rebuild(
     db: &impl Store,
     expected: &MemoryStore,
@@ -255,34 +258,11 @@ fn verify_rebuild(
     Index::new(hash)
         .validate_root(&tx, sealed.index.root)
         .unwrap();
-    // Index rows hold `hash ‖ commit [‖ singleton path]`. Only the commit that
-    // stored each bitmap root differs from the rebuilt store, and it is never
-    // later than the sealed commit.
-    fn without_commit(
-        tx: &impl ReadTransaction,
-        table: Table,
-        commit: u64,
-    ) -> Vec<(Vec<u8>, Vec<u8>)> {
-        scan_prefix(tx, table, vec![])
-            .unwrap()
-            .map(|row| {
-                let (key, mut value) = row.unwrap();
-                if table == golemdb_index::tables::INDEX {
-                    let field = HASH_BYTES..BRANCH_ROOT_BYTES;
-                    let stored = u64::from_be_bytes(value[field.clone()].try_into().unwrap());
-                    assert!(stored <= commit);
-                    value.drain(field);
-                }
-                (key, value)
-            })
-            .collect()
-    }
-    let commit = sealed.commit_id.get();
+    // Live rows match the rebuilt store exactly; only trie rows carry commits.
     for table in [tables::CELL, golemdb_index::tables::INDEX] {
-        let expected_tx = expected.begin_read().unwrap();
         assert_eq!(
-            without_commit(&tx, table, commit),
-            without_commit(&expected_tx, table, commit)
+            table_rows(&tx, table),
+            table_rows(&expected.begin_read().unwrap(), table)
         );
     }
     let term = IndexTerm::new("name", CellType::Str, b"old").unwrap();
@@ -355,9 +335,7 @@ impl<R: golemdb_storage::ReadTransaction> golemdb_storage::ReadTransaction for F
     where
         Self: 'a;
     fn get(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Option<Vec<u8>>> {
-        if table == golemdb_index::tables::BITMAP_CONTAINER.table()
-            && self.fail.load(Ordering::Relaxed)
-        {
+        if table == golemdb_index::tables::INDEX && self.fail.load(Ordering::Relaxed) {
             return Err(golemdb_storage::StorageError::Backend(
                 "injected bitmap read failure".into(),
             ));

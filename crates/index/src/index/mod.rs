@@ -1,21 +1,16 @@
-use golemdb_merkle::{HashProvider, RootRef};
-use golemdb_storage::ReadTransaction;
+use golemdb_merkle::HashProvider;
 
-use crate::{
-    BITMAP_TRIE_PATH_BYTES, IndexTerm, Result,
-    index_trie::{IndexTrie, decode_root},
-    tables,
-};
+use crate::index_trie::IndexTrie;
 
 mod reader;
 mod writer;
 
 pub use reader::TermScan;
-pub use writer::{IndexUpdate, PostingChange, TermRootChange};
+pub use writer::{IndexUpdate, PostingChange, TermChange};
 
 /// Index operations over caller-owned transactions. Use the same hash provider
-/// and snapshot for the flat table, both tries, and the supplied root. Errors
-/// during `apply` require aborting the transaction. Publish roots only on commit.
+/// and snapshot for the tables, the trie, and the supplied root. Errors during
+/// `apply` require aborting the transaction. Publish roots only on commit.
 pub struct Index<'h, H: HashProvider> {
     hasher: &'h H,
     trie: IndexTrie<'h, H>,
@@ -27,15 +22,5 @@ impl<'h, H: HashProvider> Index<'h, H> {
             hasher,
             trie: IndexTrie::new(hasher),
         }
-    }
-
-    fn bitmap_root(
-        &self,
-        tx: &impl ReadTransaction,
-        term: &IndexTerm,
-    ) -> Result<Option<RootRef<BITMAP_TRIE_PATH_BYTES>>> {
-        tx.get(tables::INDEX, term.as_bytes())?
-            .map(|bytes| decode_root(&bytes))
-            .transpose()
     }
 }

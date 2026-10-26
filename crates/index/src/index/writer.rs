@@ -1,8 +1,12 @@
-use golemdb_merkle::{Hash, HashProvider, RootRef};
-use golemdb_storage::WriteTransaction;
+use golemdb_merkle::{CheckedEdit, HashProvider, RootRef};
+use golemdb_storage::{ReadTransaction, WriteTransaction, scan_prefix};
 
 use super::Index;
-use crate::{INDEX_TRIE_PATH_BYTES, IndexTerm, Result, bitmap_trie::BitmapTrie, path, tables};
+use crate::{
+    BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexTerm, Result,
+    index_trie::{row_key, trie_path},
+    path, tables,
+};
 
 /// Adds a record ID to a term's bitmap or removes it from that bitmap.
 /// If a batch changes the same term and record ID more than once, the last change wins.
@@ -12,32 +16,33 @@ pub enum PostingChange {
     Remove { term: IndexTerm, record_id: u64 },
 }
 
-/// A term's bitmap root before and after a batch of changes.
-/// `None` means the term had no records at that point and was absent from the index.
+/// A term whose postings a batch changed, and whether it had postings before
+/// and after: a term without postings is absent from the index.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TermRootChange {
+pub struct TermChange {
     pub term: IndexTerm,
-    pub before: Option<Hash>,
-    pub after: Option<Hash>,
+    pub before: bool,
+    pub after: bool,
 }
 
-/// The result of applying a batch: the new index root and the terms whose bitmaps changed.
+/// The result of applying a batch: the new index root and the terms whose postings changed.
 /// These changes become permanent only when the caller commits the transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexUpdate {
     pub root: RootRef<INDEX_TRIE_PATH_BYTES>,
-    /// Actual changes only, in term order. Roots span the complete input batch.
-    pub changed_terms: Vec<TermRootChange>,
+    /// Actual changes only, in term order.
+    pub changed_terms: Vec<TermChange>,
 }
 
 impl<H: HashProvider> Index<'_, H> {
     /// Apply postings with last-operation-wins semantics for each (term, ID).
-    /// Coalesces containers and updates each affected term leaf once. The caller
-    /// must supply the root matching this transaction's flat state; affected
-    /// term commitments are checked, but this is not a whole-index audit. New
-    /// trie rows and containers are stored under `commit`, the commit this
-    /// batch publishes; a second batch at the same commit replaces rows, so
-    /// only its root stays valid.
+    /// Coalesces containers, rewrites each changed container's row in place,
+    /// and updates the trie once. The caller must supply the root matching this
+    /// transaction's tables; each touched container is checked against it in
+    /// that same trie update, but this is not a whole-index audit. New trie
+    /// rows are stored under `commit`, the commit this batch publishes; a
+    /// second batch at the same commit replaces rows, so only its root stays
+    /// valid.
     pub fn apply(
         &self,
         tx: &mut impl WriteTransaction,
@@ -68,49 +73,101 @@ impl<H: HashProvider> Index<'_, H> {
                 false
             }
         });
+        let mut edits = Vec::new();
         let mut changed_terms = Vec::new();
         for group in changes.chunk_by(|a, b| a.0 == b.0) {
             let term = &group[0].0;
-            let before_root = self.bitmap_root(tx, term)?;
-            let before = before_root.map(|root| root.hash(self.hasher));
-            self.trie.check(tx, root, term, before)?;
+            let term_key = term.key();
             let term_path = term.routing_path(self.hasher);
-            let after_root = BitmapTrie::new(self.hasher, &term_path).apply(
-                tx,
-                commit,
-                before_root,
-                group.iter().map(|&(_, hi, lo, present)| (hi, lo, present)),
-            )?;
-            let after = after_root.map(|root| root.hash(self.hasher));
-            if before == after {
+            // Whether a touched container held postings before, and after.
+            let (mut touched_before, mut touched_after, mut changed) = (false, false, false);
+            let (mut keys, mut writes) = (Vec::new(), Vec::new());
+            for container in group.chunk_by(|a, b| a.1 == b.1) {
+                let hi = container[0].1;
+                let key = row_key(&term_key, hi)?;
+                let path = trie_path(&term_path, hi)?;
+                let stored = tx.get(tables::INDEX, &key)?;
+                keys.push(key.clone());
+                let before = stored
+                    .as_ref()
+                    .map(|bytes| self.trie.leaf_hash(&path, bytes));
+                touched_before |= stored.is_some();
+                let mut bitmap = match &stored {
+                    Some(bytes) => BitmapContainer::decode_values(hi, bytes)?,
+                    None => BitmapContainer::empty(hi)?,
+                };
+                let mut dirty = false;
+                for &(_, _, offset, present) in container {
+                    dirty |= if present {
+                        bitmap.insert(offset)
+                    } else {
+                        bitmap.remove(offset)
+                    };
+                }
+                touched_after |= !bitmap.is_empty();
+                // Unchanged containers are still checked against the root.
+                let mut after = before;
+                if dirty {
+                    changed = true;
+                    let bytes = (!bitmap.is_empty())
+                        .then(|| bitmap.value_bytes())
+                        .transpose()?;
+                    after = bytes
+                        .as_ref()
+                        .map(|bytes| self.trie.leaf_hash(&path, bytes));
+                    writes.push((key, bytes));
+                }
+                edits.push(CheckedEdit {
+                    path,
+                    before,
+                    after,
+                });
+            }
+            if !changed {
                 continue;
             }
-            match after_root {
-                Some(root) => tx.put(tables::INDEX, term.as_bytes(), &root.encode())?,
-                None => {
-                    tx.delete(tables::INDEX, term.as_bytes())?;
+            // Untouched containers are unchanged by the batch: look for one
+            // only when the touched ones do not settle a side.
+            let untouched = if touched_before && touched_after {
+                false
+            } else {
+                untouched_exists(tx, &term_key, &keys)?
+            };
+            for (key, bytes) in writes {
+                match bytes {
+                    Some(bytes) => tx.put(tables::INDEX, &key, &bytes)?,
+                    None => {
+                        tx.delete(tables::INDEX, &key)?;
+                    }
                 }
             }
-            changed_terms.push(TermRootChange {
+            let (before, after) = (touched_before || untouched, touched_after || untouched);
+            changed_terms.push(TermChange {
                 term: term.clone(),
                 before,
                 after,
             });
         }
-        // Terms are unique, so each check above saw the original root and each
-        // term's row is written once; one trie update for the whole batch writes
-        // each touched branch once.
-        let root = self.trie.set(
-            tx,
-            commit,
-            root,
-            changed_terms
-                .iter()
-                .map(|change| (&change.term, change.after)),
-        )?;
+        let root = self.trie.set(tx, commit, root, edits)?;
         Ok(IndexUpdate {
             root,
             changed_terms,
         })
     }
+}
+
+/// Whether the term with key `term_key` has a container row besides those at
+/// `touched`, the sorted keys of the containers a batch touches. Reads at
+/// most one row past the touched ones.
+fn untouched_exists(
+    tx: &impl ReadTransaction,
+    term_key: &[u8],
+    touched: &[Vec<u8>],
+) -> Result<bool> {
+    for row in scan_prefix(tx, tables::INDEX, term_key.to_vec())? {
+        if touched.binary_search(&row?.0).is_err() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

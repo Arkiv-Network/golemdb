@@ -248,39 +248,36 @@ impl HashProvider for Recorder {
 fn leaf_preimages_belong_to_index_and_use_the_supplied_provider() {
     let term = IndexTerm::new("A", T::Bool, &[1]).unwrap();
     let hasher = Recorder::default();
-    assert_eq!(term.leaf_hash(&[7; 32], &hasher), [2; 32]);
+    assert_eq!(term.routing_path(&hasher), [1; 32]);
+    let chunk = BitmapContainer::from_values(1, [42]).unwrap();
+    assert_eq!(chunk.leaf_hash(&[7; 32], &hasher).unwrap(), [2; 32]);
     assert_eq!(
         *hasher.0.borrow(),
         vec![
             vec![b'A', 0, 0x81, 1],
-            [&[2][..], &[1; 32], &[7; 32]].concat()
+            [
+                &[4][..],
+                &[7; 32],
+                chunk.canonical_bytes().unwrap().as_slice()
+            ]
+            .concat()
         ]
-    );
-    let chunk = BitmapContainer::from_values(1, [42]).unwrap();
-    assert_eq!(chunk.leaf_hash(&hasher).unwrap(), [3; 32]);
-    assert_eq!(
-        hasher.0.borrow()[2],
-        [&[4][..], chunk.canonical_bytes().unwrap().as_slice()].concat()
     );
     assert!(
         BitmapContainer::empty(0)
             .unwrap()
-            .leaf_hash(&hasher)
+            .leaf_hash(&[7; 32], &hasher)
             .is_err()
     );
     let keccak = Keccak256Hasher;
+    let other_path = BitmapContainer::from_values(2, [42]).unwrap();
     assert_ne!(
-        chunk.leaf_hash(&keccak).unwrap(),
-        BitmapContainer::from_values(2, [42])
-            .unwrap()
-            .leaf_hash(&keccak)
-            .unwrap()
+        chunk.leaf_hash(&[7; 32], &keccak).unwrap(),
+        other_path.leaf_hash(&[7; 32], &keccak).unwrap()
     );
     assert_ne!(
-        term.leaf_hash(&[7; 32], &keccak),
-        IndexTerm::new("B", T::Bool, &[1])
-            .unwrap()
-            .leaf_hash(&[7; 32], &keccak)
+        chunk.leaf_hash(&[7; 32], &keccak).unwrap(),
+        chunk.leaf_hash(&[8; 32], &keccak).unwrap()
     );
 }
 

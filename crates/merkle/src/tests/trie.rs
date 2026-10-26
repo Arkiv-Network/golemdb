@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    BranchNodeCompact, HASH_BYTES, Hash, HashProvider, Keccak256Hasher, LeafRef, MerkleError,
+    BranchNodeCompact, CheckedEdit, Hash, HashProvider, Keccak256Hasher, LeafRef, MerkleError,
     RootRef, Trie, TrieTable,
 };
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
@@ -149,11 +149,9 @@ fn branches<const N: usize>(tx: &impl ReadTransaction, root: RootRef<N>) -> BTre
     while let Some((root, route)) = stack.pop() {
         if let RootRef::Branch(branch) = root {
             let key = trie.node_key(branch.commit, &route);
-            let node = BranchNodeCompact::<N>::decode(
-                &tx.get(TABLE.table(), &key).unwrap().unwrap(),
-                crate::LeafStorage::InNode,
-            )
-            .unwrap();
+            let node =
+                BranchNodeCompact::<N>::decode(&tx.get(TABLE.table(), &key).unwrap().unwrap())
+                    .unwrap();
             let base: Vec<u8> = route.iter().copied().chain(node.unpack_prefix()).collect();
             for slot in 0..crate::BRANCH_SLOTS as u8 {
                 if let Some(child) = node.child(slot) {
@@ -247,6 +245,46 @@ fn batch<const N: usize>(base: &[([u8; N], u32)], edits: &[([u8; N], u32, bool)]
     // A net no-op batch keeps the old root's rows; edits that cancel out store
     // the same branch again at the batch's commit. The content is identical.
     assert_eq!(root.hash(&HASH), one_at_a_time.hash(&HASH));
+    // Checked edits that expect the old leaves give the same root; a wrong
+    // expectation on any one path fails the batch.
+    let old_hash = |path: &[u8; N]| {
+        (old_leaves.iter())
+            .find(|l| l.path == *path)
+            .map(|l| l.hash)
+    };
+    let checked: Vec<_> = (edits.iter())
+        .map(|&(path, value, present)| CheckedEdit {
+            path,
+            before: old_hash(&path),
+            after: present.then_some(leaf(path, value).hash),
+        })
+        .collect();
+    let mut tx = db.begin_write().unwrap();
+    let checked_root = trie
+        .apply_checked(&mut tx, 1, old, checked.clone())
+        .unwrap();
+    assert_eq!(checked_root, root);
+    tx.abort();
+    for wrong in 0..checked.len() {
+        let mut checked = checked.clone();
+        // Only the first expectation of a path counts.
+        if checked[..wrong]
+            .iter()
+            .any(|edit| edit.path == checked[wrong].path)
+        {
+            continue;
+        }
+        checked[wrong].before = match checked[wrong].before {
+            Some(_) => None,
+            None => Some([0; 32]),
+        };
+        let mut tx = db.begin_write().unwrap();
+        assert!(matches!(
+            trie.apply_checked(&mut tx, 1, old, checked),
+            Err(MerkleError::LeafMismatch)
+        ));
+        tx.abort();
+    }
 }
 
 proptest! {
@@ -714,61 +752,6 @@ fn aborted_rewrite_of_a_committed_row_leaves_it_intact() {
     ));
 }
 
-/// Branches of tries namespaced by a hash.
-const NAMESPACED: TrieTable<HASH_BYTES> = TrieTable::new(Table("TestNamespacedBranches"));
-
-proptest! {
-    /// Branch keys of namespaced tries sharing a table never coincide.
-    #[test]
-    fn namespaced_branch_keys_are_distinct(
-        rows in prop::collection::vec(
-            (any::<[u8; 32]>(), prop::collection::vec(0u8..16, 0..12)),
-            1..64,
-        ),
-    ) {
-        let mut seen = BTreeMap::new();
-        for (namespace, route) in &rows {
-            let trie = Trie::<_, 6, HASH_BYTES>::namespaced(
-                NAMESPACED,
-                *namespace,
-                TEST_BRANCH_DOMAIN,
-                &HASH,
-            );
-            let previous = seen.insert(trie.node_key(1, route), (namespace, route));
-            prop_assert!(previous.is_none_or(|row| row == (namespace, route)));
-        }
-    }
-}
-
-#[test]
-fn namespaced_tries_sharing_a_table_keep_their_own_rows() {
-    // Namespaces differing only in their last byte.
-    let mut other = [1; 32];
-    other[31] = 2;
-    let namespaces: [Hash; 2] = [[1; 32], other];
-    let db = MemoryStore::new();
-    let mut tx = db.begin_write().unwrap();
-    let leaves = (0..6)
-        .map(|id| leaf::<6>(key(id), id as u32))
-        .collect::<Vec<_>>();
-    let trie = |namespace: &Hash| {
-        Trie::<_, 6, HASH_BYTES>::namespaced(NAMESPACED, *namespace, TEST_BRANCH_DOMAIN, &HASH)
-    };
-    let roots = namespaces.each_ref().map(|namespace| {
-        let edits = leaves.iter().map(|leaf| (leaf.path, Some(leaf.hash)));
-        trie(namespace)
-            .apply(&mut tx, 1, RootRef::Empty, edits)
-            .unwrap()
-    });
-    for (namespace, root) in namespaces.iter().zip(roots) {
-        let walked = trie(namespace)
-            .walk(&tx, root)
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(walked, leaves);
-    }
-}
-
 #[test]
 fn roots_with_32_byte_paths_and_the_empty_root_round_trip() {
     assert!(RootRef::<32>::Empty.encode().is_empty());
@@ -796,52 +779,4 @@ fn roots_with_32_byte_paths_and_the_empty_root_round_trip() {
     ] {
         assert!(RootRef::<32>::decode(&vec![0; len]).is_err(), "{len} bytes");
     }
-}
-
-const LEAVES: TrieTable = TrieTable::new(Table("TestLeaves"));
-
-#[test]
-#[should_panic(expected = "leaf rows need a table of their own")]
-fn payloads_in_the_branch_table_are_rejected() {
-    let _ = crate::PayloadTrie::<_, 6>::new(TABLE, TABLE, TEST_BRANCH_DOMAIN, &HASH);
-}
-
-/// Payloads are stored under their leaf's commit; re-applying an unchanged
-/// payload keeps the leaf's row and commit, and old roots keep their payloads.
-#[test]
-fn payload_tries_store_rows_and_skip_unchanged_leaves() {
-    let db = MemoryStore::new();
-    let trie = crate::PayloadTrie::<_, 6>::new(TABLE, LEAVES, TEST_BRANCH_DOMAIN, &HASH);
-    let payload = |id: u8, version: u8| crate::LeafPayload {
-        hash: leaf::<6>(key(id), u32::from(version)).hash,
-        bytes: vec![id, version],
-    };
-    let mut tx = db.begin_write().unwrap();
-    let first = trie
-        .apply(
-            &mut tx,
-            1,
-            RootRef::Empty,
-            (0..4).map(|id| (key(id), Some(payload(id, 0)))),
-        )
-        .unwrap();
-    let rows = scan_prefix(&tx, LEAVES.table(), vec![]).unwrap().count();
-    // Commit 2 re-applies every payload but changes only leaf 0.
-    let edits = (0..4).map(|id| (key(id), Some(payload(id, u8::from(id == 0)))));
-    let second = trie.apply(&mut tx, 2, first, edits).unwrap();
-    assert_eq!(
-        scan_prefix(&tx, LEAVES.table(), vec![]).unwrap().count(),
-        rows + 1
-    );
-    let leaves: Vec<_> = trie.walk(&tx, second).map(|leaf| leaf.unwrap()).collect();
-    assert_eq!(
-        leaves.iter().map(|leaf| leaf.commit).collect::<Vec<_>>(),
-        [2, 1, 1, 1]
-    );
-    for (id, leaf) in (0..4).zip(&leaves) {
-        let version = u8::from(id == 0);
-        assert_eq!(trie.payload(&tx, *leaf).unwrap(), Some(vec![id, version]));
-    }
-    let old = trie.get(&tx, first, &key(0)).unwrap().unwrap();
-    assert_eq!(trie.payload(&tx, old).unwrap(), Some(vec![0, 0]));
 }

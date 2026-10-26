@@ -11,7 +11,7 @@ pub(crate) trait PostingSource {
     fn postings(&self, term: &IndexTerm) -> golemdb_index::Result<Bitmap>;
 
     /// The postings of every term in `range`, one bitmap per term, in
-    /// ascending key order. Lazy: each term is stepped to and read as the
+    /// ascending key order. Lazy: the range is read in one pass as the
     /// iterator advances.
     fn scan(
         &self,
@@ -41,9 +41,7 @@ impl<H: HashProvider, T: ReadTransaction> PostingSource for IndexSource<'_, '_, 
         &self,
         range: TermRange,
     ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
-        Ok(self.index.terms(self.tx, range)?.map(|entry| {
-            let (term, root) = entry?;
-            self.index.bitmap_at(self.tx, &term, root)
-        }))
+        let terms = self.index.terms(self.tx, range)?;
+        Ok(terms.map(|entry| entry.map(|(_, bitmap)| bitmap)))
     }
 }

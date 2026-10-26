@@ -1,5 +1,5 @@
 use crate::support::mdbx as fixture;
-use golemdb_index::{BITMAP_BRANCH_DOMAIN, INDEX_BRANCH_DOMAIN};
+use golemdb_index::{CONTAINER_LEAF_DOMAIN, INDEX_BRANCH_DOMAIN};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -10,7 +10,7 @@ use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
 use golemdb_index::{
     INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, TermRange, tables,
 };
-use golemdb_merkle::{HASH_BYTES, Hash, Keccak256Hasher, LeafRef, PayloadTrie, RootRef, Trie};
+use golemdb_merkle::{HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
 
@@ -51,36 +51,23 @@ fn rows(tx: &impl ReadTransaction, table: golemdb_storage::Table) -> Vec<golemdb
         .collect::<golemdb_storage::Result<_>>()
         .unwrap()
 }
-fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Hash> {
-    tx.get(tables::INDEX, t.as_bytes())
-        .unwrap()
-        .map(|b| b[..HASH_BYTES].try_into().unwrap())
+/// The `Index` row key of a term's container at `hi`.
+fn container_key(t: &IndexTerm, hi: u64) -> Vec<u8> {
+    [&t.key()[..], &golemdb_index::path::path_bytes(hi).unwrap()].concat()
 }
 
-/// The row of a term's bitmap root: the container of a single-container root,
-/// or the root branch. Index rows hold `hash ‖ commit`, plus the container
-/// path for a single-container root; rows are namespaced by the term.
-fn bitmap_root_row(tx: &impl ReadTransaction, t: &IndexTerm) -> (golemdb_storage::Table, Vec<u8>) {
-    let value = tx.get(tables::INDEX, t.as_bytes()).unwrap().unwrap();
-    let ns = t.routing_path(&HASH);
-    let trie = PayloadTrie::namespaced(
-        tables::BITMAP_TRIE,
-        tables::BITMAP_CONTAINER,
-        ns,
-        BITMAP_BRANCH_DOMAIN,
-        &HASH,
-    );
-    match RootRef::<6>::decode(&value).unwrap() {
-        RootRef::Branch(branch) => (
-            tables::BITMAP_TRIE.table(),
-            trie.node_key(branch.commit, &[]),
-        ),
-        RootRef::Leaf(leaf) => (
-            tables::BITMAP_CONTAINER.table(),
-            trie.leaf_key(leaf.commit, &leaf.path),
-        ),
-        RootRef::Empty => unreachable!("Index rows hold nonempty roots"),
-    }
+/// A term's containers, each as its path and value, `None` for a term absent
+/// from the index.
+fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+    let key = t.key();
+    let containers: Vec<_> = scan_prefix(tx, tables::INDEX, key.clone())
+        .unwrap()
+        .map(|row| {
+            let (row_key, value) = row.unwrap();
+            (row_key[key.len()..].to_vec(), value)
+        })
+        .collect();
+    (!containers.is_empty()).then_some(containers)
 }
 
 // Compare both commitments to a fresh rebuild, not just flat query results.
@@ -116,14 +103,16 @@ fn assert_state(
         .map(|row| row.unwrap().0)
         .collect::<Vec<_>>();
     assert_eq!(actual_terms, expected.keys().cloned().collect::<Vec<_>>());
-    // Independently verify that each flat row is committed in the top trie.
+    // Independently verify that each container row is committed in the trie.
     let trie =
         Trie::<_, INDEX_TRIE_PATH_BYTES>::new(tables::INDEX_TRIE, INDEX_BRANCH_DOMAIN, &HASH);
-    let mut leaves = expected
-        .keys()
-        .map(|term| {
-            let bitmap = root_for(tx, term).unwrap();
-            LeafRef::new(term.routing_path(&HASH), term.leaf_hash(&bitmap, &HASH))
+    let mut leaves = rows(tx, tables::INDEX)
+        .into_iter()
+        .map(|(key, value)| {
+            let (term, container) = IndexTerm::split_key(&key).unwrap();
+            let path = [&term.routing_path(&HASH)[..], container].concat();
+            let hash = HASH.hash_parts(&[&[CONTAINER_LEAF_DOMAIN], &path, &value]);
+            LeafRef::new(path.try_into().unwrap(), hash)
         })
         .collect::<Vec<_>>();
     leaves.sort_by_key(|leaf| leaf.path);
@@ -148,8 +137,7 @@ fn empty_singleton_branches_and_last_posting_removal() {
         .unwrap();
     assert!(matches!(update.root, RootRef::Leaf(_)));
     assert_eq!(update.changed_terms.len(), 1);
-    assert_eq!(update.changed_terms[0].before, None);
-    assert!(rows(&tx, tables::BITMAP_TRIE.table()).is_empty());
+    assert!(!update.changed_terms[0].before);
     assert!(rows(&tx, tables::INDEX_TRIE.table()).is_empty());
     let update = index
         .apply(
@@ -195,9 +183,9 @@ fn empty_singleton_branches_and_last_posting_removal() {
         .apply(&mut tx, 0, update.root, [remove(&t, u64::MAX)])
         .unwrap();
     assert_eq!(update.root, RootRef::Empty);
-    assert_eq!(update.changed_terms[0].after, None);
+    assert!(!update.changed_terms[0].after);
+    // Containers are live rows: removing the last posting leaves none.
     assert!(rows(&tx, tables::INDEX).is_empty());
-    assert!(!rows(&tx, tables::BITMAP_CONTAINER.table()).is_empty()); // immutable history retained
 }
 
 #[test]
@@ -216,7 +204,7 @@ fn duplicate_changes_cancel_and_equal_terms_keep_separate_rows() {
         )
         .unwrap();
     // Identical containers of different terms are separate rows, one per term.
-    assert_eq!(rows(&tx, tables::BITMAP_CONTAINER.table()).len(), 2);
+    assert_eq!(rows(&tx, tables::INDEX).len(), 2);
     assert_eq!(root_for(&tx, &a), root_for(&tx, &b));
     let before = root_for(&tx, &a);
     let noop = index
@@ -239,8 +227,8 @@ fn duplicate_changes_cancel_and_equal_terms_keep_separate_rows() {
         .apply(&mut tx, 0, noop.root, [add(&a, 2), add(&a, 65536)])
         .unwrap();
     assert_eq!(changed.changed_terms.len(), 1);
-    assert_eq!(changed.changed_terms[0].before, before);
-    assert_ne!(changed.changed_terms[0].after, before);
+    assert!(changed.changed_terms[0].before && changed.changed_terms[0].after);
+    assert_ne!(root_for(&tx, &a), before);
     assert_eq!(root_for(&tx, &b), before);
     assert_eq!(
         index
@@ -366,12 +354,9 @@ fn typed_range_and_prefix_scans() {
             tag_range(Bound::Included(1), Bound::Excluded(4)).unwrap(),
         )
         .unwrap()
-        .collect::<golemdb_index::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(
-        found.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>(),
-        vec![term(1), term(2), term(3)]
-    );
+        .map(|entry| entry.unwrap().0)
+        .collect::<Vec<_>>();
+    assert_eq!(found, vec![term(1), term(2), term(3)]);
     let mut prefix = IndexTerm::prefix("tag", CellType::Str).unwrap();
     prefix.push(b'c');
     assert_eq!(
@@ -385,7 +370,8 @@ fn typed_range_and_prefix_scans() {
         term(2)
     );
     assert_eq!(tag_range(Bound::Included(3), Bound::Included(0)), None);
-    tx.put(tables::INDEX, term(0).as_bytes(), &[0; 31]).unwrap();
+    // A key without the name separator is no term.
+    tx.put(tables::INDEX, b"\x01", &[]).unwrap();
     let mut scan = index.terms_with_prefix(&tx, vec![]).unwrap();
     assert!(scan.next().unwrap().is_err());
     assert!(scan.next().is_none());
@@ -434,8 +420,7 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
             .terms(&tx, range)
             .unwrap()
             .map(|entry| {
-                let (term, root) = entry.unwrap();
-                let bitmap = index.bitmap_at(&tx, &term, root).unwrap();
+                let (term, bitmap) = entry.unwrap();
                 let expected = index.bitmap(&tx, &term).unwrap().unwrap();
                 assert_eq!(bitmap.treemap(), expected.treemap());
                 term
@@ -540,8 +525,7 @@ fn name_scans_hold_the_terms_of_the_name_and_load_each_bitmap() {
             .terms(&tx, range)
             .unwrap()
             .map(|entry| {
-                let (term, root) = entry.unwrap();
-                let bitmap = index.bitmap_at(&tx, &term, root).unwrap();
+                let (term, bitmap) = entry.unwrap();
                 let expected = index.bitmap(&tx, &term).unwrap().unwrap();
                 assert_eq!(bitmap.treemap(), expected.treemap());
                 term
@@ -570,21 +554,22 @@ fn corrupt_missing_and_mismatched_state_is_not_absence() {
     ));
     assert!(
         index
-            .validate_root(&tx, RootRef::Leaf(LeafRef::new([42; 32], [42; 32])))
+            .validate_root(
+                &tx,
+                RootRef::Leaf(LeafRef::new([42; INDEX_TRIE_PATH_BYTES], [42; 32]))
+            )
             .is_err()
     );
     assert!(index.validate_root(&tx, RootRef::Empty).is_err());
-    let (table, container) = bitmap_root_row(&tx, &t);
-    assert_eq!(table, tables::BITMAP_CONTAINER.table());
+    let (table, container) = (tables::INDEX, container_key(&t, 0));
     let original = tx.get(table, &container).unwrap().unwrap();
     tx.delete(table, &container).unwrap();
-    assert!(index.bitmap(&tx, &t).is_err());
+    // Without its container the term is absent, which the root contradicts.
+    assert!(index.bitmap(&tx, &t).unwrap().is_none());
     assert!(index.apply(&mut tx, 0, root, [add(&t, 2)]).is_err());
     tx.put(table, &container, &[0; 6]).unwrap();
-    assert!(matches!(
-        index.bitmap(&tx, &t),
-        Err(IndexError::Corruption(_))
-    ));
+    assert!(index.bitmap(&tx, &t).is_err());
+    assert!(index.apply(&mut tx, 0, root, [add(&t, 2)]).is_err());
     tx.put(table, &container, &original).unwrap();
     // The next batch is the next commit, keeping the first commit's rows intact.
     let root = index
@@ -603,13 +588,12 @@ fn corrupt_missing_and_mismatched_state_is_not_absence() {
     assert!(index.validate_root(&tx, root).is_err());
     assert!(
         index
-            .validate_root(&tx, RootRef::Leaf(LeafRef::new([0; 32], hash)))
+            .validate_root(
+                &tx,
+                RootRef::Leaf(LeafRef::new([0; INDEX_TRIE_PATH_BYTES], hash))
+            )
             .is_err()
-    ); // multiple flat rows cannot be a singleton
-    let (table, branch) = bitmap_root_row(&tx, &t);
-    assert_eq!(table, tables::BITMAP_TRIE.table());
-    tx.delete(table, &branch).unwrap();
-    assert!(index.bitmap(&tx, &t).is_err());
+    ); // multiple container rows cannot be a singleton
 }
 
 proptest! {
@@ -629,8 +613,8 @@ proptest! {
             let update = index.apply(&mut tx, 0, root, changes).unwrap(); root = update.root;
             let all_terms = before.keys().chain(expected.keys()).cloned().collect::<BTreeSet<_>>();
             let actual_changes = all_terms.into_iter().filter_map(|term| {
-                let old = before.get(&term).copied().flatten(); let new = root_for(&tx, &term);
-                (old != new).then_some(golemdb_index::TermRootChange { term, before: old, after: new })
+                let old = before.get(&term).cloned().flatten(); let new = root_for(&tx, &term);
+                (old != new).then(|| golemdb_index::TermChange { term, before: old.is_some(), after: new.is_some() })
             }).collect::<Vec<_>>();
             prop_assert_eq!(update.changed_terms, actual_changes);
             assert_state(&tx, root, &expected);

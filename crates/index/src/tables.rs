@@ -1,18 +1,14 @@
 //! Physical table names shared with the engine. Writes belong to one transaction.
-use golemdb_merkle::{HASH_BYTES, TrieTable};
+use golemdb_merkle::TrieTable;
 use golemdb_storage::Table;
 
+/// Live containers keyed by `term key ‖ path` ([`crate::IndexTerm::key`]),
+/// each holding its canonical Roaring bytes: the payloads of the index trie's
+/// leaves. Keys are in term order, so a term's containers are contiguous and
+/// a term exists exactly while it has a container.
 pub const INDEX: Table = Table("Index");
-/// Every term's bitmap containers, namespaced by the term's routing path.
-pub const BITMAP_CONTAINER: TrieTable<HASH_BYTES> = TrieTable::new(Table("BitmapContainer"));
-/// Every term's bitmap trie branches, namespaced by the term's routing path.
-pub const BITMAP_TRIE: TrieTable<HASH_BYTES> = TrieTable::new(Table("BitmapTrie"));
-/// The one index trie's branches, unnamespaced.
+/// The index trie's branches.
 pub const INDEX_TRIE: TrieTable = TrieTable::new(Table("IndexTrie"));
 
 /// Tables keyed by writing commit first; each commit's rows are appended.
-pub const VERSIONED: [Table; 3] = [
-    INDEX_TRIE.table(),
-    BITMAP_TRIE.table(),
-    BITMAP_CONTAINER.table(),
-];
+pub const VERSIONED: [Table; 1] = [INDEX_TRIE.table()];

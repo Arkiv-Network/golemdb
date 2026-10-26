@@ -1,10 +1,9 @@
 use golemdb_cells::CellType;
-use golemdb_index::{BITMAP_BRANCH_DOMAIN, INDEX_BRANCH_DOMAIN};
+use golemdb_index::INDEX_BRANCH_DOMAIN;
 use golemdb_index::{
-    BITMAP_TRIE_PATH_BYTES, BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexTerm,
-    PostingChange, tables,
+    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange, path, tables,
 };
-use golemdb_merkle::{BranchRef, Keccak256Hasher, LeafRef, PayloadTrie, RootRef, Trie};
+use golemdb_merkle::{Keccak256Hasher, LeafRef, RootRef, Trie};
 use golemdb_storage::{ReadTransaction, Store, Table, WriteTransaction};
 use golemdb_storage_mdbx::MdbxStore;
 
@@ -45,11 +44,6 @@ fn reopen_in_fresh_process_preserves_head_history_and_discards_uncommitted_write
             .unwrap()
             .root;
         save(&mut tx, b"old", &old);
-        let old_bitmap = tx
-            .get(tables::INDEX, term(b"a").as_bytes())
-            .unwrap()
-            .unwrap();
-        tx.put(HEAD, b"old_bitmap", &old_bitmap).unwrap();
         // The second batch is the next commit, so the old trees stay intact.
         let current = index
             .apply(&mut tx, 1, old, [add(b"a", u64::MAX), add(b"c", 3)])
@@ -117,43 +111,26 @@ fn persistence_worker() {
             .is_none()
     );
 
-    // Old immutable trees remain walkable through the latest read transaction.
-    // This is structural history; reopening old flat term state is engine work.
-    // Each term's bitmap trie is namespaced by its routing path; the Index row
-    // holds the root's hash and commit, and containers are keyed by commit too.
-    let ns = term(b"a").routing_path(&HASH);
-    let bitmap_trie = PayloadTrie::<_, BITMAP_TRIE_PATH_BYTES, _>::namespaced(
-        tables::BITMAP_TRIE,
-        tables::BITMAP_CONTAINER,
-        ns,
-        BITMAP_BRANCH_DOMAIN,
-        &HASH,
-    );
-    let old_row = read.get(HEAD, b"old_bitmap").unwrap().unwrap();
-    let mut ids = Vec::new();
-    let old_root = RootRef::<BITMAP_TRIE_PATH_BYTES>::decode(&old_row).unwrap();
-    let RootRef::Branch(BranchRef {
-        hash: old_bitmap, ..
-    }) = old_root
-    else {
-        panic!("the old bitmap root is a branch");
+    // Old trie branches remain walkable through the latest read transaction,
+    // and keep the hashes of the containers they were built with; the
+    // containers themselves are live rows, overwritten in place.
+    let container = |value: &[u8], ids: &[u64]| {
+        let (hi, _) = path::split(ids[0]);
+        let chunk =
+            BitmapContainer::from_values(hi, ids.iter().map(|&id| path::split(id).1)).unwrap();
+        let term_path = term(value).routing_path(&HASH);
+        let mut trie_path = [0; INDEX_TRIE_PATH_BYTES];
+        trie_path[..32].copy_from_slice(&term_path);
+        trie_path[32..].copy_from_slice(&path::path_bytes(hi).unwrap());
+        LeafRef::new(trie_path, chunk.leaf_hash(&term_path, &HASH).unwrap())
     };
-    for leaf in bitmap_trie.walk(&read, old_root) {
-        let leaf = leaf.unwrap();
-        let container =
-            BitmapContainer::decode(&bitmap_trie.payload(&read, leaf).unwrap().unwrap()).unwrap();
-        assert_eq!(container.leaf_hash(&HASH).unwrap(), leaf.hash);
-        ids.extend(container.iter());
-    }
-    assert_eq!(ids, vec![1, 65536]);
     let index_trie =
         Trie::<_, INDEX_TRIE_PATH_BYTES>::new(tables::INDEX_TRIE, INDEX_BRANCH_DOMAIN, &HASH);
-    let old_b = BitmapContainer::from_values(0, [2])
-        .unwrap()
-        .leaf_hash(&HASH)
-        .unwrap();
-    let mut expected = [(term(b"a"), old_bitmap), (term(b"b"), old_b)]
-        .map(|(t, b)| LeafRef::new(t.routing_path(&HASH), t.leaf_hash(&b, &HASH)));
+    let mut expected = [
+        container(b"a", &[1]),
+        container(b"a", &[65536]),
+        container(b"b", &[2]),
+    ];
     expected.sort_by_key(|leaf| leaf.path);
     assert_eq!(
         index_trie

@@ -9,8 +9,9 @@ pub const BRANCH_SLOTS: usize = 16;
 /// Fewer children would make the branch a leaf or empty.
 const MIN_BRANCH_CHILDREN: u32 = 2;
 
-/// The widest routing path a trie supports.
-pub(crate) const MAX_PATH_BYTES: usize = 32;
+/// The widest routing path a trie supports: a route's nibble count must fit
+/// the one-byte length of a row key.
+pub const MAX_PATH_BYTES: usize = 127;
 
 /// Bytes of the leading prefix length in an encoded branch.
 const PREFIX_LEN_BYTES: usize = 1;
@@ -19,31 +20,9 @@ const PREFIX_LEN_BYTES: usize = 1;
 const MASK_BYTES: usize = size_of::<u16>();
 const _: () = assert!(u16::BITS as usize == BRANCH_SLOTS);
 
-/// Where a trie keeps its leaves, and so which children a branch records the
-/// commit of.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum LeafStorage {
-    /// Leaves are only entries in their parent branch; branch children have rows.
-    #[default]
-    InNode,
-    /// Every leaf is also a row of its own ([`crate::PayloadTrie`]).
-    Rows,
-}
-
-impl LeafStorage {
-    /// The children whose rows a branch locates.
-    fn stored_mask(self, state_mask: u16, tree_mask: u16) -> u16 {
-        match self {
-            Self::InNode => tree_mask,
-            Self::Rows => state_mask,
-        }
-    }
-}
-
 /// Canonical compact branch. Leaf paths and child commits are stored routing
 /// metadata and are excluded from the hash; the owner must bind each full path
-/// in its leaf hash. Child commits locate each branch child's row, and each
-/// leaf child's row when leaves are rows of their own.
+/// in its leaf hash. Child commits locate each branch child's row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchNodeCompact<const N: usize> {
     prefix: Vec<u8>,
@@ -53,24 +32,20 @@ pub struct BranchNodeCompact<const N: usize> {
     child_hashes: Vec<Hash>,
     leaf_paths: Vec<[u8; N]>,
     child_commits: Vec<u64>,
-    leaf_storage: LeafStorage,
 }
 
 impl<const N: usize> BranchNodeCompact<N> {
     /// `prefix` is packed high nibble first, relative to this branch's depth.
     /// Hashes, leaf paths and commits follow ascending occupied slots in their
-    /// masks; there is one commit per branch child, or per child with
-    /// [`LeafStorage::Rows`]. Path widths outside 1..=32 bytes fail at compile time;
-    /// malformed branch contents still return runtime errors.
+    /// masks; there is one commit per branch child. Path widths outside
+    /// 1..=[`MAX_PATH_BYTES`] fail at compile time; malformed branch contents
+    /// still return runtime errors.
     ///
     /// ```compile_fail,E0080
-    /// use golemdb_merkle::BranchNodeCompact;
-    /// use golemdb_merkle::LeafStorage;
-    /// let _ = BranchNodeCompact::<33>::new(
-    ///     vec![], 0, 3, 3, vec![[0; 32]; 2], vec![], vec![0; 2], LeafStorage::InNode,
-    /// );
+    /// use golemdb_merkle::{BranchNodeCompact, MAX_PATH_BYTES};
+    /// type TooWide = BranchNodeCompact<{ MAX_PATH_BYTES + 1 }>;
+    /// let _ = TooWide::new(vec![], 0, 3, 3, vec![[0; 32]; 2], vec![], vec![0; 2]);
     /// ```
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         prefix: Vec<u8>,
         prefix_len: u8,
@@ -79,14 +54,8 @@ impl<const N: usize> BranchNodeCompact<N> {
         child_hashes: Vec<Hash>,
         leaf_paths: Vec<[u8; N]>,
         child_commits: Vec<u64>,
-        leaf_storage: LeafStorage,
     ) -> Result<Self> {
-        const {
-            assert!(
-                N >= 1 && N <= MAX_PATH_BYTES,
-                "Merkle paths must contain between 1 and 32 bytes"
-            )
-        };
+        const { check_path_width::<N>() };
         if prefix_len as usize >= NIBBLES_PER_BYTE * N
             || prefix.len() != (prefix_len as usize).div_ceil(NIBBLES_PER_BYTE)
         {
@@ -101,8 +70,7 @@ impl<const N: usize> BranchNodeCompact<N> {
             || tree_mask & !state_mask != 0
             || child_hashes.len() != state_mask.count_ones() as usize
             || leaf_paths.len() != (state_mask & !tree_mask).count_ones() as usize
-            || child_commits.len()
-                != leaf_storage.stored_mask(state_mask, tree_mask).count_ones() as usize
+            || child_commits.len() != tree_mask.count_ones() as usize
         {
             return Err(MerkleError::InvalidNode("invalid child masks or counts"));
         }
@@ -114,7 +82,6 @@ impl<const N: usize> BranchNodeCompact<N> {
             child_hashes,
             leaf_paths,
             child_commits,
-            leaf_storage,
         })
     }
 
@@ -143,18 +110,13 @@ impl<const N: usize> BranchNodeCompact<N> {
         }
         let before = (1u16 << slot) - 1;
         let hash = self.child_hashes[(self.state_mask & before).count_ones() as usize];
-        let stored = (self.leaf_storage).stored_mask(self.state_mask, self.tree_mask);
-        let commit = if stored & (1 << slot) != 0 {
-            self.child_commits[(stored & before).count_ones() as usize]
-        } else {
-            0
-        };
         Some(if self.tree_mask & (1 << slot) != 0 {
+            let commit = self.child_commits[(self.tree_mask & before).count_ones() as usize];
             RootRef::Branch(BranchRef { hash, commit })
         } else {
             let path =
                 self.leaf_paths[(self.state_mask & !self.tree_mask & before).count_ones() as usize];
-            RootRef::Leaf(LeafRef { path, hash, commit })
+            RootRef::Leaf(LeafRef::new(path, hash))
         })
     }
 
@@ -191,16 +153,10 @@ impl<const N: usize> BranchNodeCompact<N> {
     ///
     /// ```compile_fail,E0080
     /// use golemdb_merkle::BranchNodeCompact;
-    /// use golemdb_merkle::LeafStorage;
-    /// let _ = BranchNodeCompact::<0>::decode(&[], LeafStorage::InNode);
+    /// let _ = BranchNodeCompact::<0>::decode(&[]);
     /// ```
-    pub fn decode(bytes: &[u8], leaf_storage: LeafStorage) -> Result<Self> {
-        const {
-            assert!(
-                N >= 1 && N <= MAX_PATH_BYTES,
-                "Merkle paths must contain between 1 and 32 bytes"
-            )
-        };
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        const { check_path_width::<N>() };
         let bad = || MerkleError::InvalidNode("invalid encoded length");
         let prefix_len = *bytes.first().ok_or_else(bad)?;
         let end = PREFIX_LEN_BYTES + (prefix_len as usize).div_ceil(NIBBLES_PER_BYTE);
@@ -214,8 +170,7 @@ impl<const N: usize> BranchNodeCompact<N> {
         // Offsets within `children`: hashes, then leaf paths, then commits.
         let hash_end = state_mask.count_ones() as usize * HASH_BYTES;
         let paths_end = hash_end + (state_mask & !tree_mask).count_ones() as usize * N;
-        let commits_end = paths_end
-            + leaf_storage.stored_mask(state_mask, tree_mask).count_ones() as usize * COMMIT_BYTES;
+        let commits_end = paths_end + tree_mask.count_ones() as usize * COMMIT_BYTES;
         if children.len() != commits_end {
             return Err(bad());
         }
@@ -233,7 +188,6 @@ impl<const N: usize> BranchNodeCompact<N> {
             child_hashes,
             leaf_paths,
             child_commits,
-            leaf_storage,
         )
     }
 
@@ -251,7 +205,6 @@ impl<const N: usize> BranchNodeCompact<N> {
     pub(crate) fn from_children(
         prefix: &[u8],
         children: &[RootRef<N>; BRANCH_SLOTS],
-        leaf_storage: LeafStorage,
     ) -> Result<Self> {
         let mut state = 0;
         let mut tree = 0;
@@ -264,9 +217,6 @@ impl<const N: usize> BranchNodeCompact<N> {
                 RootRef::Leaf(leaf) => {
                     hashes.push(leaf.hash);
                     paths.push(leaf.path);
-                    if leaf_storage == LeafStorage::Rows {
-                        commits.push(leaf.commit);
-                    }
                 }
                 RootRef::Branch(branch) => {
                     tree |= 1 << slot;
@@ -284,7 +234,6 @@ impl<const N: usize> BranchNodeCompact<N> {
             hashes,
             paths,
             commits,
-            leaf_storage,
         )
     }
 
@@ -312,4 +261,12 @@ impl<const N: usize> BranchNodeCompact<N> {
         }
         Ok(())
     }
+}
+
+/// Path widths a trie supports, checked at compile time.
+pub(crate) const fn check_path_width<const N: usize>() {
+    assert!(
+        N >= 1 && N <= MAX_PATH_BYTES,
+        "Merkle paths must contain between 1 and MAX_PATH_BYTES bytes"
+    );
 }

@@ -1,4 +1,3 @@
-use crate::INDEX_LEAF_DOMAIN;
 use golemdb_cells::{CellNameRef, CellType, CellValueParseError, CellValueRef, FloatWidth};
 use golemdb_merkle::{Hash, HashProvider};
 use std::{error::Error, fmt};
@@ -131,14 +130,95 @@ impl IndexTerm {
         hasher.hash(&self.0)
     }
 
-    /// `H(0x02 || complete_term_path || bitmap_root)`.
-    pub fn leaf_hash(&self, bitmap_root: &Hash, hasher: &impl HashProvider) -> Hash {
-        hasher.hash_parts(&[
-            &[INDEX_LEAF_DOMAIN],
-            &self.routing_path(hasher),
-            bitmap_root,
-        ])
+    /// The start of every container key of this term: the term, with a
+    /// variable-width value escaped and terminated (see [`key_bytes`]). No
+    /// other term's key starts with it, and key order is term order.
+    pub fn key(&self) -> Vec<u8> {
+        key_bytes(&self.0, true)
     }
+
+    /// The longest container key of a term whose name has `name_len` bytes
+    /// and whose value has at most `value_len` bytes, or 32 if fixed-width:
+    /// escaping can double a string, then the terminator and `hi48` follow.
+    pub const fn max_key_len(name_len: u64, value_len: u64) -> u64 {
+        let string = 2 * value_len + 2;
+        let value = if string > 32 { string } else { 32 };
+        name_len + 2 + value + crate::HI48_BYTES as u64
+    }
+
+    /// Split a container key into its term and the bytes after the term's
+    /// key, rejecting malformed and noncanonical terms.
+    pub fn split_key(key: &[u8]) -> Result<(Self, &[u8]), TermError> {
+        let bad = || TermError::InvalidEncoding;
+        let split = key.iter().position(|&b| b == 0).ok_or_else(bad)?;
+        let tag = *key.get(split + 1).ok_or_else(bad)?;
+        let start = split + 2;
+        let (raw, rest) = match value_width(tag) {
+            Some(width) => {
+                let end = start.checked_add(width).filter(|&end| end <= key.len());
+                let end = end.ok_or_else(bad)?;
+                (key[..end].to_vec(), &key[end..])
+            }
+            None => {
+                let mut raw = key[..start].to_vec();
+                let mut i = start;
+                loop {
+                    match (key.get(i), key.get(i + 1)) {
+                        (Some(0), Some(&ESCAPED_ZERO)) => raw.push(0),
+                        (Some(0), Some(&TERMINATOR)) => break (raw, &key[i + 2..]),
+                        (Some(0), _) | (None, _) => return Err(bad()),
+                        (Some(&byte), _) => {
+                            raw.push(byte);
+                            i += 1;
+                            continue;
+                        }
+                    }
+                    i += 2;
+                }
+            }
+        };
+        Ok((Self::decode(&raw)?, rest))
+    }
+}
+
+/// Follows a `0x00` value byte in a key: the byte itself.
+const ESCAPED_ZERO: u8 = 0xff;
+/// Follows a `0x00` in a key: the end of the value.
+const TERMINATOR: u8 = 0x01;
+
+/// The width of the value after a type tag, or `None` for a variable width
+/// or an unknown tag.
+fn value_width(tag: u8) -> Option<usize> {
+    let ty = CellType::from_id(tag & 0x7f)
+        .ok()
+        .filter(|_| tag & 0x80 != 0)?;
+    ty.width()
+}
+
+/// Key bytes for raw term bytes, or for a prefix of them: a variable-width
+/// value has each `0x00` written as `0x00 0xff`, then, when `terminate`,
+/// `0x00 0x01`. Escaping preserves byte order and makes a complete term's key
+/// end where its value does; everything else is unchanged.
+pub(crate) fn key_bytes(raw: &[u8], terminate: bool) -> Vec<u8> {
+    let tagged = raw.iter().position(|&b| b == 0).map(|split| split + 2);
+    let Some(start) = tagged.filter(|&start| start <= raw.len()) else {
+        return raw.to_vec();
+    };
+    if value_width(raw[start - 1]).is_some() || CellType::from_id(raw[start - 1] & 0x7f).is_err() {
+        return raw.to_vec();
+    }
+    let mut out = Vec::with_capacity(raw.len() + 2);
+    out.extend_from_slice(&raw[..start]);
+    for &byte in &raw[start..] {
+        out.push(byte);
+        if byte == 0 {
+            out.push(ESCAPED_ZERO);
+        }
+    }
+    if terminate {
+        out.extend([0, TERMINATOR]);
+    }
+    out
 }
 
 /// A stored cell name as a term name: one that is not UTF-8 is

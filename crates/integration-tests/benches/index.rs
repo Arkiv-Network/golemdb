@@ -33,7 +33,7 @@ fn codecs(c: &mut Criterion) {
         ) {
             group.bench_function(
                 BenchmarkId::new(format!("leaf_hash_with_encoding/{algorithm}"), name),
-                |b| b.iter(|| black_box(container).leaf_hash(hasher).unwrap()),
+                |b| b.iter(|| black_box(container).leaf_hash(&[0; 32], hasher).unwrap()),
             );
         }
         hash_container(&mut group, name, "keccak-256", &container, &Keccak256Hasher);

@@ -4,7 +4,7 @@ use golemdb_cells::{CellNameRef, CellType, CellValue, CellValueRef};
 
 use crate::{
     IndexTerm, TermError,
-    term::{name_prefix, name_str},
+    term::{key_bytes, name_prefix, name_str},
 };
 
 /// A range of index keys inside one name/type run, or over every run of one
@@ -134,9 +134,36 @@ impl TermRange {
         )
     }
 
-    /// The key bounds, owned, as a storage scan takes them.
+    /// The term bounds, owned.
     pub fn into_bounds(self) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
         (self.lower, self.upper)
+    }
+
+    /// Bounds on container keys holding exactly the containers of the
+    /// range's terms. An included lower or excluded upper bound is a prefix
+    /// of the keys at or past it; the others bound every container of their
+    /// term.
+    pub(crate) fn into_key_bounds(self) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+        let lower = match self.lower {
+            Bound::Included(term) => Bound::Included(key_bytes(&term, false)),
+            Bound::Excluded(term) => after(&key_bytes(&term, true)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let upper = match self.upper {
+            Bound::Included(term) => past(key_bytes(&term, true)),
+            Bound::Excluded(term) => Bound::Excluded(key_bytes(&term, false)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        (lower, upper)
+    }
+}
+
+/// The lower bound just past every key that starts with `prefix`.
+pub(crate) fn after(prefix: &[u8]) -> Bound<Vec<u8>> {
+    match past(prefix.to_vec()) {
+        Bound::Excluded(next) => Bound::Included(next),
+        // All 0xff: no key follows; this excludes everything but the prefix.
+        _ => Bound::Excluded(vec![0xff; prefix.len() + 1]),
     }
 }
 
@@ -150,7 +177,7 @@ fn bound_value<T>(bound: Bound<T>) -> Option<T> {
 /// The upper bound just past every key that starts with `prefix`: excluding
 /// the least key greater than all of them, or unbounded when `prefix` is all
 /// `0xff`.
-fn past(mut prefix: Vec<u8>) -> Bound<Vec<u8>> {
+pub(crate) fn past(mut prefix: Vec<u8>) -> Bound<Vec<u8>> {
     while let Some(last) = prefix.pop() {
         if let Some(next) = last.checked_add(1) {
             prefix.push(next);

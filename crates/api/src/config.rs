@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use golemdb_cells::CellLimits;
 use golemdb_immutable_data::ImmutableDataConfig;
+use golemdb_index::IndexTerm;
 use golemdb_merkle::HashAlgorithm;
 use golemdb_record::RecordLimits;
 use serde::{Deserialize, Serialize};
@@ -60,11 +61,11 @@ impl Genesis {
                 "max_cell_name_len must be positive".into(),
             ));
         }
-        // Complete cell keys include recordID. Index keys include a separator
-        // and tag; fixed-width attributes may be wider than the string limit.
+        // Complete cell keys include recordID; index keys are bounded by
+        // the index.
         let name = u64::from(limits.max_cell_name_len);
         let key = (name + 8)
-            .max(name + 2 + u64::from(limits.max_str_len).max(32))
+            .max(IndexTerm::max_key_len(name, limits.max_str_len.into()))
             .max(40);
         // The format reserves 16 KiB for fixed engine values: trie nodes, metadata,
         // root pairs, and canonical single-u16-domain Roaring containers.

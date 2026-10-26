@@ -23,8 +23,6 @@ pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
         tables::CELL_TRIE.table(),
         golemdb_index::tables::INDEX,
         golemdb_index::tables::INDEX_TRIE.table(),
-        golemdb_index::tables::BITMAP_TRIE.table(),
-        golemdb_index::tables::BITMAP_CONTAINER.table(),
     ]
     .into_iter()
     .map(|table| {
@@ -543,15 +541,19 @@ fn mdbx_modes_limits_and_shared_environment_concurrent_opening() {
     assert!(!missing.exists());
     let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
     let mut cfg = config();
-    // Name + separator + tag + value must fit, not just the string by itself.
+    // The longest index key must fit, not just the string by itself.
     cfg.genesis.cell_limits.max_str_len = db.max_key_size() as u32;
     assert!(matches!(
         Database::from_store(db.clone(), &cfg),
         Err(OpenError::InvalidConfig(_))
     ));
     assert!(db.begin_write().unwrap().is_empty().unwrap());
-    cfg.genesis.cell_limits.max_str_len =
-        db.max_key_size() as u32 - cfg.genesis.cell_limits.max_cell_name_len - 2;
+    // Name, separator, tag, a fully escaped value, terminator, hi48.
+    cfg.genesis.cell_limits.max_str_len = (db.max_key_size() as u32
+        - cfg.genesis.cell_limits.max_cell_name_len
+        - 4
+        - golemdb_index::HI48_BYTES as u32)
+        / 2;
     Database::from_store(db.clone(), &cfg).unwrap();
     let branches = Branches::new(db, Keccak256Hasher, None).unwrap();
     let records = Records::new(branches.clone());
