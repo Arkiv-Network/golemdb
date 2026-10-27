@@ -74,9 +74,9 @@ pub(crate) fn stage(
         let superseded = (sealed.cells.superseded.iter())
             .chain(&sealed.index.superseded)
             .map(|(table, key)| (*table, key.as_slice()));
-        pruner.register(tx, commit, superseded)?;
-        pruner.sweep(tx, commit)?;
-        pruner.drop_before(tx, crate::ROOTS, commit)?;
+        pruner.register_tries(tx, commit, superseded)?;
+        pruner.sweep_tries(tx, commit)?;
+        pruner.prune_commit_keyed_rows(tx, crate::ROOTS, commit)?;
     }
     // Publishes `origin + 1`, the commit seal wrote these rows under.
     advance_head(tx, origin, &roots, hasher)?;

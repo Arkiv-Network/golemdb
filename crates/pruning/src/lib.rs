@@ -1,12 +1,12 @@
 //! Pruning: discarding what only commits before a node's retention window reach.
 //!
-//! [`Pruner::register`] and [`Pruner::sweep`] run inside each commit's
-//! transaction. They garbage-collect superseded trie rows: a row superseded at
-//! commit `s` is reached only by roots before `s`, so it may be deleted once
-//! `s ≤ head − window`. Due rows are deleted in batches, sorted by table and
-//! key, so rows sharing a page are deleted together. [`Pruner::drop_before`]
-//! drops a caller's own rows keyed by commit, such as `Roots`, outside the
-//! window.
+//! [`Pruner::register_tries`] and [`Pruner::sweep_tries`] run inside each
+//! commit's transaction. They garbage-collect superseded trie rows: a row
+//! superseded at commit `s` is reached only by roots before `s`, so it may be
+//! deleted once `s ≤ head − window`. Due rows are deleted in batches, sorted by
+//! table and key, so rows sharing a page are deleted together.
+//! [`Pruner::prune_commit_keyed_rows`] drops a caller's own rows keyed by
+//! commit, such as `Roots`, outside the window.
 
 mod error;
 mod gc;
@@ -61,7 +61,7 @@ impl Pruner {
 
     /// Register the rows `commit` superseded, to delete once they leave the
     /// window.
-    pub fn register<'a>(
+    pub fn register_tries<'a>(
         &self,
         tx: &mut impl WriteTransaction,
         commit: u64,
@@ -74,7 +74,7 @@ impl Pruner {
     /// [`MAX_BATCH_ROWS`], once at least [`MIN_BATCH_ROWS`] are due or the
     /// oldest has been due for [`MAX_WAIT_COMMITS`] commits; otherwise delete
     /// nothing. Commits that delete a batch take longer than the others.
-    pub fn sweep(&self, tx: &mut impl WriteTransaction, head: u64) -> Result<()> {
+    pub fn sweep_tries(&self, tx: &mut impl WriteTransaction, head: u64) -> Result<()> {
         let batch = gc::Batch {
             min: MIN_BATCH_ROWS,
             max: MAX_BATCH_ROWS,
@@ -86,7 +86,7 @@ impl Pruner {
     /// Delete every row of `table` keyed by a big-endian commit before
     /// `cutoff(head)`, with no limit: a window shrink drops them all in one
     /// commit.
-    pub fn drop_before(
+    pub fn prune_commit_keyed_rows(
         &self,
         tx: &mut impl WriteTransaction,
         table: Table,
@@ -117,7 +117,7 @@ mod tests {
 
     /// Rows keyed by commits before the cutoff go, the rest stay.
     #[test]
-    fn drop_before_keeps_the_window() {
+    fn prune_commit_keyed_rows_keeps_the_window() {
         let db = MemoryStore::new();
         let table = Table("PerCommit");
         let mut tx = db.begin_write().unwrap();
@@ -125,7 +125,7 @@ mod tests {
             tx.put(table, &commit.to_be_bytes(), b"row").unwrap();
         }
         Pruner::new(PruningConfig::new(2))
-            .drop_before(&mut tx, table, 5)
+            .prune_commit_keyed_rows(&mut tx, table, 5)
             .unwrap();
         let kept: Vec<_> = (scan_prefix(&tx, table, vec![]).unwrap())
             .map(|row| row.unwrap().0)

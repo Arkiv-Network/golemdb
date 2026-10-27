@@ -235,7 +235,7 @@ mod tests {
         let mut tx = db.begin_write().unwrap();
         tx.put(CELL_TRIE, b"row", b"node").unwrap();
         pruner
-            .register(&mut tx, 1, [(CELL_TRIE, &b"row"[..])])
+            .register_tries(&mut tx, 1, [(CELL_TRIE, &b"row"[..])])
             .unwrap();
         assert!(tx.get(CELL_TRIE, b"row").unwrap().is_some());
         assert_eq!(keys_of(&tx, STALE).len(), 1);
