@@ -4,6 +4,59 @@ use crate::{ImmutableDataColumn, ImmutableDataSchema};
 use std::sync::mpsc;
 
 #[test]
+fn committed_get_does_not_list_directory() {
+    use crate::{
+        ImmutableDataAddress, ImmutableDataConfig, ImmutableDataKey, ImmutableDataReadOptions,
+        ImmutableDataRow, ImmutableDataSegment, ImmutableDataStorage, metadata,
+    };
+    use golemdb_cells::CellValue;
+    use golemdb_storage::{MemoryStore, Store, WriteTransaction};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = ImmutableDataConfig::new(
+        4,
+        vec![ImmutableDataSegment {
+            name: "events".into(),
+            columns: vec![ImmutableDataColumn::new("body")],
+            compression: ImmutableDataCompression::Lz4,
+        }],
+    );
+    let mut storage = ImmutableDataStorage::open(config, [7; 32], dir.path()).unwrap();
+    let store = MemoryStore::new();
+    let mut tx = store.begin_write().unwrap();
+    // Include an older shard, a skipped span and two batches in the newest shard.
+    for (ordinal, commit) in [1, 9, 11].into_iter().enumerate() {
+        let ordinal = ordinal as u64;
+        let row = ImmutableDataRow::new(vec![CellValue::from_bytes(b"published")]);
+        storage.append("events", commit, &row).unwrap();
+        metadata::record_commit_range(&mut tx, 0, commit, ordinal..ordinal + 1).unwrap();
+        metadata::bind_key(&mut tx, 0, ImmutableDataKey([ordinal as u8; 32]), ordinal).unwrap();
+    }
+    storage.sync().unwrap();
+    tx.commit().unwrap();
+    let tx = store.begin_read().unwrap();
+    let reader = storage.reader();
+    for ordinal in 0..3 {
+        for address in [
+            ImmutableDataAddress::Ordinal(ordinal),
+            ImmutableDataAddress::Key(ImmutableDataKey([ordinal as u8; 32])),
+        ] {
+            let row = with_hook(
+                Point::DirectoryScan,
+                || {
+                    Err(Error::Io(std::io::Error::other(
+                        "directory listing unavailable",
+                    )))
+                },
+                || reader.get(&tx, 20, "events", address, &ImmutableDataReadOptions::all()),
+            )
+            .unwrap();
+            assert_eq!(row.get::<Vec<u8>>("body").unwrap(), b"published");
+        }
+    }
+}
+
+#[test]
 fn reopened_file_tail_recovery_waits_for_live_mmaps() {
     for append in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -152,8 +205,8 @@ fn partial_column_append_blocks_physical_operations_until_recovery() {
     // Committed readers remain independent of the failed physical writer.
     let files = writer.reader();
     assert_eq!(
-        files.get(&segment, 0, 1, &[0, 1]).unwrap(),
-        [b"first".to_vec(), b"published".to_vec()]
+        files.read_range(&segment, 0, 0..1, &[0, 1]).unwrap(),
+        vec![vec![b"first".to_vec(), b"published".to_vec()]]
     );
     writer
         .recover(&segment, &BTreeMap::from([(0, 0..1)]))
@@ -171,8 +224,8 @@ fn partial_column_append_blocks_physical_operations_until_recovery() {
         [b"replacement".to_vec(), b"complete".to_vec()]
     );
     assert_eq!(
-        files.get(&segment, 0, 1, &[1]).unwrap(),
-        [b"published".to_vec()]
+        files.read_range(&segment, 0, 0..1, &[1]).unwrap(),
+        vec![vec![b"published".to_vec()]]
     );
 }
 
@@ -234,7 +287,8 @@ fn last_published_column_remains_exact_while_writer_extends_the_same_file() {
                 },
                 || {
                     // Configuration is captured before the writer grows the file.
-                    read.send(reader.get(&read_segment, 0, 1, &[1])).unwrap();
+                    read.send(reader.read_range(&read_segment, 0, 0..1, &[1]))
+                        .unwrap();
                 },
             );
         });
@@ -250,7 +304,7 @@ fn last_published_column_remains_exact_while_writer_extends_the_same_file() {
                 release.send(()).unwrap();
                 assert_eq!(
                     wait_read.recv_timeout(TIMEOUT).unwrap().unwrap(),
-                    [published.to_vec()]
+                    vec![vec![published.to_vec()]]
                 );
                 Ok(())
             },

@@ -467,7 +467,7 @@ exclusive end, `.conf`/`.off` companions and no active/closed rename. Custom hea
 store format, genesis identity, segment ID, first commit and first ordinal.
 NippyJar supplies row count, arity and compression. Active writers are retained
 across appends; explicit sync makes their changes durable. Physical reads may
-flush a selected writer. Historical reads inspect configurations newest-first;
+flush a selected writer and inspect older configurations newest-first;
 no historical reader/configuration cache is retained.
 
 Caller-owned transaction helpers bind keys, get by key, record commit ranges and
@@ -523,8 +523,11 @@ The API owns an independent `ImmutableDataReader` and a shared store handle;
 branches own only the immutable writer. The reader's projected `get` and `rows_of`
 take one caller-owned published snapshot and the
 commit number from that snapshot, enforcing key/range/ordinal visibility without
-locking or flushing the writer. Discovery excludes spans newer than the segment's
-last published batch. NippyJar's cursor uses EOF for its last column, so committed
+locking or flushing the writer. Ordinal/key reads route through commit-range
+metadata, seeking before shard boundaries to skip older populated shards and
+empty spans. Only the selected shard's
+configuration is opened by path; committed reads do not list the directory.
+NippyJar's cursor uses EOF for its last column, so committed
 reads use native offsets/codecs with stored terminal offsets and tolerate extra
 unpublished bytes. Only destructive cleanup waits for read mappings. Reader clones
 retain directory ownership; close them before reopening files. Future commits are

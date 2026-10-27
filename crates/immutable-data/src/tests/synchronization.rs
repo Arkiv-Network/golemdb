@@ -11,6 +11,7 @@ pub(super) const TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Point {
+    DirectoryScan,
     ColumnAppended,
     PrefixRead,
 }

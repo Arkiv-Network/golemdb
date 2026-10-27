@@ -133,7 +133,9 @@ impl FileSet {
     /// Discover filenames only, sorting parsed u64 starts newest first. Include
     /// data, offsets, configuration and temporary configuration files so an
     /// incomplete file creation cannot make an existing tail disappear.
-    fn starts(&self, segment: &Segment, max_start: Option<u64>) -> StorageResult<Vec<u64>> {
+    fn starts(&self, segment: &Segment) -> StorageResult<Vec<u64>> {
+        #[cfg(test)]
+        test_sync::at(test_sync::Point::DirectoryScan)?;
         let prefix = format!("segment-{}-", segment.schema.name());
         let mut starts = BTreeSet::new();
         for entry in fs::read_dir(&self.directory)? {
@@ -159,12 +161,6 @@ impl FileSet {
                 && start.checked_add(self.span) == Some(end)
                 && numbers == format!("{start}-{end}")
             {
-                // Committed readers only discover configurations in spans that
-                // already contain published rows. Incomplete future files and
-                // atomically replaced .tmp entries must not affect old snapshots.
-                if max_start.is_some_and(|max| start > max || ext != "conf") {
-                    continue;
-                }
                 if !entry.file_type()?.is_file() {
                     return Err(Error::Corrupt("shard path is not a regular file"));
                 }
@@ -290,28 +286,6 @@ impl FileSet {
         Ok(rows)
     }
 
-    pub(crate) fn get(
-        &self,
-        segment: &Segment,
-        ordinal: u64,
-        latest_commit: u64,
-        columns: &[usize],
-    ) -> StorageResult<PayloadRow> {
-        let _read = self
-            .cleanup
-            .read()
-            .map_err(|_| Error::Invalid("file cleanup lock poisoned"))?;
-        for start in self.starts(segment, Some(span_start(latest_commit, self.span)?))? {
-            let jar = self.configuration(segment, start)?;
-            if (jar.user_header().first_ordinal..end(&jar)?).contains(&ordinal) {
-                return self
-                    .read_rows(jar, ordinal..ordinal + 1, columns, true)
-                    .map(|mut rows| rows.pop().unwrap_or_default());
-            }
-        }
-        Err(Error::Corrupt("missing file for published ordinal"))
-    }
-
     pub(crate) fn read_range(
         &self,
         segment: &Segment,
@@ -323,6 +297,8 @@ impl FileSet {
             .cleanup
             .read()
             .map_err(|_| Error::Invalid("file cleanup lock poisoned"))?;
+        // The caller resolves the shard from its published metadata snapshot.
+        // Directory iteration can omit an atomically replaced .conf.
         let jar = self.configuration(segment, span_start(commit, self.span)?)?;
         self.read_rows(jar, range, columns, true)
     }
@@ -354,7 +330,7 @@ impl NippyJarStorage {
             active.check()?;
             return active.end();
         }
-        match self.files.starts(segment, None)?.first() {
+        match self.files.starts(segment)?.first() {
             Some(&start) => end(&self.files.configuration(segment, start)?),
             None => Ok(0),
         }
@@ -379,7 +355,7 @@ impl NippyJarStorage {
                 active.end()?,
                 None,
             )
-        } else if let Some(&last) = self.files.starts(segment, None)?.first() {
+        } else if let Some(&last) = self.files.starts(segment)?.first() {
             let jar = self
                 .files
                 .recover_file(self.files.configuration(segment, last)?)?;
@@ -451,7 +427,7 @@ impl NippyJarStorage {
         let files = self.files.clone();
         let _cleanup = files.lock_cleanup()?;
         self.active.remove(&segment.id);
-        let starts = self.files.starts(segment, None)?;
+        let starts = self.files.starts(segment)?;
         let mut keep = Vec::new();
         // Validate every required file before removing any unpublished files.
         for (&start, range) in ranges {
@@ -568,7 +544,7 @@ impl NippyJarStorage {
                 .read_rows(jar, ordinal..ordinal + 1, columns, false)
                 .map(|mut rows| rows.pop().unwrap_or_default());
         }
-        for start in self.files.starts(segment, None)? {
+        for start in self.files.starts(segment)? {
             // The active file was already checked above. Older configurations
             // are inspected once, and the matched jar is reused for the read.
             if self
@@ -649,7 +625,7 @@ impl NippyJarStorage {
         let mut remove = Vec::new();
         let mut retain = None;
         let mut found = from == 0;
-        for start in self.files.starts(segment, None)? {
+        for start in self.files.starts(segment)? {
             let jar = self.files.configuration(segment, start)?;
             // Permit unfinished tails, but do not heal anything until the whole
             // suffix is validated. Removed files need no recovery; the retained
