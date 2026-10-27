@@ -21,7 +21,7 @@ pub enum ApiError {
     NotFound,
     #[error("cell {name} not found")]
     CellNotFound { name: crate::CellName },
-    /// Spent is receipt.cost. Database calls start emitting this after planner integration.
+    /// Spent is receipt.cost. Required is known only after complete write planning.
     #[error("operation exceeds its budget (required: {required:?})")]
     OutOfBudget { required: Option<u64> },
     #[error("key already exists")]
@@ -216,6 +216,7 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
                 RecordError::Storage(e) => Some(e),
                 RecordError::Cells(e) => Some(e),
                 RecordError::Branch(e) => Some(e),
+                RecordError::Pricing(e) => Some(e),
                 _ => None,
             }
         } else if let Some(error) = error.downcast_ref::<BranchError>() {

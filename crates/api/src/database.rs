@@ -112,7 +112,11 @@ impl Database {
                 None => ImmutableDataStorage::in_memory(config.clone(), info.genesis_id),
             })
             .transpose()?;
-        let pricing = WritePricing::zero(genesis.cell_limits, genesis.record_limits);
+        let pricing = WritePricing::new(
+            Arc::new(pricing_provider),
+            genesis.cell_limits,
+            genesis.record_limits,
+        );
         let inner: Arc<dyn Api + Send + Sync> = match genesis.hash_function {
             HashAlgorithm::Keccak256 => Arc::new(Inner::new(
                 store,
@@ -120,7 +124,6 @@ impl Database {
                 immutable_data,
                 pricing,
                 pruning,
-                pricing_provider,
             )?),
             HashAlgorithm::Blake3 => Arc::new(Inner::new(
                 store,
@@ -128,7 +131,6 @@ impl Database {
                 immutable_data,
                 pricing,
                 pruning,
-                pricing_provider,
             )?),
         };
         Ok(Self {
@@ -263,11 +265,11 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
         immutable_data: Option<ImmutableDataStorage>,
         pricing: WritePricing,
         pruning: Option<PruningConfig>,
-        pricing_provider: PricingProvider,
     ) -> OpenResult<Self> {
         let immutable_reader = immutable_data.as_ref().map(ImmutableDataStorage::reader);
         // Recover before exposing the reader through the completed database handle.
         let branches = Branches::new(store.clone(), hasher.clone(), immutable_data, pruning)?;
+        let pricing_provider = pricing.provider.clone();
         let records = Records::new(branches.clone(), pricing);
         let queries = Queries::new(
             store.clone(),
@@ -281,7 +283,7 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
             branches,
             records,
             queries,
-            pricing: Arc::new(pricing_provider),
+            pricing: pricing_provider,
         })
     }
 }

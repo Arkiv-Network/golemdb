@@ -102,7 +102,7 @@ The API transfers these record-owned entries and the budget to execution without
 building a second validated map. The private record admission module prepares that
 map. Metering checks each admission charge before the corresponding work;
 validation that rejects input records its units before returning the error.
-Writes currently use explicit zero weights. Typed value
+Writes use the committed model's weights. Typed value
 construction, input allocation and transport decoding remain host responsibilities.
 
 ## Receipts and budgets
@@ -111,7 +111,8 @@ CRUD, query and count return `Metered<T> { result, receipt }` on both success an
 failure. Read the receipt before propagating an error; `.into_result()?` explicitly
 discards it. `map` and `map_err` preserve the receipt.
 
-`receipt.cost` is currently **zero**. `receipt.priced_at` is the branch origin or
+`receipt.cost` contains charged planning work and, on success, approved mutations.
+Public reads still cost zero. `receipt.priced_at` is the branch origin or
 committed snapshot's head, including for rejected historical reads. Invalid handles
 and failures before selecting a snapshot have no pricing commit. `receipt.details`
 counts actual user-cell changes and encoded bytes; it excludes system cells,
@@ -121,10 +122,12 @@ no-ops, failed writes and reads. Rollback does not revoke earlier receipts.
 separate from `details`: admission, reads and system mutations can be charged
 without changing user data. `Ledger` and `WeightName` are re-exported by the API.
 Record CUD uses admission, planning, approval and application through `WriteMeter`.
-Database construction supplies explicit zero weights and validated genesis limits;
+Database construction shares its persisted pricing provider and validated genesis limits;
 write ledgers record performed planning and, on success, approved mutations.
-Missing weights remain errors, not implicit zeros. Persisted schedules remain
-iterations 5/6. Outcome-to-API conversion forwards accounting on both success and
+Each write captures the provider's snapshot inside the validated branch guard,
+before admission, and retains it through application. No per-call model scan or
+independent head lookup occurs. Missing weights remain errors, not implicit zeros.
+Outcome-to-API conversion forwards accounting on both success and
 failure. Write admission enforces genesis-configured cell lengths;
 planning enforces the resulting per-record cell caps. There are no additional
 request-entry or total-input-byte caps.
@@ -132,10 +135,21 @@ request-entry or total-input-byte caps.
 Every request constructor requires `Budget::Limited(n)` or `Budget::Unlimited`:
 `RecordOp::create(key, budget)`, `patch(key, budget)`, `get(key, budget)`,
 `delete(key, budget)`, `QueryOp::from_filter(filter, budget)` and
-`CountOp::filter(filter, budget)`. Write budgets are checked against the zero-weight
-schedule, so even a zero budget funds valid writes. Read budgets remain unenforced
+`CountOp::filter(filter, budget)`. Write budgets are checked before each planning
+step and against the full total before any mutation is applied. Read budgets remain unenforced
 and read ledgers empty. `OutOfBudget { required }` is used by the write meter for
 unfunded work; zero prices do not exhaust a budget. Unlimited use is an explicit host decision.
+
+Early budget refusal, missing weights and arithmetic overflow report `required: None`.
+After complete planning, an insufficient budget reports `required: Some(total)`.
+Both return only completed planning charges and zero effects. Missing weights and
+overflow also fail under `Unlimited`; an unpriced failure logs the weight name.
+Trie depths remain fixed at 6. Runtime model administration/activation is deferred.
+
+Index term-creation charges use existence at the committed branch origin. Two calls
+joining a term absent there each pay creation, even if an earlier branch call joined
+it. Removing/rejoining a term present at the origin adds no creation charge. Sealing
+still applies the final index diff; these are deterministic per-call charges.
 
 `ReadTarget::Branch(id)` reads work in progress. `ReadTarget::Head` resolves head
 and reads the record in one storage snapshot. `ReadTarget::Commit(id)` currently

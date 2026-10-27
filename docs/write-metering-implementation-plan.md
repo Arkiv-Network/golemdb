@@ -124,15 +124,15 @@ are checked, including counts whose weights are zero.
 `Outcome` carries accounting separately from effects. The API forwards it to
 `Receipt.cost` and `Receipt.ledger`; metering failures map to the existing
 `OutOfBudget { required }`. Other failures also retain their charged work, while
-failed effects remain zero. Database writes use an explicit zero-weight schedule
-and return full ledgers at zero cost; read calls still return empty ledgers.
+failed effects remain zero. Database writes now use the persisted schedule captured
+at the validated branch origin; read calls still return zero cost and empty ledgers.
 Public request signatures and `Budget` are unchanged. Read-related
 `evaluated_at` changes remain deferred.
 
 Keep `CommitId` and branch selection outside metering: its loader receives the numeric
 commit and a reader from the same caller-selected committed snapshot. Pricing calculations
-remain storage-independent. Iteration 5 supplies persisted loading and inspection;
-iteration 6 connects that provider to the existing record execution path.
+remain storage-independent. Iterations 5 and 6 share persisted loading between
+inspection and the existing record execution path.
 
 ### Record-side planning reads (iteration 4)
 
@@ -184,12 +184,12 @@ canonical typed-value construction happen before the call and remain host work.
    covered by the fixed `write.record.delete` scan work; counters are also verified
    against the resulting effects. Binding, `#key` and `#meta` are then deleted.
 
-`Records::new` requires a `WritePricing` containing the schedule, depths and
-immutable cell/record limits. The API supplies validated genesis limits and
-`Schedule::zero_write` with `INITIAL_DEPTHS` (6). Admission and planning call
+`Records::new` requires a `WritePricing` containing a shared `PricingProvider`, depths
+and immutable cell/record limits. The API supplies validated genesis limits and
+the provider loaded at opening, with `INITIAL_DEPTHS` (6). Admission and planning call
 `WriteMeter` directly: there is no optional adapter or unpriced path, and admission
 performs no database reads. Zero weights still produce ledgers and budget checks;
-missing weights remain errors. Persisted schedule loading remains iterations 5/6.
+missing weights remain errors. Snapshot capture precedes admission inside the branch guard.
 The example's depth-4 create remains 266 total, with 24 spent planning. Under the
 same fixture, deleting those two cells costs 61 total with 15 spent planning;
 empty-record deletion costs 33.
@@ -388,8 +388,9 @@ Each iteration should leave the workspace compiling and have its own focused che
 an explicit budget; builders only collect raw ordered input; patch `set` preserves stored kind.
 Record execution now owns admission and projection normalization. `first_error` and
 builder `validate()` have been removed; budgets and raw entries reach the record crate.
-Receipt effects and pricing context are populated, while costs remain zero and
-budgets remain unenforced. See the [Rust API guide](../crates/api/README.md).
+Receipt effects and pricing context were populated in this iteration, with costs
+still zero and budgets unenforced at that stage. Iteration 6 enables write pricing
+and budgets. See the [Rust API guide](../crates/api/README.md).
 
 **Outcome:** callers can adopt the final result shape before the pricing implementation exists.
 
@@ -469,9 +470,9 @@ production enforcement, population counters or public read pricing.
 **Implemented:** shared CUD planning/application, metered admission and state reads,
 prospective user/system/index charges, bounded live-cell scanning, and the PR #87
 metadata-decoding cleanup. `Records` requires immutable pricing and calls
-`WriteMeter` directly. Public database writes use explicit zero weights with full
-ledgers; tests supply nonzero schedules through the same constructor. Persisted
-schedules and their production connection remain iterations 5/6. Public
+`WriteMeter` directly. At iteration 4, public database writes used explicit zero weights
+with full ledgers; iteration 6 connects the shared persisted provider. Tests select
+explicit prices through that same provider path. Public
 estimation remains iteration 7.
 
 1. Refactor current record CRUD, which interleaves reads and overlay writes, into internal planning and application functions. First establish equivalent behavior with a supplied test pricing context.
@@ -493,7 +494,7 @@ estimation remains iteration 7.
 **Implemented:** initial models and weights persist at genesis and reload on opening.
 A shared `PricingProvider` in `metering` supplies immutable cached pricing. Read-only
 API accessors expose model metadata and weights, including `host.*`.
-Normal CUD still uses its explicit zero schedule until iteration 6.
+Iteration 6 connects this provider to CUD execution.
 
 1. `metering` owns `PricingConfig`, `HostMeteringSchema`, model metadata, reserved-cell codecs,
    validation, `PricingProvider` and `PricingSnapshot`. Dependencies on `cells` and
@@ -532,7 +533,7 @@ Normal CUD still uses its explicit zero schedule until iteration 6.
 changes genesis identity while local host capabilities do not; cache references survive
 ordinary commits with distinct call commit IDs; missing/zero/host weights remain distinct;
 malformed/unsupported active models cannot fall back to genesis prices; invalid fresh
-configuration publishes no partial genesis. Existing CUD receipts stay zero-priced.
+configuration publishes no partial genesis. Explicit zero configurations remain supported.
 
 ### Iteration 6 — Enforce real CUD prices and budgets
 
@@ -540,14 +541,38 @@ configuration publishes no partial genesis. Existing CUD receipts stay zero-pric
 
 **Outcome:** all three write operations return actual charges and reject unfunded work before application.
 
-1. Replace the API's explicit zero schedule with the shared metering provider from iteration 5. Resolve its snapshot against the validated branch origin and reuse it for the whole call. All CUD paths already use `WriteMeter`; verify their nonzero production prices in reviewable increments.
+**Implemented:** API inspection and Records share one `Arc<PricingProvider>`.
+`WritePricing::new` supplies that provider, deployment limits and fixed depth 6;
+`Records::execute_write` captures its snapshot inside `write_with_origin`, after
+handle/origin validation and before admission. An unavailable schedule fails before
+charging or applying anything. No per-call model scan, extra head lookup or zero fallback.
+
+1. Use the shared metering provider from iteration 5. Resolve its snapshot against the validated branch origin and reuse it for the whole call. All CUD paths use `WriteMeter` with the configured persisted prices.
 2. Verify admission, base, cell-read and index-read charges against the persisted schedule; retain the existing accumulation of user/system mutation prices and final approval before applying.
 3. Return the full approved cost on success. On planning failure return only completed planning cost, zero effects, and the specified error/`required` value. Forward the meter's per-weight ledger separately from user-effect `Details`; it is always present in the in-process receipt, including system charges and failed planning.
 4. Preserve receipts across rollback/discard; there are no refunds or additional rollback charges. Commit overhead and final global-counter/allocator persistence do not become additional client-call charges.
-5. Add the simplified index rule to the model documentation and golden examples in the same change that enables it.
+5. Use the committed-origin index rule documented in metering D2: each join to a term absent at the origin pays term creation, even after an earlier branch join. A term present at the origin pays no creation charge after remove/recreate. There is no branch-aware term population tracker.
 6. Keep `get`, `query` and `count` at zero cost with their correct receipt context. Document that their budgets remain unenforced until read metering lands; do not describe them as budget-bounded reads.
 
 **Acceptance:** end-to-end conformance examples cover fields and attributes, system mutations, no-ops, preserved-kind `set`, caps, missing cells, exact cutoffs, missing weights and overflow. Repeated joins and remove/recreate sequences match the explicit base-term rule. Failed planning leaves IDs, overlay state and counters untouched.
+
+Public API conformance uses the earlier example's weights with the runtime depth 6,
+without changing the original depth-4 worked example:
+
+| Call | Planning cost | Approved total / required |
+| --- | --- | --- |
+| Create `age: u32(7)` field and `color: "red"` attribute, absent term at origin | 24 | 278 |
+| Same create, budget 23 | 22 | unknown; next term read is unfunded |
+| Same create, budget 277 | 24 | 278; zero effects |
+| Set `age` from 7 to 8 | 19 | 47 |
+| Set `age` to its existing value 7 | 19 | 19; no mutations |
+| Delete the two-cell record | 15 | 73 |
+| Create another such record with the term already present at origin | 24 | 271 |
+
+Receipts reconstruct from their ledger and the API's weights. Tests cover both storage
+backends and hash algorithms, retained receipts across rollback/discard, and unmetered
+public reads with nonzero planning-read prices. Unpriced failures emit a warning naming
+the weight; `Unlimited` still rejects missing weights and arithmetic overflow.
 
 ### Iteration 7 — Shared estimation and deletion bounds
 

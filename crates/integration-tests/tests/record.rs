@@ -15,17 +15,29 @@ const KEY: RecordKey = RecordKey([0x42; 32]);
 const OTHER: RecordKey = RecordKey([0x43; 32]);
 
 fn zero_pricing() -> WritePricing {
-    WritePricing::zero(
-        CellLimits {
-            max_cell_name_len: 32,
-            max_str_len: 64,
-            max_bytes_len: 128,
-        },
-        RecordLimits {
-            max_cells: 100,
-            max_indexed_cells: 100,
-        },
-    )
+    let limits = CellLimits {
+        max_cell_name_len: 32,
+        max_str_len: 64,
+        max_bytes_len: 128,
+    };
+    let record_limits = RecordLimits {
+        max_cells: 100,
+        max_indexed_cells: 100,
+    };
+    let store = MemoryStore::new();
+    let cfg = golemdb_api::OpenConfig::new(golemdb_api::Genesis::new(
+        golemdb_api::HashAlgorithm::Keccak256,
+        limits,
+        record_limits,
+        None,
+        golemdb_api::PricingConfig::zero(),
+    ));
+    golemdb_api::Database::from_store(store.clone(), &cfg).unwrap();
+    let tx = store.begin_read().unwrap();
+    let provider =
+        golemdb_metering::PricingProvider::load(&golemdb_cells::CellReader::new(&tx), 0, &[])
+            .unwrap();
+    WritePricing::new(std::sync::Arc::new(provider), limits, record_limits)
 }
 
 fn name(bytes: &[u8]) -> CellName {

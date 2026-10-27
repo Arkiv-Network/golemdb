@@ -14,7 +14,7 @@ and adapters.
 | --- | --- |
 | `api` | Public `Api` trait, `Database` handle, typed CRUD requests, opening, genesis initialization and validation. |
 | `metering` | `Budget`, immutable named schedules, checked write pricing, `WriteMeter` and per-weight ledgers; persisted model loading and shared pricing snapshots over `cells`/`storage`. Calculations remain storage-independent. |
-| `record` | Record identity, admission, metered CUD planning, final approval and atomic plan application over branch cell views. Production CUD connection to the persisted provider remains iteration 6. |
+| `record` | Record identity, admission, metered CUD planning against the shared persisted provider, final approval and atomic plan application over branch cell views. |
 | `branch` | Branch registry, overlays, undo frames, guarded reads and writes, sealing, and atomic publication. |
 | `cells` | Cell names, keys, types, canonical values, deployment limits, reserved-record constants, `Cell` storage and its commitment. |
 | `immutable-data` | Typed rows and genesis schemas using cell codecs, NippyJar/memory files, physical reads/recovery and transactional log metadata. |
@@ -305,14 +305,14 @@ There is no create `.insert()`. Patch also has `.remove()`. Operations implement
 `golemdb-query`. Query/count builders remain in the query crate; moving them into
 the API crate is deferred.
 
-`Metered<T>` holds a result and a receipt on every outcome. Cost remains zero and
-write budgets are checked against explicit zero prices, while read budgets remain
+`Metered<T>` holds a result and a receipt on every outcome. CUD costs use the
+committed pricing snapshot captured at the validated branch origin; read budgets remain
 unenforced. User effects exclude system cells, failed writes and
 no-ops. `priced_at` comes from the same validated branch origin or committed snapshot
 as execution; unavailable history uses the captured head. Unknown/stale handles and
 sealed writes have no pricing snapshot. `.into_result()` explicitly drops a receipt;
 `map` and `map_err` preserve it. Write budget failures map to `OutOfBudget { required }`;
-the API's explicit zero weights currently make valid writes affordable at any budget.
+only explicit zero prices make charged work free. Missing prices never default to zero.
 
 The metering core prices `PlanningStep` and `MutationCharge` against an immutable
 `Schedule`. `WriteMeter::run_step` checks and records a complete charge before its
@@ -320,17 +320,18 @@ action, including failed validation; the record base combines `read.key` and
 `write.record.{op}` atomically. Prospective mutations are separate until `finish`.
 Missing weights and checked cost/count overflow stop the meter, even with Unlimited.
 `INITIAL_DEPTHS` supplies temporary cell/index depth 6; fixtures may supply others.
-Population counters/depth selection and persisted weights are not implemented.
+Population counters/depth selection remain deferred; weights persist at genesis.
 `Outcome.accounting` carries cost and `Ledger` through API conversion. Receipts
 always have a ledger keyed by `WeightName`, re-exported by API; failed effects stay
-zero while charged work survives. Database writes use `Schedule::zero_write` and
-produce zero cost with full ledgers. Read costs remain zero and their ledgers empty.
-Iteration 5 loads persisted pricing for inspection; iteration 6 connects it to CUD. Missing weights never fall back to zero.
+zero while charged work survives. Database writes use the same `Arc<PricingProvider>`
+as API inspection. Record captures a snapshot inside the branch guard before admission,
+with no extra head read or model scan. Missing-weight failures log the weight name.
+Read costs remain zero and their ledgers empty.
 Read `evaluated_at` changes are deferred.
 
 CUD executes one read-only `WritePlan` followed by approval and application under
 the same branch guard. `Records::new(branches, WritePricing)` requires immutable
-configuration; the API supplies zero weights and its validated genesis limits.
+configuration containing the shared provider, depths and validated genesis limits.
 Admission and planning use the metering crate's `WriteMeter` directly, with no
 record-side meter adapter or unpriced path. Patch/delete read #meta
 and then #key before user cells. Every indexed leave/join reads its term at the
@@ -434,7 +435,7 @@ activation commit from metering's metadata into `CommitId`. No diagnostics list 
 Weight maps and models are shared through Arc. Ordinary commits change the call's commit
 context but do not reread schedules. Runtime admin writes and activation refresh remain
 iteration 8; low-level price changes and any rewind require reopening/reloading. Public
-CUD still uses the explicit zero schedule until iteration 6, and read metering is deferred.
+CUD enforces persisted prices and budgets; public read metering is deferred.
 
 ### Generated record keys and typed input conversion
 
