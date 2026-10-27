@@ -176,7 +176,7 @@ fn builder_recovers_tail_and_staging_uses_published_mdbx_ranges() {
     drop(files);
     let files = ImmutableDataStorage::open(config(), [9; 32], dir.path().join("files")).unwrap();
     let reader = files.reader();
-    let branches = Branches::new(store.clone(), Keccak256Hasher, Some(files)).unwrap();
+    let branches = Branches::new(store.clone(), Keccak256Hasher, Some(files), None).unwrap();
     let id = branches.begin().unwrap();
     assert!(matches!(
         branches.immutable_data_append(id, "events", Some(ImmutableDataKey([1; 32])), row(11)),

@@ -14,6 +14,7 @@ golemdb-storage.workspace = true
 golemdb-storage-mdbx.workspace = true
 golemdb-merkle.workspace = true
 golemdb-metering.workspace = true
+golemdb-pruning.workspace = true
 golemdb-index.workspace = true
 golemdb-query.workspace = true
 serde.workspace = true

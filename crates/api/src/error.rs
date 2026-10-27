@@ -193,6 +193,7 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
     use golemdb_cells::CellError;
     use golemdb_index::IndexError;
     use golemdb_merkle::MerkleError;
+    use golemdb_pruning::PruningError;
     use golemdb_storage::StorageError;
     if matches!(
         error.downcast_ref::<StorageError>(),
@@ -214,6 +215,7 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
                 BranchError::Cells(e) => Some(e),
                 BranchError::Index(e) => Some(e),
                 BranchError::ImmutableData(e) => Some(e),
+                BranchError::Pruning(e) => Some(e),
                 _ => None,
             }
         } else if let Some(ImmutableDataStorageError::Store(error)) =
@@ -233,6 +235,8 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
                 _ => None,
             }
         } else if let Some(MerkleError::Storage(error)) = error.downcast_ref::<MerkleError>() {
+            Some(error)
+        } else if let Some(PruningError::Storage(error)) = error.downcast_ref::<PruningError>() {
             Some(error)
         } else {
             error.source()

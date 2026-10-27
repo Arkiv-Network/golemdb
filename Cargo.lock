@@ -527,6 +527,7 @@ dependencies = [
  "golemdb-index",
  "golemdb-merkle",
  "golemdb-metering",
+ "golemdb-pruning",
  "golemdb-query",
  "golemdb-record",
  "golemdb-storage",
@@ -544,8 +545,11 @@ dependencies = [
  "golemdb-immutable-data",
  "golemdb-index",
  "golemdb-merkle",
+ "golemdb-pruning",
  "golemdb-storage",
+ "golemdb-storage-mdbx",
  "proptest",
+ "tempfile",
  "thiserror",
 ]
 
@@ -597,6 +601,7 @@ dependencies = [
  "golemdb-immutable-data",
  "golemdb-index",
  "golemdb-merkle",
+ "golemdb-pruning",
  "golemdb-record",
  "golemdb-storage",
  "golemdb-storage-mdbx",

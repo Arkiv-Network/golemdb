@@ -9,6 +9,7 @@ use std::{
 
 use golemdb_immutable_data::{ImmutableDataKey, ImmutableDataRow, ImmutableDataStorage};
 use golemdb_merkle::HashProvider;
+use golemdb_pruning::{Pruner, PruningConfig};
 use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{
@@ -65,6 +66,7 @@ pub(crate) struct ImmutableWriter {
 struct Inner<S, H> {
     hasher: H,
     store: S,
+    pruner: Option<Pruner>,
     branches: Mutex<BTreeMap<BranchId, Entry>>,
     immutable_segments: ImmutableSegments,
     immutable_writer: Option<Mutex<ImmutableWriter>>,
@@ -132,7 +134,14 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
     /// while it owns immutable storage. The store must provide durable commit
     /// and authoritative snapshots after commit errors.
     /// A missing, malformed or unreadable head is rejected before recovery.
-    pub fn new(store: S, hasher: H, immutable_data: Option<ImmutableDataStorage>) -> Result<Self> {
+    /// `pruning` prunes inside every commit with these settings; `None` disables it.
+    pub fn new(
+        store: S,
+        hasher: H,
+        immutable_data: Option<ImmutableDataStorage>,
+        pruning: Option<PruningConfig>,
+    ) -> Result<Self> {
+        let pruner = pruning.map(Pruner::new);
         {
             let tx = store.begin_read()?;
             read_head(&tx)?;
@@ -140,6 +149,7 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
         let mut inner = Inner {
             store,
             hasher,
+            pruner,
             branches: Mutex::new(BTreeMap::new()),
             immutable_segments: ImmutableSegments::default(),
             immutable_writer: None,
@@ -389,6 +399,7 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
                         &state.immutable_data,
                         &self.inner.immutable_segments,
                         &self.inner.hasher,
+                        self.inner.pruner.as_ref(),
                     )
                 }));
                 drop(writer);
@@ -403,6 +414,7 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
                     state.commit_id,
                     &sealed,
                     &self.inner.hasher,
+                    self.inner.pruner.as_ref(),
                 )
             };
             match outcome {

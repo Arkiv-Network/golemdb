@@ -73,7 +73,7 @@ fn stage<S: Store, H: HashProvider>(
 fn stale_commit_conflicts_unless_another_operation_already_invalidated_it() {
     let db = MemoryStore::new();
     genesis(&db, &Keccak256Hasher);
-    let branches = Branches::new(db, Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db, Keccak256Hasher, None, None).unwrap();
     let winner = stage(&branches, "winner");
     let stale = stage(&branches, "stale");
     let invalidated = stage(&branches, "invalidated");
@@ -95,7 +95,7 @@ fn stale_commit_conflicts_unless_another_operation_already_invalidated_it() {
 }
 fn lifecycle(db: impl Store + Clone, hash: impl HashProvider + Copy) {
     genesis(&db, &hash);
-    let branches = Branches::new(db.clone(), hash, None).unwrap();
+    let branches = Branches::new(db.clone(), hash, None, None).unwrap();
     let old_reader = db.begin_read().unwrap();
     let old_head = old_reader.get(SUPERBLOCK, b"head").unwrap();
     let winner = stage(&branches, "Alice");
@@ -208,7 +208,7 @@ fn mdbx_commit_survives_reopen() {
         );
     }
     let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
-    let branches = Branches::new(db, Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db, Keccak256Hasher, None, None).unwrap();
     assert_eq!(branches.head().unwrap(), golemdb_branch::CommitId::new(2));
     let branch = branches.begin().unwrap();
     // Reopens roots persisted by the previous manager, and extends the root chain.
@@ -335,11 +335,11 @@ impl<W: WriteTransaction> WriteTransaction for ControlledWrite<W> {
 }
 fn failure_recovery(db: impl Store + Clone + 'static) {
     genesis(&db, &Keccak256Hasher);
-    let init = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+    let init = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
     init.commit(stage(&init, "original")).unwrap();
     let before = snapshot(&db);
     let controlled = Controlled::new(db.clone());
-    let branches = Branches::new(controlled.clone(), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(controlled.clone(), Keccak256Hasher, None, None).unwrap();
     let branch = branches.begin().unwrap();
     branches
         .write(branch, |cells| {
@@ -401,8 +401,8 @@ fn race(db: impl Store + Clone + Send + Sync + 'static) {
     genesis(&db, &Keccak256Hasher);
     let mut controlled = Controlled::new(db.clone());
     controlled.barrier = Some(Arc::new(Barrier::new(2)));
-    let a = Branches::new(controlled.clone(), Keccak256Hasher, None).unwrap();
-    let b = Branches::new(controlled.clone(), Keccak256Hasher, None).unwrap();
+    let a = Branches::new(controlled.clone(), Keccak256Hasher, None, None).unwrap();
+    let b = Branches::new(controlled.clone(), Keccak256Hasher, None, None).unwrap();
     let id_a = stage(&a, "Alice");
     let id_b = stage(&b, "Bob");
     let seal_a = a.seal(id_a).unwrap();
@@ -466,7 +466,7 @@ fn implicit_and_explicit_seal_publish_identical_state() {
     for explicit in [false, true] {
         let db = MemoryStore::new();
         genesis(&db, &Keccak256Hasher);
-        let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+        let branches = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
         let branch = stage(&branches, "final");
         branches.checkpoint(branch).unwrap();
         branches
@@ -494,7 +494,7 @@ fn mdbx_key_limit_during_implicit_seal_leaves_branch_open() {
     let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
     genesis(&db, &Keccak256Hasher);
     let before = snapshot(&db);
-    let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
     let branch = branches.begin().unwrap();
     branches
         .write(branch, |cells| {

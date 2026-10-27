@@ -29,7 +29,7 @@
 //! use golemdb_merkle::Keccak256Hasher;
 //!
 //! fn edit<S: Store>(store: S) -> Result<(), Box<dyn std::error::Error>> {
-//!     let branches = Branches::new(store, Keccak256Hasher, None)?;
+//!     let branches = Branches::new(store, Keccak256Hasher, None, None)?;
 //!     let branch = branches.begin()?;
 //!     let key = CellKey::new(64, CellNameRef::parse_user(b"status", 64)?);
 //!     branches.write(branch, |cell_writer| {
@@ -81,7 +81,7 @@
 //! let empty = hash.hash(&[]);
 //! tx.put(Table("Superblock"), b"head", &[0u64.to_be_bytes().as_slice(), &empty, &empty].concat())?;
 //! tx.commit()?;
-//! let branches = Branches::new(store, hash, None)?;
+//! let branches = Branches::new(store, hash, None, None)?;
 //! let branch = branches.begin()?;
 //! let sealed = branches.seal(branch)?;
 //! assert_eq!(sealed.commit_id.get(), 1);
@@ -223,6 +223,10 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "tests/publication.rs"]
 mod publication_tests;
+
+#[cfg(test)]
+#[path = "tests/gc.rs"]
+mod gc_tests;
 
 #[cfg(test)]
 #[path = "tests/synchronization.rs"]

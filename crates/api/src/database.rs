@@ -5,6 +5,7 @@ use std::sync::Arc;
 use golemdb_branch::{Branches, read_head};
 use golemdb_immutable_data::{ImmutableDataReader, ImmutableDataStorage};
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher};
+use golemdb_pruning::PruningConfig;
 use golemdb_query::Queries;
 use golemdb_record::{Records, WritePricing};
 use golemdb_storage::Store;
@@ -97,6 +98,7 @@ impl Database {
     ) -> OpenResult<Self> {
         let genesis = opened.genesis().clone();
         let info = *opened.info();
+        let pruning = opened.pruning();
         let store = opened.into_store();
         let immutable_data = genesis
             .immutable_data
@@ -110,12 +112,20 @@ impl Database {
             .transpose()?;
         let pricing = WritePricing::zero(genesis.cell_limits, genesis.record_limits);
         let inner: Arc<dyn Api + Send + Sync> = match genesis.hash_function {
-            HashAlgorithm::Keccak256 => {
-                Arc::new(Inner::new(store, Keccak256Hasher, immutable_data, pricing)?)
-            }
-            HashAlgorithm::Blake3 => {
-                Arc::new(Inner::new(store, Blake3Hasher, immutable_data, pricing)?)
-            }
+            HashAlgorithm::Keccak256 => Arc::new(Inner::new(
+                store,
+                Keccak256Hasher,
+                immutable_data,
+                pricing,
+                pruning,
+            )?),
+            HashAlgorithm::Blake3 => Arc::new(Inner::new(
+                store,
+                Blake3Hasher,
+                immutable_data,
+                pricing,
+                pruning,
+            )?),
         };
         Ok(Self {
             inner,
@@ -237,10 +247,11 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
         hasher: H,
         immutable_data: Option<ImmutableDataStorage>,
         pricing: WritePricing,
+        pruning: Option<PruningConfig>,
     ) -> OpenResult<Self> {
         let immutable_reader = immutable_data.as_ref().map(ImmutableDataStorage::reader);
         // Recover before exposing the reader through the completed database handle.
-        let branches = Branches::new(store.clone(), hasher.clone(), immutable_data)?;
+        let branches = Branches::new(store.clone(), hasher.clone(), immutable_data, pruning)?;
         let records = Records::new(branches.clone(), pricing);
         let queries = Queries::new(
             store.clone(),

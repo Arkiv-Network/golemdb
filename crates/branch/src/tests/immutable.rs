@@ -77,7 +77,7 @@ fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
 // Synthetic metadata covers enormous ordinals and corruption without allocating
 // physical rows. Only staging admission is exercised by these two fixtures.
 fn synthetic_metadata_branches(db: MemoryStore) -> Branches<MemoryStore, Keccak256Hasher> {
-    let mut branches = Branches::new(db, Keccak256Hasher, None).unwrap();
+    let mut branches = Branches::new(db, Keccak256Hasher, None, None).unwrap();
     Arc::get_mut(&mut branches.inner)
         .unwrap()
         .immutable_segments = ImmutableSegments::new(config()).unwrap();
@@ -89,7 +89,7 @@ fn publication_checks_staged_end_against_metadata_and_physical_rows() {
     for physical_mismatch in [false, true] {
         let db = store(0);
         let storage = ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap();
-        let branches = Branches::new(db.clone(), Keccak256Hasher, Some(storage)).unwrap();
+        let branches = Branches::new(db.clone(), Keccak256Hasher, Some(storage), None).unwrap();
         let first = branches.begin().unwrap();
         append(&branches, first, 1);
         branches.commit(first).unwrap();
@@ -141,7 +141,7 @@ fn staging_is_independent_of_cell_frames_and_remains_editable_after_seal() {
     let db = store(0);
     let storage = ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap();
     let reader = storage.reader();
-    let branches = Branches::new(db.clone(), Keccak256Hasher, Some(storage)).unwrap();
+    let branches = Branches::new(db.clone(), Keccak256Hasher, Some(storage), None).unwrap();
     let id = branches.begin().unwrap();
     let cell = CellKey::new(64, CellNameRef::raw(b"value"));
     branches
@@ -214,6 +214,7 @@ fn branch_local_reservations_and_lifecycle_release() {
         db,
         Keccak256Hasher,
         Some(ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()),
+        None,
     )
     .unwrap();
     let a = branches.begin().unwrap();
@@ -360,6 +361,7 @@ fn staging_and_seal_do_not_open_a_writer() {
         ReadOnly(store(0), read_only.clone()),
         Keccak256Hasher,
         Some(ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()),
+        None,
     )
     .unwrap();
     read_only.store(true, Ordering::Relaxed);
@@ -434,6 +436,7 @@ fn head_key_and_first_ordinal_use_the_same_snapshot() {
         },
         Keccak256Hasher,
         Some(ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()),
+        None,
     )
     .unwrap();
     let id = branches.begin().unwrap();
@@ -454,6 +457,7 @@ fn concurrent_appends_share_reservations_and_allocate_distinct_ordinals() {
         store(0),
         Keccak256Hasher,
         Some(ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()),
+        None,
     )
     .unwrap();
     let id = branches.begin().unwrap();
@@ -549,6 +553,7 @@ fn metadata_read_errors_leave_rows_keys_and_ordinals_retryable() {
         },
         Keccak256Hasher,
         Some(ImmutableDataStorage::in_memory(config(), [7; 32]).unwrap()),
+        None,
     )
     .unwrap();
     let id = branches.begin().unwrap();

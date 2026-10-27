@@ -5,5 +5,5 @@ mod immutable_genesis;
 mod metadata;
 mod opening;
 mod opening_failure;
-
+mod pruning;
 mod receipts;

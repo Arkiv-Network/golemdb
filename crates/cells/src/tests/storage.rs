@@ -117,8 +117,8 @@ fn transitions_and_tagged_commitments(db: &impl Store) {
         .unwrap()
         .root;
     assert_eq!(collapsed, retyped.root);
-    // The branch row at the root position stays behind; a singleton must be
-    // recovered from the flat table, never from that row.
+    // The collapsed branch's row was written by this same commit, so it is
+    // deleted; a singleton is recovered from the flat table.
     cells.validate_root(&tx, collapsed).unwrap();
     let empty = cells
         .apply(&mut tx, 0, collapsed, [delete(42, b"status")])
@@ -126,7 +126,8 @@ fn transitions_and_tagged_commitments(db: &impl Store) {
         .root;
     assert_eq!(empty, RootRef::Empty);
     assert!(rows(&tx, tables::CELL).is_empty());
-    assert!(!rows(&tx, tables::CELL_TRIE.table()).is_empty());
+    // Every write here is commit 0, so no superseded branch row remains.
+    assert!(rows(&tx, tables::CELL_TRIE.table()).is_empty());
     cells.validate_root(&tx, empty).unwrap();
     tx.commit().unwrap();
 }

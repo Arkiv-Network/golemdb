@@ -1,7 +1,7 @@
 use std::iter::FusedIterator;
 
 use golemdb_merkle::{HashProvider, RootRef};
-use golemdb_storage::{ReadCursor, ReadTransaction, Scan, WriteTransaction, scan_prefix};
+use golemdb_storage::{ReadCursor, ReadTransaction, Scan, Table, WriteTransaction, scan_prefix};
 
 use crate::{CELL_TRIE_PATH_BYTES, CellKey, CellValue, Result, cell_trie::CellTrie, tables};
 
@@ -37,6 +37,8 @@ pub struct CellsUpdate {
     pub root: RootRef<CELL_TRIE_PATH_BYTES>,
     /// Actual changes only, ordered by complete key, spanning the input batch.
     pub changed_cells: Vec<CellValueChange>,
+    /// Stored trie rows this batch replaced, which only older roots reach.
+    pub superseded: Vec<(Table, Vec<u8>)>,
 }
 
 impl<'h, H: HashProvider> Cells<'h, H> {
@@ -97,10 +99,11 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         // One trie update for the whole batch writes each touched branch once.
         let edits =
             (changes_by_key.iter()).map(|(key, change)| (key.as_slice(), change.after.as_ref()));
-        let root = self.trie.set(tx, commit, root, edits)?;
+        let update = self.trie.set(tx, commit, root, edits)?;
         write_values(tx, &changes_by_key)?;
         Ok(CellsUpdate {
-            root,
+            root: update.root,
+            superseded: update.superseded,
             changed_cells: changes_by_key
                 .into_iter()
                 .map(|(_, change)| change)

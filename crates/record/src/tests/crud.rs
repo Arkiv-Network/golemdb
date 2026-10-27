@@ -74,6 +74,7 @@ fn head_selection_and_record_read_share_one_snapshot() {
         },
         Keccak256Hasher,
         None,
+        None,
     )
     .unwrap();
     let reader = Records::new(reader_branches.clone(), zero_pricing());
@@ -209,7 +210,7 @@ pub(super) fn setup() -> (
 ) {
     let db = MemoryStore::new();
     initialize(&db);
-    let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
     let records = Records::new(branches.clone(), zero_pricing());
     (db, branches, records)
 }

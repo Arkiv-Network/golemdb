@@ -58,6 +58,7 @@ pub use golemdb_immutable_data::{
 };
 pub use golemdb_merkle::HashAlgorithm;
 pub use golemdb_metering::{Budget, Ledger, WeightName};
+pub use golemdb_pruning::PruningConfig;
 pub use golemdb_storage_mdbx::MdbxOptions;
 pub use metered::{Details, Metered, Receipt};
 pub use open::OpenInfo;

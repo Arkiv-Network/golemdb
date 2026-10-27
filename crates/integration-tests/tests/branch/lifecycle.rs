@@ -74,7 +74,7 @@ fn assert_invalid<S: Store>(branches: &Branches<S, impl HashProvider>, handle: B
 fn lifecycle(db: impl Store + Clone) {
     // 1. Two branches start independently over the same published head.
     publish(&db, 7, "origin");
-    let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
     assert_eq!(branches.head().unwrap(), golemdb_branch::CommitId::new(7));
     let edited = branches.begin().unwrap();
     let sibling = branches.begin().unwrap();
