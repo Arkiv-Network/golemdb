@@ -3122,18 +3122,20 @@ resolved before the byte comparison rather than inside it; direction then applie
 else — absent first under ASC, last under DESC.
 
 **A sort is a list of terms, applied in order.** Only the first term's value is fetched for every
-record; deeper terms are fetched only where they are needed to break a tie, and which records those
-are is fixed by the data:
+record; deeper terms are fetched only where they are needed to break a tie on the page, and which
+records those are is fixed by the data and the page:
 
 > A record needs its level-_k_ sort value **iff** it belongs to a group of ≥ 2 records tied on levels
-> 1 … *k*−1.
+> 1 … *k*−1 that holds a position of the page.
 
-Singleton groups are already ordered and are never descended into. Because any correct sort must
-resolve tied records against each other, this set is the same whichever algorithm produces it — the
-fetch count is a property of the data, not of the sort. The bounds follow directly: level 1 always
-costs N, each deeper level costs only the records still tied, so with S terms the total lies in
-**`[N, N × S]`** — the lower bound when level 1 has no ties at all, the upper when every record ties
-through to the last term.
+Singleton groups are already ordered and are never descended into. Nor is a group the page holds no
+position of: it sits wholly before or after the page, so its block of positions is known from level
+1 alone, and no record of it is returned. Because any correct sort must resolve the tied records the
+page returns against each other, this set is the same whichever algorithm produces it — the fetch
+count is a property of the data and the page, not of the sort. The bounds follow directly: level 1
+always costs N, each deeper level costs only the records still tied in groups the page reaches, so
+with S terms the total lies in **`[N, N × S]`** — the lower bound when level 1 has no ties on the
+page, the upper when every record ties through to the last term.
 
 **Direction is per term; the tie-break is not.** Each term carries its own ASC or DESC. Records that
 remain tied after every term are ordered by **ascending `recordID`, always** — independent of any
@@ -3147,8 +3149,10 @@ equal. That is a second property, distinct from determinism, and paging depends 
 to name exactly one such place.
 
 **Direction costs nothing.** Every value is in memory before any ordering happens, so direction is a
-property of the comparator, not of the access path: DESC fetches the same cells as ASC, compares the
-same number of times, and descends the same tied groups. Absent values need no special handling
+property of the comparator, not of the access path: DESC fetches the same level-1 cells as ASC and
+compares the same number of times. The deeper cells it fetches follow the same rule, but the page
+holds different positions of a reversed order, so it can reach different tied groups: never more than
+ordering the whole match set would, in either direction. Absent values need no special handling
 either, since ordering them below every present value and then reversing puts them last. Mixed
 directions are free for the same reason — each term's comparator is reversed on its own. A strategy
 that drew its order from an index instead would have to hold that ordering physically, which is why
@@ -3167,7 +3171,7 @@ is allocated monotonically by a deterministic allocator, so the order is identic
 it is **creation order — oldest first**, which is a meaning a caller can use rather than an arbitrary
 permutation.
 
-Six matched records, sorted by `(status ASC, amount DESC)`:
+Six matched records, sorted by `(status ASC, amount DESC)`, on a page that takes all six:
 
 ```
 match set  { 100, 101, 102, 103, 104, 105 }
@@ -3197,7 +3201,9 @@ fetches    6 + 5 = 11                       worst case  N × S = 12
 
 `105` is never read twice: `"pending"` is a group of one, so its position was settled at level 1 and
 its `amount` is never fetched. That single saved lookup is the whole of the level-2 rule at small
-scale; over a match set where one value dominates, it is the difference between S passes and one.
+scale; over a match set where one value dominates, it is the difference between S passes and one. A
+page of the first two records would fetch only the three `active` amounts, 9 in all: `closed` comes
+fourth and fifth, past the page, so its order is never needed.
 
 Group order is a byte comparison of the `str` values — `"active" < "closed" < "pending"` — which for
 raw UTF-8 is lexicographic order.

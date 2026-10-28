@@ -1,12 +1,15 @@
-//! The storage seam: everything the evaluator reads goes through
-//! [`PostingSource`], so query logic is testable without a database.
+//! The storage seam: everything the evaluator and the sorting strategies
+//! read of the index goes through [`PostingSource`], so query logic is
+//! testable without a database.
 
 use golemdb_index::{Bitmap, Index, IndexTerm, TermRange};
 use golemdb_merkle::HashProvider;
 use golemdb_storage::ReadTransaction;
 
-/// Read access to the index's posting lists.
-pub(crate) trait PostingSource {
+/// Read access to the index's posting lists at one snapshot. Use the
+/// snapshot the query's match set was evaluated at, so every read sees the
+/// same state.
+pub trait PostingSource {
     /// The record IDs indexed under `term`; empty when the term is absent.
     fn postings(&self, term: &IndexTerm) -> golemdb_index::Result<Bitmap>;
 

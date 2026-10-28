@@ -7,7 +7,7 @@ use golemdb_immutable_data::{ImmutableDataReader, ImmutableDataStorage};
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher};
 use golemdb_metering::{PricingProvider, PricingSnapshot};
 use golemdb_pruning::PruningConfig;
-use golemdb_query::Queries;
+use golemdb_query::{FetchAndSort, Queries};
 use golemdb_record::{Records, WritePricing};
 use golemdb_storage::Store;
 
@@ -245,6 +245,11 @@ const MAX_QUERY_DEPTH: u32 = 64;
 /// (`#maxQueryLimit`) in the scope of issues #48 and #49.
 const MAX_QUERY_LIMIT: u32 = 100;
 
+/// The most keys a query sorts by: more fail as `LimitExceeded`. Hardcoded
+/// for now: it will be read from genesis (`#maxSortKeys`) in the scope of
+/// issues #48 and #49.
+const MAX_SORT_KEYS: u32 = 4;
+
 /// All layers share one store, through clones of its handle, and record and
 /// branch share one branch registry. Immutable reads use the store and reader
 /// directly, with head and metadata taken from the same committed snapshot.
@@ -271,11 +276,16 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
         let branches = Branches::new(store.clone(), hasher.clone(), immutable_data, pruning)?;
         let pricing_provider = pricing.provider.clone();
         let records = Records::new(branches.clone(), pricing);
+        // Every node of a deployment must sort the same way, since the
+        // strategy decides what a sorted query reads, and so its cost.
+        // Hardcoded for now, as the caps are.
         let queries = Queries::new(
             store.clone(),
             hasher,
             Some(MAX_QUERY_DEPTH),
             Some(MAX_QUERY_LIMIT),
+            Some(MAX_SORT_KEYS),
+            FetchAndSort,
         );
         Ok(Self {
             store,

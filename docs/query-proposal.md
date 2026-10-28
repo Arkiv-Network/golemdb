@@ -49,7 +49,7 @@ fn query(&self, commit: Option<CommitId>, op: QueryOp) -> Result<QueryPage>;
 fn count(&self, commit: Option<CommitId>, op: CountOp) -> Result<u64>;
 
 QueryOp::filter(f, budget)                               // the filter tree and the budget; both required
-    .sort([SortKey::asc("price", CellType::Uint(W8))])   // optional
+    .sort([SortKey::asc("price", marker::U64)])          // optional
     .only(["owner", "status"])                           // projection, as for get
     .limit(50)                                           // records per page; optional
     .max_bytes(n)                                        // bytes per page; optional
@@ -220,9 +220,15 @@ The written order of the tree is the execution order. Cost and stopping point ar
    the order in one pass, so its cost is linear in the number of values. `Range`, `Prefix`, `Exists`: step through the run's terms in ascending key order from the
    lower bound, charging every term stepped; an `Exists` with no type steps through every run of
    the field, in type tag order.
-8. **Order.** With `sort`: per level, fetch each matched record's sort value in ascending record ID
-   order and charge `⌈N log₂ N⌉ × S` comparisons (D14 14.1); ties fall to the next key, then to
-   record ID ascending; absent values sort last. Without `sort`: record ID ascending, which is
+8. **Order.** With `sort`: fetch every matched record's first sort value; then, level by level,
+   the next value of the records still tied in a group of ≥ 2 that holds a position of the page
+   (design §12); each level in ascending record ID order. Charge `⌈N log₂ N⌉ × S` comparisons
+   (D14 14.1). Ties fall to the next key, then to record ID ascending in either direction. A sort
+   key is typed, as a leaf is: a record's cell of its type sorts in that type's order, whatever its
+   kind, so a field sorts as an attribute does; a cell of another type under the same name is
+   absent. Absent values sort below every present value: first under ASC, last under DESC (design
+   §12). `bytes` cannot be a sort key: `SortKey::asc` and `SortKey::desc` take an indexable marker,
+   and `SortKey::try_new` fails with `ValuesError`. Without `sort`: record ID ascending, which is
    creation order.
 9. **Page:** cursor or offset, then the page ends at `limit` records or at `max_bytes`, whichever
    comes first. Records are taken in query order; a record that would push the page past
@@ -269,8 +275,8 @@ Why these values:
   **TODO (verify):** reth's current default for `--rpc.max-response-size`. Genesis validation
   checks that `#maxQueryBytes` is at least the largest possible record on the same byte basis
   (`#maxRecordCells` × the largest cell), so every record fits a page.
-- **`#maxSortKeys`:** queries sort by one or two keys, rarely three; a sort holds `N × S` values.
-  Sort is not built yet.
+- **`#maxSortKeys`:** queries sort by one or two keys, rarely three; a sort holds up to `N × S`
+  values.
 
 They are genesis parameters, not node settings, because they decide whether a query is accepted,
 and Arkiv runs queries during block execution (its expiry purge), so every node must agree. They
@@ -290,7 +296,7 @@ request-size limit of metering's admission procedure.
 | `InvalidArgument` | a builder step is invalid (cell name, NaN), or the budget is missing | admission work done |
 | `InvalidQuery` | the target is a branch; the tree is malformed (empty `And` / `Or`); a `limit` of 0; a cursor does not match its query. Mixed or `bytes` operands cannot reach a query: they do not compile, or fail as `ValuesError` (`InvalidArgument`) when the operand is built | 0 for a branch target, else admission work done |
 | `LimitExceeded` | a cap is exceeded | admission work done |
-| `NotImplemented { operation }` | a supported-later part is used, such as `"query: sort"` | 0 for a top-level part (sort, limit, offset, cursor), checked before admission; admission work done for an unbuilt filter node, found while admitting the tree |
+| `NotImplemented { operation }` | a supported-later part is used, such as the cursor | 0 for a top-level part (limit, offset, cursor), checked before admission; admission work done for an unbuilt filter node, found while admitting the tree |
 | `CommitUnavailable` | a commit other than the head is named; older commits come later | admission work done |
 | `OutOfBudget { required: None }` | a charge does not fit (QR7) | the work done before it |
 
@@ -323,8 +329,8 @@ part. The shape never changes, only what is implemented behind it.
 
 Gaps against this proposal:
 
-- Sort, `limit` and `offset` return `NotImplemented`; `And`, `Or`, `Not`, `Prefix`, `Exists` and
-  the cursor do not exist yet.
+- `limit` and `offset` return `NotImplemented`; `And`, `Or`, `Not`, `Prefix`, `Exists` and the
+  cursor do not exist yet.
 - The budget is an optional step, neither required nor enforced; it becomes a constructor
   argument. No receipt, no caps.
 - `QueryOp::from_filter` is to be renamed to `QueryOp::filter`.
@@ -340,7 +346,7 @@ Gaps against this proposal:
 | Boolean | `And`, `Or`, `Not` inside `And`, `In` | `In` done |
 | Scans | `Range`, `Prefix`, `Exists` over a typed run | `Range` done |
 | API | `query`, `count`, snapshot selection, record IDs → records, projection | done for the head |
-| Sort | multi-key, typed, absent last, record ID tie-break | open |
+| Sort | multi-key, typed, absent below every value, record ID tie-break | done (fetch-and-sort); index walk open |
 | Paging | `limit`, `offset`, then the cursor | open |
 | Metering hooks | counts of reads, steps, set combinations, fetches; budget checkpoints | open |
 | Tests | property tests against a naive reference evaluator | per leaf; tree-level open |

@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use golemdb_branch::CommitId;
-use golemdb_cells::CellName;
+use golemdb_cells::{CellError, CellName};
 use golemdb_index::{IndexError, TermError};
 use golemdb_record::RecordError;
 
@@ -9,9 +9,9 @@ pub type Result<T> = std::result::Result<T, QueryError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
-    /// A leaf names no valid index term: a bad field name. A leaf's values
-    /// are of an indexable type by construction. Raised at admission, before
-    /// index or record reads.
+    /// A filter leaf or a sort key names an invalid cell: a bad field name.
+    /// Their values and types are indexable by construction. Raised at
+    /// admission, before index or record reads.
     #[error("invalid argument: field `{field}`: {source}")]
     InvalidArgument {
         field: CellName,
@@ -24,8 +24,9 @@ pub enum QueryError {
     InvalidQuery { reason: &'static str },
     /// The request exceeds a cap, named by `limit`, whose value is `max`: a
     /// filter nested deeper than the `max_query_depth` of its
-    /// [`Queries`](crate::Queries) (`"filter depth"`), or a `limit` above its
-    /// `max_query_limit` (`"query limit"`). Raised at admission, before index
+    /// [`Queries`](crate::Queries) (`"filter depth"`), a `limit` above its
+    /// `max_query_limit` (`"query limit"`), or more sort keys than its
+    /// `max_sort_keys` (`"sort key count"`). Raised at admission, before index
     /// or record reads.
     #[error("limit exceeded: {limit} is capped at {max}")]
     LimitExceeded { limit: &'static str, max: u32 },
@@ -47,6 +48,14 @@ impl From<IndexError> for QueryError {
     }
 }
 
+/// A cell that cannot be read, such as a sort value, is internal to a
+/// query, as a posting list that cannot be read is.
+impl From<CellError> for QueryError {
+    fn from(error: CellError) -> Self {
+        Self::Internal(Box::new(error))
+    }
+}
+
 /// A record's own errors are internal to a query, except for an unavailable
 /// commit, which keeps its meaning.
 impl From<RecordError> for QueryError {
@@ -57,5 +66,22 @@ impl From<RecordError> for QueryError {
             }
             error => Self::Internal(Box::new(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cell_error_is_internal_and_kept_as_the_cause() {
+        let error = QueryError::from(CellError::RootMismatch);
+        let QueryError::Internal(source) = &error else {
+            panic!("expected Internal, got {error:?}");
+        };
+        assert!(matches!(
+            source.downcast_ref::<CellError>(),
+            Some(CellError::RootMismatch)
+        ));
     }
 }

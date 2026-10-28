@@ -408,15 +408,16 @@ fn query_count_and_unavailable_history_report_the_selected_head() {
             invalid.result,
             Err(ApiError::InvalidArgument { .. })
         ));
-        let by_age = SortKey::asc("age", CellType::Int(Width::W4));
-        let unsupported = db.query(
+        // More sort keys than `Database`'s cap of four.
+        let by_age_five_times = vec![SortKey::asc("age", marker::I32); 5];
+        let over_cap = db.query(
             None,
-            QueryOp::from_filter(filter("color"), BUDGET).sort([by_age]),
+            QueryOp::from_filter(filter("color"), BUDGET).sort(by_age_five_times),
         );
-        unchanged(&unsupported, Some(head));
+        unchanged(&over_cap, Some(head));
         assert!(matches!(
-            unsupported.result,
-            Err(ApiError::NotImplemented { .. })
+            over_cap.result,
+            Err(ApiError::LimitExceeded { .. })
         ));
         for requested in [CommitId::GENESIS, CommitId::new(head.get() + 1)] {
             let get = db.get(ReadTarget::Commit(requested), RecordOp::get(KEY, BUDGET));

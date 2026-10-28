@@ -46,17 +46,24 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod cell_source;
 mod error;
 mod eval;
+#[cfg(test)]
+mod fakes;
 mod plan;
 mod posting_source;
 mod queries;
 mod query_op;
+mod sorting;
 
+pub use cell_source::CellSource;
 pub use error::{QueryError, Result};
 pub use golemdb_metering::Budget;
+pub use posting_source::PostingSource;
 pub use queries::Queries;
 pub use query_op::{
     Bounds, CountOp, Direction, EqValue, ExistsType, Filter, InValues, QueryOp, QueryPage, SortKey,
     ValuesError,
 };
+pub use sorting::{FetchAndSort, SortLevel, SortPlan, SortingStrategy, Window};
