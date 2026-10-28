@@ -38,18 +38,3 @@ jobs:
       - name: test
         run: |
           just nextest
-
-  bench-build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
-      - run: rustup show
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install Just command runner
-        uses: extractions/setup-just@v3
-
-      - name: build bench
-        run: |
-          just build_bench
