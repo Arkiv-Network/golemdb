@@ -1,8 +1,9 @@
 use golemdb_branch::{BranchError, Branches, OperationError, SealedCommit, read_head_state};
 use golemdb_cells::{
-    CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, tables,
+    CELL_TRIE_PATH_BYTES, CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef,
+    Cells, tables,
 };
-use golemdb_index::{Index, IndexTerm, PostingChange};
+use golemdb_index::{INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange};
 use golemdb_merkle::{
     BRANCH_ROOT_BYTES, Blake3Hasher, HASH_BYTES, HashProvider, Keccak256Hasher, RootRef,
 };
@@ -39,8 +40,8 @@ fn head(
     tx: &mut impl WriteTransaction,
     hash: &impl HashProvider,
     id: u64,
-    state: RootRef<32>,
-    index: RootRef<32>,
+    state: RootRef<CELL_TRIE_PATH_BYTES>,
+    index: RootRef<INDEX_TRIE_PATH_BYTES>,
 ) {
     let roots = golemdb_branch::Roots { state, index };
     golemdb_branch::write_head(tx, golemdb_branch::CommitId::new(id), &roots, hash).unwrap();

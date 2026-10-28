@@ -1,8 +1,9 @@
 use crate::{BranchError, Branches};
 use golemdb_cells::{
-    CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, tables,
+    CELL_TRIE_PATH_BYTES, CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef,
+    Cells, tables,
 };
-use golemdb_index::{Index, IndexTerm, PostingChange};
+use golemdb_index::{INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange};
 use golemdb_merkle::{Blake3Hasher, Hash, HashProvider, Keccak256Hasher, RootRef, TrieTable};
 use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction, scan_prefix};
 use std::{
@@ -37,8 +38,8 @@ fn head(
     tx: &mut impl WriteTransaction,
     hash: &impl HashProvider,
     id: u64,
-    state: RootRef<32>,
-    index: RootRef<32>,
+    state: RootRef<CELL_TRIE_PATH_BYTES>,
+    index: RootRef<INDEX_TRIE_PATH_BYTES>,
 ) {
     let roots = crate::Roots { state, index };
     crate::write_head(tx, crate::CommitId::new(id), &roots, hash).unwrap();
@@ -546,7 +547,13 @@ fn every_commit_records_roots_that_keep_its_tries_walkable() {
         golemdb_index::INDEX_BRANCH_DOMAIN,
         &Keccak256Hasher,
     );
-    let path = Keccak256Hasher.hash(&key(64, b"name").encode());
+    // A cell's path is its record ID followed by the hash of its encoded key.
+    let cell = key(64, b"name");
+    let digest = Keccak256Hasher.hash(&cell.encode());
+    let path: [u8; CELL_TRIE_PATH_BYTES] = [&cell.record_id().to_be_bytes()[..], &digest]
+        .concat()
+        .try_into()
+        .unwrap();
     for (commit, roots, value) in published {
         assert_eq!(crate::read_roots(&tx, commit).unwrap(), Some(roots));
         // Each old state trie still holds that commit's value, after later commits.
