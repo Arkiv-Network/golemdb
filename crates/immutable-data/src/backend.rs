@@ -114,21 +114,6 @@ pub(crate) enum Reader {
     Memory(Arc<RwLock<MemoryStorage>>),
 }
 impl Reader {
-    pub(crate) fn get(
-        &self,
-        s: &Segment,
-        ordinal: u64,
-        latest_commit: u64,
-        columns: &[usize],
-    ) -> StorageResult<PayloadRow> {
-        match self {
-            Self::NippyJar(f) => f.get(s, ordinal, latest_commit, columns),
-            Self::Memory(m) => m
-                .read()
-                .map_err(|_| Error::Invalid("memory lock poisoned"))?
-                .get(s, ordinal, columns),
-        }
-    }
     pub(crate) fn read_range(
         &self,
         s: &Segment,

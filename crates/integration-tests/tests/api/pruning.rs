@@ -20,6 +20,7 @@ fn config() -> OpenConfig {
             max_indexed_cells: 100,
         },
         None,
+        PricingConfig::zero(),
     ))
 }
 

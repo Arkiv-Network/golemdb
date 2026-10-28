@@ -9,8 +9,18 @@ pub const BRANCH_SLOTS: usize = 16;
 /// Fewer children would make the branch a leaf or empty.
 const MIN_BRANCH_CHILDREN: u32 = 2;
 
-/// The widest routing path a trie supports.
-pub(crate) const MAX_PATH_BYTES: usize = 32;
+/// The widest routing path a trie supports. Branch prefix and route lengths
+/// count nibbles in one byte.
+pub const MAX_PATH_BYTES: usize = 127;
+
+/// Rejects path widths outside `1..=MAX_PATH_BYTES`. Call it inside `const { }`
+/// so a bad width fails at compile time.
+pub(crate) const fn check_path_width<const N: usize>() {
+    assert!(
+        N >= 1 && N <= MAX_PATH_BYTES,
+        "Merkle paths must contain between 1 and MAX_PATH_BYTES bytes"
+    );
+}
 
 /// Bytes of the leading prefix length in an encoded branch.
 const PREFIX_LEN_BYTES: usize = 1;
@@ -60,13 +70,15 @@ impl<const N: usize> BranchNodeCompact<N> {
     /// `prefix` is packed high nibble first, relative to this branch's depth.
     /// Hashes, leaf paths and commits follow ascending occupied slots in their
     /// masks; there is one commit per branch child, or per child with
-    /// [`LeafStorage::Rows`]. Path widths outside 1..=32 bytes fail at compile time;
-    /// malformed branch contents still return runtime errors.
+    /// [`LeafStorage::Rows`]. Path widths outside 1..=[`MAX_PATH_BYTES`] bytes
+    /// fail at compile time; malformed branch contents still return runtime
+    /// errors.
     ///
     /// ```compile_fail,E0080
-    /// use golemdb_merkle::BranchNodeCompact;
+    /// use golemdb_merkle::{BranchNodeCompact, MAX_PATH_BYTES};
     /// use golemdb_merkle::LeafStorage;
-    /// let _ = BranchNodeCompact::<33>::new(
+    /// type TooWide = BranchNodeCompact<{ MAX_PATH_BYTES + 1 }>;
+    /// let _ = TooWide::new(
     ///     vec![], 0, 3, 3, vec![[0; 32]; 2], vec![], vec![0; 2], LeafStorage::InNode,
     /// );
     /// ```
@@ -81,12 +93,7 @@ impl<const N: usize> BranchNodeCompact<N> {
         child_commits: Vec<u64>,
         leaf_storage: LeafStorage,
     ) -> Result<Self> {
-        const {
-            assert!(
-                N >= 1 && N <= MAX_PATH_BYTES,
-                "Merkle paths must contain between 1 and 32 bytes"
-            )
-        };
+        const { check_path_width::<N>() };
         if prefix_len as usize >= NIBBLES_PER_BYTE * N
             || prefix.len() != (prefix_len as usize).div_ceil(NIBBLES_PER_BYTE)
         {
@@ -195,12 +202,7 @@ impl<const N: usize> BranchNodeCompact<N> {
     /// let _ = BranchNodeCompact::<0>::decode(&[], LeafStorage::InNode);
     /// ```
     pub fn decode(bytes: &[u8], leaf_storage: LeafStorage) -> Result<Self> {
-        const {
-            assert!(
-                N >= 1 && N <= MAX_PATH_BYTES,
-                "Merkle paths must contain between 1 and 32 bytes"
-            )
-        };
+        const { check_path_width::<N>() };
         let bad = || MerkleError::InvalidNode("invalid encoded length");
         let prefix_len = *bytes.first().ok_or_else(bad)?;
         let end = PREFIX_LEN_BYTES + (prefix_len as usize).div_ceil(NIBBLES_PER_BYTE);

@@ -7,7 +7,7 @@ use golemdb_cells::{
     Cells, Width, reserved, system,
 };
 use golemdb_merkle::{Keccak256Hasher, RootRef};
-use golemdb_metering::Budget;
+use golemdb_metering::{Budget, ModelMetadata, PricingProvider, Schedule, model_cells};
 use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
@@ -190,7 +190,8 @@ fn initialize(db: &impl Store) {
 }
 
 pub(super) fn zero_pricing() -> WritePricing {
-    WritePricing::zero(
+    WritePricing::new(
+        pricing_provider(Schedule::zero_write()),
         CellLimits {
             max_cell_name_len: 32,
             max_str_len: 64,
@@ -200,6 +201,36 @@ pub(super) fn zero_pricing() -> WritePricing {
             max_cells: 100,
             max_indexed_cells: 100,
         },
+    )
+}
+
+// An isolated persisted pricing fixture lets record tests vary prices without
+// changing the data/commitment fixture or adding a second execution path.
+pub(super) fn pricing_provider(schedule: Schedule) -> std::sync::Arc<PricingProvider> {
+    let store = MemoryStore::new();
+    let mut tx = store.begin_write().unwrap();
+    let metadata = ModelMetadata {
+        version: 1,
+        activation_commit: 0,
+        golemdb_code_version: schedule.code_version(),
+        host_code_version: 0,
+    };
+    let weights = schedule
+        .weights()
+        .map(|(name, weight)| (name.to_string(), weight))
+        .collect();
+    for (key, value) in model_cells(&metadata, &weights) {
+        tx.put(
+            golemdb_cells::tables::CELL,
+            &key.encode(),
+            value.encoded_bytes(),
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let tx = store.begin_read().unwrap();
+    std::sync::Arc::new(
+        PricingProvider::load(&golemdb_cells::CellReader::new(&tx), 0, &[]).unwrap(),
     )
 }
 

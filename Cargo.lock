@@ -601,6 +601,7 @@ dependencies = [
  "golemdb-immutable-data",
  "golemdb-index",
  "golemdb-merkle",
+ "golemdb-metering",
  "golemdb-pruning",
  "golemdb-record",
  "golemdb-storage",
@@ -627,7 +628,11 @@ dependencies = [
 name = "golemdb-metering"
 version = "0.1.0"
 dependencies = [
+ "golemdb-cells",
+ "golemdb-storage",
+ "serde",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -1440,6 +1445,9 @@ name = "tracing-core"
 version = "0.1.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+dependencies = [
+ "once_cell",
+]
 
 [[package]]
 name = "typenum"

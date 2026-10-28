@@ -26,6 +26,7 @@
 //!     limits,
 //!     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
 //!     None,
+//!     golemdb_api::PricingConfig::zero(),
 //! ))?;
 //!
 //! let key = RecordKey([1; 32]);

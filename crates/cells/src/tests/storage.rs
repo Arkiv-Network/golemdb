@@ -5,7 +5,10 @@ use crate::{
     CELL_TRIE_PATH_BYTES, CellChange, CellError, CellKey, CellNameRef, CellType, CellValue,
     CellValueChange, CellValueParseError, CellValueRef, Cells, tables,
 };
-use golemdb_merkle::{HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
+use golemdb_merkle::{
+    BRANCH_SLOTS, BranchNodeCompact, HashProvider, Keccak256Hasher, LeafRef, LeafStorage, RootRef,
+    Trie,
+};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
 
@@ -38,10 +41,14 @@ fn rows(tx: &impl ReadTransaction, table: Table) -> Vec<golemdb_storage::Entry> 
         .unwrap()
 }
 fn leaf(key: &CellKey, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
-    // Independently spell out the spec's key and leaf preimages.
+    // Independently spell out the spec's key, path and leaf preimages.
     let mut routing = key.record_id().to_be_bytes().to_vec();
     routing.extend_from_slice(key.name().as_bytes());
-    let path = HASH.hash(&routing);
+    let path: [u8; CELL_TRIE_PATH_BYTES] =
+        [&key.record_id().to_be_bytes()[..], &HASH.hash(&routing)]
+            .concat()
+            .try_into()
+            .unwrap();
     let mut preimage = vec![0];
     preimage.extend_from_slice(&path);
     preimage.push(value.metadata());
@@ -342,7 +349,7 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     assert!(matches!(
-        cells.validate_root(&tx, RootRef::Leaf(LeafRef::new([7; 32], [7; 32]))),
+        cells.validate_root(&tx, RootRef::Leaf(LeafRef::new([7; _], [7; 32]))),
         Err(CellError::RootMismatch)
     ));
     let first = cells
@@ -354,7 +361,7 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
         Err(CellError::RootMismatch)
     ));
     assert!(matches!(
-        cells.validate_root(&tx, RootRef::Leaf(LeafRef::new([7; 32], [7; 32]))),
+        cells.validate_root(&tx, RootRef::Leaf(LeafRef::new([7; _], [7; 32]))),
         Err(CellError::RootMismatch)
     ));
     // No-op writes must still detect a mismatched before-value commitment.
@@ -422,7 +429,7 @@ fn malformed_singleton_key_is_rejected(db: &impl Store) {
     let mut tx = db.begin_write().unwrap();
     tx.put(tables::CELL, b"short", b"\x02value").unwrap();
     assert!(matches!(
-        cells.validate_root(&tx, RootRef::Leaf(LeafRef::new([7; 32], [7; 32]))),
+        cells.validate_root(&tx, RootRef::Leaf(LeafRef::new([7; _], [7; 32]))),
         Err(CellError::Key(_))
     ));
 }
@@ -434,6 +441,97 @@ fn root_key(root: &RootRef<CELL_TRIE_PATH_BYTES>) -> Vec<u8> {
     };
     Trie::<_, CELL_TRIE_PATH_BYTES>::new(tables::CELL_TRIE, CELL_BRANCH_DOMAIN, &HASH)
         .node_key(branch.commit, &[])
+}
+
+fn writes_to_one_record_stay_on_its_path_and_subtree(db: &impl Store) {
+    let cells = Cells::new(&HASH);
+    let mut tx = db.begin_write().unwrap();
+    let existing =
+        (64..96).flat_map(|record| [b"a", b"b", b"c"].map(|name| put(record, name, b"old")));
+    let root = cells
+        .apply(&mut tx, 0, RootRef::Empty, existing)
+        .unwrap()
+        .root;
+    // A new record.
+    let created = (0..8).map(|i| put(96, &[b'n', b'0' + i], b"new"));
+    let root = apply_to_one_record(&cells, &mut tx, 1, root, 96, created);
+    // An existing record: an update, an addition and a deletion.
+    let edited = [
+        put(80, b"a", b"new"),
+        put(80, b"d", b"new"),
+        delete(80, b"b"),
+    ];
+    let root = apply_to_one_record(&cells, &mut tx, 2, root, 80, edited);
+    // Deleting all but one cell collapses the record's subtree into a leaf.
+    let collapsed = [delete(80, b"c"), delete(80, b"d")];
+    apply_to_one_record(&cells, &mut tx, 3, root, 80, collapsed);
+}
+
+/// Apply a batch of changes to `record` at `commit` and check that every
+/// branch it wrote is on the path down to that record or inside its subtree.
+fn apply_to_one_record(
+    cells: &Cells<'_, Keccak256Hasher>,
+    tx: &mut impl WriteTransaction,
+    commit: u64,
+    root: RootRef<CELL_TRIE_PATH_BYTES>,
+    record: u64,
+    changes: impl IntoIterator<Item = CellChange>,
+) -> RootRef<CELL_TRIE_PATH_BYTES> {
+    let root = cells.apply(tx, commit, root, changes).unwrap().root;
+    let routes = routes_written_at(tx, root, commit);
+    // At least the root and one branch below it.
+    assert!(routes.len() >= 2);
+    let path = nibbles(&record.to_be_bytes());
+    for route in &routes {
+        assert!(
+            path.starts_with(route) || route.starts_with(&path),
+            "new branch at route {route:?} is outside record {record}'s path and subtree"
+        );
+    }
+    root
+}
+
+/// `bytes` as nibbles, high nibble first.
+fn nibbles(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 15])
+        .collect()
+}
+
+/// The route to each branch under `root` that `commit` wrote: the nibbles
+/// consumed to reach it, before its own prefix. A branch an older commit wrote
+/// has no descendant from a newer one.
+fn routes_written_at(
+    tx: &impl ReadTransaction,
+    root: RootRef<CELL_TRIE_PATH_BYTES>,
+    commit: u64,
+) -> Vec<Vec<u8>> {
+    let trie = Trie::<_, CELL_TRIE_PATH_BYTES>::new(tables::CELL_TRIE, CELL_BRANCH_DOMAIN, &HASH);
+    let mut routes = Vec::new();
+    let mut stack = vec![(root, Vec::new())];
+    while let Some((root, route)) = stack.pop() {
+        let RootRef::Branch(branch) = root else {
+            continue;
+        };
+        if branch.commit != commit {
+            continue;
+        }
+        let row = tx.get(tables::CELL_TRIE.table(), &trie.node_key(commit, &route));
+        let node = BranchNodeCompact::<CELL_TRIE_PATH_BYTES>::decode(
+            &row.unwrap().unwrap(),
+            LeafStorage::InNode,
+        )
+        .unwrap();
+        let below = [&route[..], &node.unpack_prefix()].concat();
+        for slot in 0..BRANCH_SLOTS as u8 {
+            if let Some(child) = node.child(slot) {
+                stack.push((child, [&below[..], &[slot]].concat()));
+            }
+        }
+        routes.push(route);
+    }
+    routes
 }
 
 fn memory_db() -> ((), MemoryStore) {
@@ -459,13 +557,23 @@ suite!(
     snapshots_abort_and_old_branches,
     root_mismatches_and_corrupt_rows_are_errors,
     malformed_singleton_key_is_rejected,
+    writes_to_one_record_stay_on_its_path_and_subtree,
 );
+
+/// Record IDs that diverge at the first, a middle and the last nibble, so the
+/// proptest splits and collapses branches at several record-ID depths.
+const RECORDS: [u64; 4] = [1, 2, 1 << 32, u64::MAX];
+/// Several cells per record, so each record's own subtree grows and collapses too.
+const NAMES: [&[u8]; 3] = [b"a", b"b", b"c"];
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(32))]
     #[test]
     fn batches_match_a_flat_model_and_a_fresh_commitment(
-        operations in prop::collection::vec((0u8..12, any::<u8>(), any::<bool>()), 0..80)
+        operations in prop::collection::vec(
+            (0..RECORDS.len(), 0..NAMES.len(), any::<u8>(), any::<bool>()),
+            0..80,
+        )
     ) {
         let db = MemoryStore::new();
         let cells = Cells::new(&HASH);
@@ -474,8 +582,8 @@ proptest! {
         let mut model = BTreeMap::new();
         for batch in operations.chunks(8) {
             let before = model.clone();
-            let changes: Vec<_> = batch.iter().map(|&(id, byte, remove)| {
-                let key = key(u64::from(id), b"value");
+            let changes: Vec<_> = batch.iter().map(|&(record, name, byte, remove)| {
+                let key = key(RECORDS[record], NAMES[name]);
                 if remove {
                     model.remove(&key);
                     CellChange::Delete { key }

@@ -45,7 +45,7 @@ impl<T> Metered<T> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Receipt {
-    /// Charged work. Database calls remain zero until planner integration.
+    /// Charged planning and approved mutations. Public reads remain unmetered.
     pub cost: u64,
     pub priced_at: Option<CommitId>,
     pub details: Details,

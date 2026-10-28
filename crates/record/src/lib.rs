@@ -17,7 +17,7 @@
 //! starting at [`golemdb_cells::system::FIRST_USER_RECORD_ID`]. These system
 //! cells are non-indexed. Initialize the cell trie and head consistently and
 //! validate configured limits against the storage backend's physical ceilings.
-//! The caller supplies matching immutable limits and a schedule through
+//! The caller supplies matching immutable limits and a shared pricing provider through
 //! [`WritePricing`]. No YAML loading, genesis writes or local limit defaults
 //! live here; admission does not reread parameters from the branch.
 //!
@@ -30,8 +30,9 @@
 //! returns an [`Outcome`] with execution context and actual user effects for
 //! API receipts. Outcomes can carry the meter's cost and ledger, including on
 //! failure. CUD always uses [`golemdb_metering::WriteMeter`] through a shared
-//! admission/plan/approve/apply path. [`WritePricing::zero`] keeps writes free
-//! while recording full ledgers; persisted schedules remain iterations 5/6.
+//! admission/plan/approve/apply path. Prices are captured once at the validated
+//! branch origin. Explicit zero weights keep writes free with full ledgers;
+//! missing weights stop only the operations that need them. Reads are unmetered.
 //! [`ReadTarget::Head`] selects and reads the current head in one snapshot.
 //! Commit-targeted reads support the head only and explicitly reject other
 //! commits until history is available. Deletes enumerate and tombstone every

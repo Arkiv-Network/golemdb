@@ -17,31 +17,33 @@ const OTHER: RecordKey = RecordKey([0x43; 32]);
 
 fn pricing() -> WritePricing {
     WritePricing {
-        schedule: Schedule::new(
-            WRITE_CODE_VERSION,
-            [
-                (W::WRITE_ADMISSION_BASE, 2),
-                (W::WRITE_ADMISSION_ENTRY, 1),
-                (W::WRITE_ADMISSION_BYTE, 1),
-                (W::READ_KEY, 1),
-                (W::WRITE_RECORD_CREATE, 2),
-                (W::WRITE_RECORD_PATCH, 2),
-                (W::WRITE_RECORD_DELETE, 2),
-                (W::READ_CELL, 2),
-                (W::READ_TERM, 2),
-                (W::WRITE_CELL_CREATE, 5),
-                (W::WRITE_CELL_UPDATE, 6),
-                (W::WRITE_CELL_DELETE, 4),
-                (W::WRITE_CELL_TRIE_UPDATE, 1),
-                (W::WRITE_CELL_BYTE, 1),
-                (W::WRITE_INDEX_JOIN, 3),
-                (W::WRITE_INDEX_LEAVE, 2),
-                (W::WRITE_INDEX_TRIE_UPDATE, 1),
-                (W::WRITE_INDEX_TERM_CREATE, 7),
-                (W::WRITE_INDEX_BYTE, 1),
-            ],
-        )
-        .unwrap(),
+        provider: crud_tests::pricing_provider(
+            Schedule::new(
+                WRITE_CODE_VERSION,
+                [
+                    (W::WRITE_ADMISSION_BASE, 2),
+                    (W::WRITE_ADMISSION_ENTRY, 1),
+                    (W::WRITE_ADMISSION_BYTE, 1),
+                    (W::READ_KEY, 1),
+                    (W::WRITE_RECORD_CREATE, 2),
+                    (W::WRITE_RECORD_PATCH, 2),
+                    (W::WRITE_RECORD_DELETE, 2),
+                    (W::READ_CELL, 2),
+                    (W::READ_TERM, 2),
+                    (W::WRITE_CELL_CREATE, 5),
+                    (W::WRITE_CELL_UPDATE, 6),
+                    (W::WRITE_CELL_DELETE, 4),
+                    (W::WRITE_CELL_TRIE_UPDATE, 1),
+                    (W::WRITE_CELL_BYTE, 1),
+                    (W::WRITE_INDEX_JOIN, 3),
+                    (W::WRITE_INDEX_LEAVE, 2),
+                    (W::WRITE_INDEX_TRIE_UPDATE, 1),
+                    (W::WRITE_INDEX_TERM_CREATE, 7),
+                    (W::WRITE_INDEX_BYTE, 1),
+                ],
+            )
+            .unwrap(),
+        ),
         depths: ModeledDepths {
             cell_trie: 4,
             index_trie: 4,
@@ -94,7 +96,8 @@ fn snapshot<S: Store>(
 #[test]
 fn real_create_matches_the_worked_example_and_keeps_system_charges_out_of_effects() {
     let (_, branches, _) = crud_tests::setup();
-    let schedule = pricing().schedule;
+    let snapshot = pricing().provider.snapshot(0).unwrap();
+    let schedule = &snapshot.model.schedule;
     let records = Records::new(branches.clone(), pricing());
     let branch = branches.begin().unwrap();
     let result = records.create(branch, KEY, entries(), Budget::Limited(266));
@@ -689,7 +692,7 @@ fn empty_records_missing_records_and_zero_weights_have_defined_charges() {
     assert_eq!(deleted.effects, Effects::default());
 
     let mut p = pricing();
-    p.schedule = Schedule::zero_write();
+    p.provider = crud_tests::pricing_provider(Schedule::zero_write());
     let records = Records::new(branches.clone(), p);
     let created = records.create(branch, KEY, entries(), Budget::Limited(0));
     created.result.unwrap();

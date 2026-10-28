@@ -4,6 +4,7 @@ use golemdb_branch::{CommitId, Head, Roots, head_roots, init_head, read_head_sta
 use golemdb_cells::{CellChange, CellKey, CellNameRef, CellValue, Cells, reserved, system, tables};
 use golemdb_index::Index;
 use golemdb_merkle::{Hash, HashAlgorithm, HashProvider, RootRef};
+use golemdb_metering::{ModelMetadata, PricingConfig, model_cells};
 use golemdb_storage::{ReadCursor, ReadTransaction, Table, WriteTransaction};
 
 use crate::{Genesis, OpenConfig, OpenError, OpenInfo, OpenMode, OpenResult};
@@ -58,6 +59,7 @@ fn initial_cells(config: &Genesis) -> OpenResult<BTreeMap<CellKey, CellValue>> {
         allocator_key(),
         CellValue::from_u64(system::FIRST_USER_RECORD_ID),
     );
+    cells.extend(pricing_cells(&config.metering));
     if let Some(immutable_data) = &config.immutable_data {
         cells.insert(
             CellKey::new(system::PARAMS.id, reserved::SHARD_SPAN),
@@ -72,6 +74,20 @@ fn initial_cells(config: &Genesis) -> OpenResult<BTreeMap<CellKey, CellValue>> {
         );
     }
     Ok(cells)
+}
+
+/// Genesis owns the initial model identity; PricingConfig itself can describe
+/// other models without imposing a version or activation commit.
+pub(crate) fn pricing_cells(config: &PricingConfig) -> Vec<(CellKey, CellValue)> {
+    model_cells(
+        &ModelMetadata {
+            version: 1,
+            activation_commit: CommitId::GENESIS.get(),
+            golemdb_code_version: config.golemdb_code_version,
+            host_code_version: config.host_code_version,
+        },
+        &config.weights,
+    )
 }
 
 fn allocator_key() -> CellKey {
@@ -117,6 +133,9 @@ pub(crate) fn prepare(
         if config.mode == OpenMode::ExistingOnly {
             return Err(OpenError::NotInitialized);
         }
+        // Only a new deployment needs code for its genesis model. Reopening
+        // validates the active committed model instead (old host code may retire).
+        config.genesis.metering.validate(&config.host_schemas)?;
         tx.put(SUPERBLOCK, b"format", &FORMAT.to_be_bytes())?;
         tx.put(
             SUPERBLOCK,
@@ -209,6 +228,14 @@ fn validate_state(
         ));
     }
     expected.insert(allocator_key(), allocator);
+    // Admin values may change after genesis; their current contents are validated
+    // by the owning component (e.g. the pricing loader), not compared to genesis.
+    // Keep permanent #key identities and bindings in #recordKeys in this check.
+    if head.commit_id != CommitId::GENESIS {
+        expected.retain(|key, _| {
+            !system::is_admin_record(key.record_id()) || key.name() == reserved::KEY
+        });
+    }
     for (key, value) in &expected {
         if cells.get(tx, key)?.as_ref() != Some(value) {
             return Err(OpenError::CorruptState(
