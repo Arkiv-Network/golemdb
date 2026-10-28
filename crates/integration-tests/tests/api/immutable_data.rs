@@ -58,6 +58,45 @@ fn assert_row(actual: ImmutableDataRow, n: u8) {
     assert_eq!(actual.get::<Vec<u8>>("payload").unwrap(), vec![n; 128]);
 }
 
+/// Run with TMPDIR on btrfs to exercise concurrent configuration replacement.
+#[test]
+fn keyed_get_succeeds_while_another_thread_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut genesis = genesis(HashAlgorithm::Keccak256);
+    genesis.immutable_data.as_mut().unwrap().shard_span = 500_000;
+    let db = Database::open(dir.path(), &OpenConfig::new(genesis)).unwrap();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (db, done) = (db.clone(), done.clone());
+        std::thread::spawn(move || {
+            let mut errors = Vec::new();
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                let head = db.head().unwrap().get() as u8;
+                let address = ImmutableDataAddress::Key(key(head));
+                if head > 0
+                    && let Err(error) = db.immutable_data_get("events", address, &all())
+                {
+                    errors.push(error);
+                }
+            }
+            errors
+        })
+    };
+    for n in 1..=250 {
+        let branch = db.begin().unwrap();
+        db.immutable_data_append(branch, "events", Some(key(n)), row(n))
+            .unwrap();
+        db.commit(branch).unwrap();
+    }
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let errors = reader.join().unwrap();
+    assert!(
+        errors.is_empty(),
+        "{} reads failed: {errors:?}",
+        errors.len()
+    );
+}
+
 fn contract(db: &Database) {
     let clone = db.clone();
     let api: &dyn Api = &clone;

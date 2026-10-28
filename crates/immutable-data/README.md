@@ -100,10 +100,15 @@ never healed by reducing the configured row count. Recovery does not scan
 interior offsets. Tail cleanup waits for independent readers to release their
 mappings; committed reads only inspect their published prefix and never heal files.
 
-Reads check the active/latest file, then inspect older configurations newest-first.
-Discovery sorts numeric commit starts and opens payloads only in the matching
-file. No historical configuration or reader cache is retained. A commit-range
-read knows its file span directly from the supplied commit. Reads validate basic
+Low-level physical reads check the active/latest file, then inspect older
+configurations newest-first. Committed `ImmutableDataReader::get` calls instead
+resolve the shard from commit-range metadata in the caller's snapshot. Starting
+at the last published batch, predecessor seeks before shard boundaries skip
+entire populated shards and empty spans until the ordinal is located. Only the
+selected configuration is opened by its exact
+path; committed reads never list the directory, avoiding races with atomic
+configuration replacement. No historical configuration or reader cache is retained.
+A commit-range read knows its file span directly from the supplied commit. Reads validate basic
 file layout, including offset-file length and first/final offsets, then let
 NippyJar read selected column offsets directly through mmap. There is no separate
 per-column offset scan; malformed interior offsets may panic inside NippyJar.
