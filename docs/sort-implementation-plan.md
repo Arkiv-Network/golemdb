@@ -176,18 +176,12 @@ Changes to existing tests:
 
 ## Later phases, in order (not in this change)
 
-1. **Multiple keys, in `FetchAndSort`.**
-   - `SortPlan` gets more keys, and `SortPlan::compare` compares them in order.
-   - Fetch a deeper level's value only for records still tied on the earlier keys, in groups that overlap the page window.
-   - Add the `#maxSortKeys` cap.
-   - The conformance tests gain multi-key cases.
-2. **Index walk, last: a second strategy, `IndexWalk`, in `sorting/index_walk.rs`.**
-   - Walk the key's `(name, type)` run of index entries in value order, then fetch only the matches the index didn't find. That fetch is needed to tell a missing cell from a field.
-   - Stop early at offset + limit only when the filter guarantees the key is present as an attribute.
-   - Apply the switch rule that bounds cost at about 2N.
-   - It needs a reverse term scan: `ReadCursor::prev` exists, but `scan` and `PostingSource::scan` only go forward.
-   - Run it through the conformance tests, add a proptest that it returns the same pages as `FetchAndSort`, and add a benchmark of the two on the scenarios from the discussion.
-   - Spec changes: rule 8, D6.2 and §12, which rejected this approach. Also decide how a deployment chooses its strategy, for example from genesis.
+1. **Multiple keys, in `FetchAndSort`.** Done (`ca0e1a9`).
+   - `SortPlan` holds one `SortLevel` per key, and each level's `compare` orders the records the levels before it tie.
+   - A deeper level's value is fetched only for records still tied on the earlier keys, in groups that overlap the page window. Design §12 and rule 8 now say so.
+   - The `#maxSortKeys` cap is `max_sort_keys` on `Queries`; `Database` sets it to 4.
+   - The conformance tests have multi-key cases.
+2. **Index walk, last: a second strategy, `IndexWalk`.** Planned in detail under [Phase 2: `IndexWalk`](#phase-2-indexwalk) below.
 - **Metering hooks,** with the metering work. Each strategy charges what it reads:
   - `FetchAndSort`: the fetches as cell reads, plus the modeled comparisons `S × N × ceil_log2(N)`;
   - `IndexWalk`: the index entries stepped through, the containers loaded, the set operations, and the fetches.
@@ -196,3 +190,82 @@ Changes to existing tests:
   - It would be an optional setting on each `SortKey`, for example `.absent(Absent::First | Absent::Last)`. Without it, the order is the spec's default: first under ASC, last under DESC.
   - In `SortPlan::compare`, absent values are placed first or last before the direction is applied, so the direction only reverses present values. The record-ID tie-break is unchanged.
   - It is a spec addition: §12 says the direction applies to absent values as to any other. The setting is part of the sort, so a cursor's fingerprint (D11) covers it like the rest of the sort.
+
+## Phase 2: `IndexWalk`
+
+### What it is for
+
+A second `SortingStrategy` that finds the first sort key's values in the index instead of fetching them. The `Index` table is already sorted by value: one `(name, type)` run holds every attribute value of the key, in order, each with the records that hold it. Walking the run gives the first level's order and its tie groups at the price of term reads, not cell reads.
+
+It returns exactly the pages `FetchAndSort` returns: the `SortingStrategy` contract. Only what it reads differs.
+
+Notation: N is the number of matches, K is offset + page size, V is the number of terms in the key's run.
+
+| Query | `FetchAndSort` | `IndexWalk` |
+|---|---|---|
+| Sort by `status` (5 values), N = 1M, limit 20 | 1M cell reads | at most 5 terms; no cell read when every match has the attribute |
+| Broad filter, N = 1M, sort by `price` with 50k values | 1M cell reads | at most 50k terms |
+| `Range ts [last day]` (N = 10k), sort by `ts` DESC, limit 20 | 10k cell reads | about 20 terms |
+| `owner = X` (N = 1k), sort by a unique `ts` over 10M records | 1k cell reads | at most about 2k reads, thanks to the switch rule |
+
+What it does not change: the filter's own cost (a wide `Range` or `Exists` on the key is still evaluated in full), and the cost of a deep `offset`, which only the cursor (D11) will fix.
+
+### Decisions needed before code
+
+1. **How a deployment picks its strategy.** Every node must sort the same way, since the strategy decides what a sorted query reads.
+   - (a) `Database` keeps `FetchAndSort` hardcoded; `IndexWalk` is reachable through `Queries::new` only, for tests and the benchmark, until the spec and metering adopt it. **Recommended for this phase.**
+   - (b) `Database` switches to `IndexWalk` now.
+   - (c) A genesis parameter.
+2. **The switch rule** (below): walk while the terms stepped through are fewer than the matches still unplaced, then fetch the rest. It bounds the cost at about 2N, with no statistics. **Recommended.**
+3. **When the filter guarantees the key.** Early stop at K is only correct when every match holds the first key as an attribute of its type: then no match is absent and none is a field. Detected from the written filter alone, at admission. **Recommended rule:** the root of the filter, or a direct child of a root `And`, is one of:
+   - an `Eq` or `In` on the key's name, of the key's type;
+   - a `Range` on the key's name, of the key's type;
+   - a `Prefix` on the key's name, when the key is `str`;
+   - an `Exists` on the key's name, typed with the key's type (an untyped `Exists` does not count).
+
+   `Or`, `Not` and deeper nesting are not looked into.
+4. **The spec change and its timing.** §12 rejects index-ordered emission, rule 8 and D6.2 describe fetch-and-sort only. **Recommended:** write the spec text last, after the benchmark, with its numbers.
+
+### How it orders
+
+The first level comes from the index; deeper levels are ordered exactly as `FetchAndSort` orders them: by fetching, only for tied groups the page reaches.
+
+**General case** (the filter does not guarantee the key):
+1. `unplaced` starts as the match set. Walk the key's run in ascending key order. For each term: `hits = postings ∩ unplaced`; the hits take the term's value; `unplaced -= hits`.
+2. Stop when `unplaced` is empty, the run ends, or the terms stepped through reach `|unplaced|` (the switch rule).
+3. Fetch the cells of the records still unplaced, in ascending record ID order. Each is a field of the key's type (its value), or absent. Fields can hold any value, so this step cannot be skipped unless `unplaced` is empty.
+4. Order every match by its value, as `FetchAndSort` does: the same top-K buffer, absent placement and record ID tie-break, then the deeper levels.
+
+Direction plays no part in the walk here: the walk cannot stop at K, since an unplaced field may belong anywhere.
+
+**Guaranteed case** (every match holds the key as an attribute):
+1. Walk the run in the sort direction: ascending for ASC, descending for DESC. Each term's hits are one whole tie group, in order.
+2. Skip whole groups before the offset by counting them; stop after the group that reaches K.
+3. The switch rule still applies. If it fires first, fetch the cells of the unplaced matches, keep their least K in order, and append them: their values all lie beyond the terms walked.
+4. Deeper levels for the groups the page reaches, as above.
+
+At the first level this reads no cell at all, unless the switch rule fires.
+
+**Cost bound.** At the switch, the terms stepped through are at most the matches still unplaced, and each of those costs at most one fetch. So the walk and the fetches together stay within about 2N reads, against N for `FetchAndSort`, and far below it in the cases the table shows.
+
+### Steps
+
+1. **Reverse range scan, in `golemdb-storage`.** A `scan_rev(tx, table, lower, upper)` beside `scan`, built on `ReadCursor::prev`, which both backends implement. It mirrors `scan`'s bound rules: reversed bounds rejected, an excluded endpoint, an empty range, errors yielded once. Tests mirror `scan`'s, on the memory store and MDBX.
+2. **Index reads, in `golemdb-index`.**
+   - `Index::terms_rev(tx, range)`, the descending twin of `Index::terms`.
+   - `IndexTerm::value()`: the order-encoded payload after `name ‖ 0x00 ‖ tag`, the same bytes `CellValue::value` gives. Tests: a term built from a cell gives that cell's payload back, for every indexable type.
+3. **`PostingSource::walk(range, direction)`, in `golemdb-query`.** Like `scan`, but yields each term with its postings, in ascending or descending key order. `IndexSource` implements it with `terms` / `terms_rev`; `FakeSource` with its `BTreeMap`, forward or reversed. `scan` stays as it is for the evaluator.
+4. **The guarantee, at admission.** `SortPlan::admit` takes the filter too and records whether it guarantees the first key (decision 3). A public accessor tells strategies. Unit tests for each leaf that counts and each that does not: another field, another type, an untyped `Exists`, an `Or`, a `Not`, a leaf nested two levels down.
+5. **Shared ordering code.** Move the top-K buffer, the tie groups and the deeper-level fetches out of `fetch_and_sort.rs` into a `sorting` submodule both strategies use. An entry's value becomes its payload bytes, so a value read from a term and one read from a cell are the same thing. No behavior change: `FetchAndSort`'s tests stay as they are.
+6. **`sorting/index_walk.rs`: `IndexWalk`.** Both cases and the switch rule. Unit tests on what it reads, through a logging `PostingSource` and the logging `CellSource`:
+   - every match found in the index: no cell read;
+   - fields and absent cells: only the unplaced matches are fetched;
+   - the switch rule fires when the terms stepped reach the unplaced count, and not before;
+   - guaranteed, DESC, small page: only the terms up to K are read;
+   - deeper levels read as `FetchAndSort` reads them.
+7. **Conformance.** `conformance!(index_walk, IndexWalk)` runs every shared case. A new property test checks `IndexWalk` returns the same page as `FetchAndSort` over random cells, matches, keys and windows, with the guarantee set exactly when every match holds the key as an attribute.
+8. **End to end.** The `tests/sort.rs` property test also runs through `Queries` built with `IndexWalk`, including filters that guarantee the key.
+9. **Benchmark.** `crates/integration-tests/benches/sort.rs`, with criterion, both strategies on the scenarios of the table above, scaled to what the memory store holds comfortably (about 100k records).
+10. **Spec text,** after the benchmark: §12's "The Alternative" becomes a second strategy with the switch rule and the guarantee; rule 8 describes both; D6.2 lists what `IndexWalk` is charged (terms stepped, terms read, containers, set combinations, fetches). Plus decision 1's outcome.
+
+Not in this phase: metering hooks for either strategy; using the index for deeper levels too (ranking each tied record by its term's position); narrowing the walk to the filter's own range on the key.
