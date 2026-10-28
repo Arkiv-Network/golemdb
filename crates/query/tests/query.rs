@@ -9,7 +9,7 @@ use golemdb_api::{ApiError, Budget, CountOp, QueryOp, QueryPage, SortKey};
 use golemdb_api::{CellLimits, Database, Genesis, HashAlgorithm, OpenConfig};
 use golemdb_branch::{BranchError, Branches};
 use golemdb_cells::system::FIRST_USER_RECORD_ID;
-use golemdb_cells::{CellKey, CellType, CellValue, Width, reserved};
+use golemdb_cells::{CellKey, CellValue, marker::U32, reserved};
 use golemdb_merkle::Keccak256Hasher;
 use golemdb_query::{Queries, QueryError};
 use golemdb_record::RecordError;
@@ -199,7 +199,7 @@ fn pending_branch_work_is_invisible() {
 }
 
 fn by_size() -> [SortKey; 1] {
-    [SortKey::asc("size", CellType::Uint(Width::W4))]
+    [SortKey::asc("size", U32)]
 }
 
 #[test]

@@ -108,7 +108,10 @@ impl CountOp {
 
 #[cfg(test)]
 mod tests {
-    use golemdb_cells::{CellNameRef, CellType, Width, marker::Str};
+    use golemdb_cells::{
+        CellNameRef,
+        marker::{Date32, Str, U64},
+    };
 
     use super::*;
     use crate::EqValue;
@@ -142,7 +145,7 @@ mod tests {
 
     #[test]
     fn every_step_sets_its_field() {
-        let price = SortKey::asc("price", CellType::Uint(Width::W8));
+        let price = SortKey::asc("price", U64);
         let op = QueryOp::from_filter(color_is_blue(), crate::Budget::Limited(u64::MAX))
             .sort([price.clone()])
             .only(["owner", "status"])
@@ -176,8 +179,8 @@ mod tests {
 
     #[test]
     fn repeated_steps_replace_earlier_ones() {
-        let price = SortKey::asc("price", CellType::Uint(Width::W8));
-        let date = SortKey::desc("date", CellType::Date32);
+        let price = SortKey::asc("price", U64);
+        let date = SortKey::desc("date", Date32);
         let op = QueryOp::from_filter(color_is_blue(), crate::Budget::Limited(u64::MAX))
             .sort([price])
             .sort([date.clone()])
