@@ -1,7 +1,15 @@
 //! Shared reserved-record catalogue. Values are schema constants, not admission policy.
 
+/// Admin record IDs begin here; lower IDs are engine-managed system records.
+pub const FIRST_ADMIN_RECORD_ID: u64 = 32;
+
 /// User record IDs begin here; all lower IDs belong to the engine.
 pub const FIRST_USER_RECORD_ID: u64 = 64;
+
+/// Classify by the reserved ID range, not the record key's display prefix.
+pub fn is_admin_record(record_id: u64) -> bool {
+    (FIRST_ADMIN_RECORD_ID..FIRST_USER_RECORD_ID).contains(&record_id)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SystemRecord {

@@ -10,7 +10,8 @@ pub const WRITE_CODE_VERSION: u64 = 1;
 ///
 /// Missing weights stay absent; only a charge that uses one fails. Extra names,
 /// including host weights, are retained for inspection but never selected by the
-/// write meter. Declaration and activation checks belong to the future loader.
+/// write meter. Declaration/model checks belong to the persisted pricing loader;
+/// runtime activation and cache replacement remain deferred.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Schedule {
     code_version: u64,

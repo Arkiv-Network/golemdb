@@ -9,7 +9,7 @@ use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransacti
 
 const SUPERBLOCK: Table = Table("Superblock");
 const KEY: RecordKey = RecordKey([0x42; 32]);
-const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\nrecord_limits: {max_cells: 100, max_indexed_cells: 100}\n";
+const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\nrecord_limits: {max_cells: 100, max_indexed_cells: 100}\nmetering: {golemdb_code_version: 1, host_code_version: 0, weights: {}}\n";
 
 fn config() -> OpenConfig {
     OpenConfig::new(Genesis::from_yaml(YAML).unwrap())
@@ -39,7 +39,7 @@ pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
 #[test]
 fn yaml_is_explicit_strict_and_has_canonical_identity() {
     let first = Genesis::from_yaml(YAML).unwrap();
-    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nrecord_limits: {max_indexed_cells: 100, max_cells: 100}\nhash_function: keccak-256\nimmutable_data: null\n").unwrap();
+    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nrecord_limits: {max_indexed_cells: 100, max_cells: 100}\nhash_function: keccak-256\nmetering: {golemdb_code_version: 1, host_code_version: 0, weights: {}}\nimmutable_data: null\n").unwrap();
     assert_eq!(first, reordered);
     assert_eq!(
         Database::open_memory(&first).unwrap().info(),
@@ -128,11 +128,17 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
     for id in [
         system::ROOTS.id,
         system::ROOT_INDEX.id,
-        system::METERING_MODEL.id,
         system::MODEL_WEIGHT.id,
     ] {
         assert_eq!(reader.scan_record(id).unwrap().count(), 1);
     }
+    assert_eq!(
+        reader
+            .scan_record(system::METERING_MODEL.id)
+            .unwrap()
+            .count(),
+        2
+    );
     let before = snapshot(&db);
     let reopened = Database::from_store(db.clone(), &config).unwrap();
     assert_eq!(

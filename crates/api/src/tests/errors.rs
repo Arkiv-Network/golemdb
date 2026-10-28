@@ -59,6 +59,12 @@ fn capacity_errors_remain_public_through_internal_wrappers() {
     ] {
         assert!(matches!(ApiError::from(error), ApiError::StoreFull));
     }
+    assert!(matches!(
+        ApiError::from(golemdb_metering::ModelError::Cells(CellError::Storage(
+            StorageError::Full
+        ))),
+        ApiError::StoreFull
+    ));
 }
 
 #[test]

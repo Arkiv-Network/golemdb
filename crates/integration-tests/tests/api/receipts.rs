@@ -553,6 +553,7 @@ fn paused_database() -> (Database, PausingStore) {
             max_indexed_cells: 100,
         },
         None,
+        golemdb_api::PricingConfig::zero(),
     ));
     let db = Database::from_store(store.clone(), &config).unwrap();
     (db, store)

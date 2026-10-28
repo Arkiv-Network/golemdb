@@ -160,6 +160,15 @@ impl From<BranchError> for ApiError {
     }
 }
 
+impl From<golemdb_metering::ModelError> for ApiError {
+    fn from(error: golemdb_metering::ModelError) -> Self {
+        match error {
+            golemdb_metering::ModelError::ModelNotFound(_) => Self::NotFound,
+            error => Self::internal(error),
+        }
+    }
+}
+
 impl From<ImmutableDataStorageError> for ApiError {
     fn from(error: ImmutableDataStorageError) -> Self {
         match error {
@@ -220,6 +229,10 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
             }
         } else if let Some(ImmutableDataStorageError::Store(error)) =
             error.downcast_ref::<ImmutableDataStorageError>()
+        {
+            Some(error)
+        } else if let Some(golemdb_metering::ModelError::Cells(error)) =
+            error.downcast_ref::<golemdb_metering::ModelError>()
         {
             Some(error)
         } else if let Some(error) = error.downcast_ref::<CellError>() {

@@ -32,6 +32,7 @@ impl Default for TestDb {
                 max_indexed_cells: 100,
             },
             None,
+            golemdb_api::PricingConfig::zero(),
         );
         Self {
             db: Database::open_memory(&genesis).expect("genesis"),

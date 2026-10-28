@@ -6,4 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+golemdb-cells.workspace = true
+golemdb-storage.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+tracing = "0.1"
