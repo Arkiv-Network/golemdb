@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use golemdb_branch::CommitId;
-use golemdb_cells::CellName;
+use golemdb_cells::{CellError, CellName};
 use golemdb_index::{IndexError, TermError};
 use golemdb_record::RecordError;
 
@@ -47,6 +47,14 @@ impl From<IndexError> for QueryError {
     }
 }
 
+/// A cell that cannot be read, such as a sort value, is internal to a
+/// query, as a posting list that cannot be read is.
+impl From<CellError> for QueryError {
+    fn from(error: CellError) -> Self {
+        Self::Internal(Box::new(error))
+    }
+}
+
 /// A record's own errors are internal to a query, except for an unavailable
 /// commit, which keeps its meaning.
 impl From<RecordError> for QueryError {
@@ -57,5 +65,22 @@ impl From<RecordError> for QueryError {
             }
             error => Self::Internal(Box::new(error)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cell_error_is_internal_and_kept_as_the_cause() {
+        let error = QueryError::from(CellError::RootMismatch);
+        let QueryError::Internal(source) = &error else {
+            panic!("expected Internal, got {error:?}");
+        };
+        assert!(matches!(
+            source.downcast_ref::<CellError>(),
+            Some(CellError::RootMismatch)
+        ));
     }
 }

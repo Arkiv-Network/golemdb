@@ -11,7 +11,7 @@ use golemdb_branch::{BranchError, Branches};
 use golemdb_cells::system::FIRST_USER_RECORD_ID;
 use golemdb_cells::{CellKey, CellValue, marker::U32, reserved};
 use golemdb_merkle::Keccak256Hasher;
-use golemdb_query::{Queries, QueryError};
+use golemdb_query::{FetchAndSort, Queries, QueryError};
 use golemdb_record::RecordError;
 use golemdb_storage::MemoryStore;
 use support::{TestDb, eq, key, range, record};
@@ -198,19 +198,20 @@ fn pending_branch_work_is_invisible() {
     );
 }
 
-fn by_size() -> [SortKey; 1] {
-    [SortKey::asc("size", U32)]
+fn by_size_then_weight() -> [SortKey; 2] {
+    [SortKey::asc("size", U32), SortKey::desc("weight", U32)]
 }
 
 #[test]
-fn sort_is_not_implemented() {
+fn a_sort_of_more_than_one_key_is_not_implemented() {
     let test = colors();
-    let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX)).sort(by_size());
+    let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX))
+        .sort(by_size_then_weight());
     let result = test.db.query(None, op).into_result();
     assert!(matches!(
         result,
         Err(ApiError::NotImplemented {
-            operation: "query: sort"
+            operation: "query: multi-key sort"
         })
     ));
 }
@@ -389,9 +390,9 @@ fn the_limit_is_checked_after_unbuilt_parts_and_before_the_filter() {
     // An unbuilt part is reported before a bad limit.
     let filter = || QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX));
     assert!(matches!(
-        query(filter().sort(by_size()).limit(0)),
+        query(filter().sort(by_size_then_weight()).limit(0)),
         Err(ApiError::NotImplemented {
-            operation: "query: sort"
+            operation: "query: multi-key sort"
         })
     ));
 }
@@ -481,7 +482,13 @@ fn blue_page(
     max_query_limit: Option<u32>,
     paging: impl FnOnce(QueryOp) -> QueryOp,
 ) -> golemdb_query::Result<(Vec<RecordKey>, Option<u64>)> {
-    let queries = Queries::new(store.clone(), Keccak256Hasher, None, max_query_limit);
+    let queries = Queries::new(
+        store.clone(),
+        Keccak256Hasher,
+        None,
+        max_query_limit,
+        FetchAndSort,
+    );
     let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX)).with_total();
     queries.query(None, paging(op)).map(keys_and_total)
 }
@@ -497,7 +504,7 @@ fn the_page_size_is_set_when_queries_are_built() {
     assert_eq!(page(Some(0)), (vec![], Some(5)));
 
     // A count returns no records: the page size plays no part.
-    let queries = Queries::new(store, Keccak256Hasher, None, Some(1));
+    let queries = Queries::new(store, Keccak256Hasher, None, Some(1), FetchAndSort);
     let count = CountOp::filter(eq("color", blue()), Budget::Limited(u64::MAX));
     assert_eq!(queries.count(None, count).unwrap(), 5);
 }

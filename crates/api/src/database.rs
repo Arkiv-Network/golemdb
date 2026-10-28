@@ -6,7 +6,7 @@ use golemdb_branch::{Branches, read_head};
 use golemdb_immutable_data::{ImmutableDataReader, ImmutableDataStorage};
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher};
 use golemdb_pruning::PruningConfig;
-use golemdb_query::Queries;
+use golemdb_query::{FetchAndSort, Queries};
 use golemdb_record::{Records, WritePricing};
 use golemdb_storage::Store;
 
@@ -253,11 +253,15 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
         // Recover before exposing the reader through the completed database handle.
         let branches = Branches::new(store.clone(), hasher.clone(), immutable_data, pruning)?;
         let records = Records::new(branches.clone(), pricing);
+        // Every node of a deployment must sort the same way, since the
+        // strategy decides what a sorted query reads, and so its cost.
+        // Hardcoded for now, as the caps are.
         let queries = Queries::new(
             store.clone(),
             hasher,
             Some(MAX_QUERY_DEPTH),
             Some(MAX_QUERY_LIMIT),
+            FetchAndSort,
         );
         Ok(Self {
             store,
