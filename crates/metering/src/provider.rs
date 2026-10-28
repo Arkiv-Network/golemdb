@@ -13,6 +13,7 @@ use crate::{
 #[derive(Debug)]
 pub struct PricingModel {
     pub metadata: ModelMetadata,
+    /// Only weights declared by this model's GolemDB and host code versions.
     pub schedule: Schedule,
 }
 
@@ -88,6 +89,7 @@ impl PricingProvider {
             active.golemdb_code_version,
             weights
                 .iter()
+                .filter(|(name, _)| names.contains(name.as_str()))
                 .map(|(name, value)| (WeightName::from(name.clone()), *value)),
         )?;
         Ok(Self {
@@ -124,7 +126,9 @@ impl PricingProvider {
         self.pending
     }
 
-    /// None selects the active model. Maps are shared, not copied per lookup.
+    /// Stored weights, including undeclared names excluded from the active schedule.
+    /// None selects the active model. Maps are shared, not copied per lookup;
+    /// loading a schedule never removes stored weights or filters pending models.
     pub fn model_weights(
         &self,
         version: Option<u64>,

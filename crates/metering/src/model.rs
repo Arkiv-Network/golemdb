@@ -3,44 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use golemdb_cells::CellNameRef;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-use crate::WRITE_CODE_VERSION;
-
-/// Names declared by GolemDB code version 1 (metering D10). Declaring read/log
-/// names permits their configuration; their execution metering is still deferred.
-pub const GOLEMDB_WEIGHT_NAMES: &[&str] = &[
-    "write.admission.base",
-    "write.admission.entry",
-    "write.admission.byte",
-    "write.record.create",
-    "write.record.patch",
-    "write.record.delete",
-    "write.cell.create",
-    "write.cell.update",
-    "write.cell.delete",
-    "write.cell_trie_update",
-    "write.cell_byte",
-    "write.index.join",
-    "write.index.leave",
-    "write.index_term_create",
-    "write.index_trie_update",
-    "write.index_byte",
-    "read.key",
-    "read.cell",
-    "read.cell_scan",
-    "read.byte",
-    "read.term",
-    "read.base",
-    "read.admission.base",
-    "read.admission.entry",
-    "read.admission.byte",
-    "read.term_step",
-    "read.container",
-    "read.set_container",
-    "read.sort_compare",
-    "write.log_append.base",
-    "write.log_append.byte",
-    "read.log_row",
-];
+use crate::{GOLEMDB_WEIGHT_NAMES, WRITE_CODE_VERSION};
 
 /// Weight names understood by one host metering code version. Supplied at
 /// opening as local capabilities; actual weight values belong to PricingConfig.

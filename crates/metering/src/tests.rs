@@ -126,6 +126,10 @@ fn missing_weights_remain_unpriced_while_zero_and_host_values_are_preserved() {
     let snapshot = provider.snapshot(0).unwrap();
     let pricing = &snapshot.model;
     assert_eq!(pricing.schedule.weight("read.cell"), Some(0));
+    assert_eq!(
+        pricing.schedule.weight("host.storage_price"),
+        Some(u64::MAX)
+    );
     assert_eq!(pricing.schedule.weight("host.limit"), None);
     assert_eq!(
         provider.model_weights(None).unwrap()["host.storage_price"],
@@ -258,19 +262,56 @@ fn malformed_persisted_models_and_weights_fail_loading() {
 }
 
 #[test]
-fn loading_keeps_unknown_names_for_inspection_without_using_them_for_writes() {
+fn loading_excludes_unknown_names_from_pricing_but_preserves_them_for_inspection() {
     let store = store(&PricingConfig::zero());
-    put(
-        &store,
-        33,
-        &[1u64.to_be_bytes().as_slice(), b"write.typo"].concat(),
-        CellValue::from_u64(100),
-    );
-    let model = load(&store, 0, &[]).unwrap().snapshot(0).unwrap().model;
-    assert_eq!(model.schedule.weight("write.typo"), Some(100));
+    let unknown = ["write.typo", "read.typo", "host.typo"];
+    for name in unknown {
+        put(
+            &store,
+            33,
+            &[1u64.to_be_bytes().as_slice(), name.as_bytes()].concat(),
+            CellValue::from_u64(100),
+        );
+    }
+    let provider = load(&store, 0, &[]).unwrap();
+    let model = provider.snapshot(0).unwrap().model;
+    let stored = provider.model_weights(None).unwrap();
+    for name in unknown {
+        assert_eq!(stored[name], 100);
+        assert_eq!(model.schedule.weight(name), None);
+        assert_eq!(
+            model
+                .schedule
+                .price(&Ledger::from_counts([(name.into(), 1)])),
+            Err(PricingError::Unpriced(name.into()))
+        );
+    }
     let mut meter = WriteMeter::new(&model.schedule, INITIAL_DEPTHS, Budget::Limited(0));
     meter.run_step(PlanningStep::AdmissionBase, || ()).unwrap();
     let receipt = meter.finish().unwrap();
     assert_eq!(receipt.cost, 0);
-    assert_eq!(receipt.ledger.count("write.typo"), 0);
+    for name in unknown {
+        assert_eq!(receipt.ledger.count(name), 0);
+    }
+}
+
+#[test]
+fn pending_weights_are_inspectable_without_knowing_their_future_schema() {
+    let store = store(&PricingConfig::zero());
+    model(&store, 2, 10, 99, 99);
+    for name in ["read.future", "host.future"] {
+        put(
+            &store,
+            33,
+            &[2u64.to_be_bytes().as_slice(), name.as_bytes()].concat(),
+            CellValue::from_u64(42),
+        );
+    }
+    let provider = load(&store, 0, &[]).unwrap();
+    let snapshot = provider.snapshot(0).unwrap();
+    let stored = provider.model_weights(Some(2)).unwrap();
+    for name in ["read.future", "host.future"] {
+        assert_eq!(stored[name], 42);
+        assert_eq!(snapshot.model.schedule.weight(name), None);
+    }
 }

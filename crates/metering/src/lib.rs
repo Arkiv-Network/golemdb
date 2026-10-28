@@ -29,14 +29,12 @@ mod weight;
 pub use budget::Budget;
 pub use ledger::{Accounting, Ledger};
 pub use meter::{FailureReason, MeteringFailure, WriteMeter};
-pub use model::{
-    GOLEMDB_WEIGHT_NAMES, HostMeteringSchema, ModelError, ModelMetadata, PricingConfig,
-};
+pub use model::{HostMeteringSchema, ModelError, ModelMetadata, PricingConfig};
 pub use persisted::model_cells;
 pub use pricing::{INITIAL_DEPTHS, ModeledDepths, MutationCharge, PlanningStep, RecordOpKind};
 pub use provider::{PricingModel, PricingProvider, PricingSnapshot};
 pub use schedule::{PricingError, Schedule, ScheduleError, WRITE_CODE_VERSION};
-pub use weight::WeightName;
+pub use weight::{GOLEMDB_WEIGHT_NAMES, WeightName};
 
 #[cfg(test)]
 mod tests;

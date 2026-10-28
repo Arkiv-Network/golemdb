@@ -34,8 +34,9 @@ impl From<ModelMetadata> for MeteringModelMetadata {
     }
 }
 
-/// Weights at a resolved committed head. Host values are included; missing names
-/// stay absent. The immutable map is shared across reads/clones, not copied.
+/// Stored weights at a resolved committed head, including host values and
+/// undeclared names ignored by the active schedule. Missing names stay absent.
+/// The immutable map is shared across reads/clones, not copied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelWeights {
     pub commit_id: CommitId,
