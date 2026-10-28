@@ -8,3 +8,4 @@ mod opening_failure;
 mod pricing;
 mod pruning;
 mod receipts;
+mod write_metering;

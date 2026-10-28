@@ -12,7 +12,21 @@ const KEY: RecordKey = RecordKey([0x42; 32]);
 const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\nrecord_limits: {max_cells: 100, max_indexed_cells: 100}\nmetering: {golemdb_code_version: 1, host_code_version: 0, weights: {}}\n";
 
 fn config() -> OpenConfig {
-    OpenConfig::new(Genesis::from_yaml(YAML).unwrap())
+    let mut genesis = Genesis::from_yaml(YAML).unwrap();
+    genesis.metering = PricingConfig::zero();
+    OpenConfig::new(genesis)
+}
+
+fn pricing(store: &impl Store, genesis: &Genesis) -> WritePricing {
+    let tx = store.begin_read().unwrap();
+    let head = golemdb_branch::read_head(&tx).unwrap();
+    let provider =
+        golemdb_metering::PricingProvider::load(&CellReader::new(&tx), head.get(), &[]).unwrap();
+    WritePricing::new(
+        Arc::new(provider),
+        genesis.cell_limits,
+        genesis.record_limits,
+    )
 }
 
 pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
@@ -125,13 +139,13 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
             Some(CellValue::from_u64(record.id))
         );
     }
-    for id in [
-        system::ROOTS.id,
-        system::ROOT_INDEX.id,
-        system::MODEL_WEIGHT.id,
-    ] {
+    for id in [system::ROOTS.id, system::ROOT_INDEX.id] {
         assert_eq!(reader.scan_record(id).unwrap().count(), 1);
     }
+    assert_eq!(
+        reader.scan_record(system::MODEL_WEIGHT.id).unwrap().count(),
+        1 + config.genesis.metering.weights.len()
+    );
     assert_eq!(
         reader
             .scan_record(system::METERING_MODEL.id)
@@ -151,7 +165,7 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
     assert_eq!(snapshot(&db), before);
 
     let branches = Branches::new(db.clone(), hasher, None, None).unwrap();
-    let pricing = WritePricing::zero(config.genesis.cell_limits, config.genesis.record_limits);
+    let pricing = pricing(&db, &config.genesis);
     let records = Records::new(branches.clone(), pricing.clone());
     let branch = branches.begin().unwrap();
     let cells = golemdb_record::RecordCells::from([(
@@ -476,10 +490,7 @@ fn mdbx_genesis_matches_memory_and_reopens_from_disk_after_commit() {
         let branches = match hash {
             HashAlgorithm::Keccak256 => {
                 let branches = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
-                let record = Records::new(
-                    branches.clone(),
-                    WritePricing::zero(cfg.genesis.cell_limits, cfg.genesis.record_limits),
-                );
+                let record = Records::new(branches.clone(), pricing(&db, &cfg.genesis));
                 let branch = branches.begin().unwrap();
                 record
                     .create(
@@ -497,10 +508,7 @@ fn mdbx_genesis_matches_memory_and_reopens_from_disk_after_commit() {
             }
             HashAlgorithm::Blake3 => {
                 let branches = Branches::new(db.clone(), Blake3Hasher, None, None).unwrap();
-                let record = Records::new(
-                    branches.clone(),
-                    WritePricing::zero(cfg.genesis.cell_limits, cfg.genesis.record_limits),
-                );
+                let record = Records::new(branches.clone(), pricing(&db, &cfg.genesis));
                 let branch = branches.begin().unwrap();
                 record
                     .create(
@@ -570,10 +578,7 @@ fn mdbx_modes_limits_and_shared_environment_concurrent_opening() {
         db.max_key_size() as u32 - cfg.genesis.cell_limits.max_cell_name_len - 2;
     Database::from_store(db.clone(), &cfg).unwrap();
     let branches = Branches::new(db, Keccak256Hasher, None, None).unwrap();
-    let records = Records::new(
-        branches.clone(),
-        WritePricing::zero(cfg.genesis.cell_limits, cfg.genesis.record_limits),
-    );
+    let records = Records::new(branches.clone(), pricing(branches.store(), &cfg.genesis));
     let branch = branches.begin().unwrap();
     let name = "a".repeat(cfg.genesis.cell_limits.max_cell_name_len as usize);
     let value = CellValue::from_str(&"v".repeat(cfg.genesis.cell_limits.max_str_len as usize))

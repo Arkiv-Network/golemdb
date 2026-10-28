@@ -130,6 +130,9 @@ impl<'s> WriteMeter<'s> {
     }
 
     fn stop(&mut self, reason: FailureReason) -> MeteringFailure {
+        if let FailureReason::Pricing(PricingError::Unpriced(weight)) = &reason {
+            tracing::warn!(weight = %weight, "write failed because metering weight is unpriced");
+        }
         self.failed = Some(reason.clone());
         self.failure(reason, None)
     }

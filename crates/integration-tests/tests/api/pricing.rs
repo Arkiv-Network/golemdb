@@ -75,11 +75,11 @@ fn lifecycle(store: impl Store + Clone + Send + Sync + 'static, cfg: &OpenConfig
     let branch = api.begin().unwrap();
     let created = api.create(
         branch,
-        RecordOp::create(RecordKey([1; 32]), Budget::Limited(0))
+        RecordOp::create(RecordKey([1; 32]), Budget::Limited(474))
             .field("x", CellValue::from_u64(12)),
     );
-    // Iteration 5 exposes persisted prices; iteration 6 enables them for CUD.
-    assert_eq!(created.receipt.cost, 0);
+    // 140 system-cell bytes + 18 user-cell bytes, at the persisted price of 3.
+    assert_eq!(created.receipt.cost, 474);
     assert!(created.result.is_ok());
     assert_eq!(
         api.model_weights(None, None).unwrap().commit_id,
@@ -107,6 +107,16 @@ fn lifecycle(store: impl Store + Clone + Send + Sync + 'static, cfg: &OpenConfig
         reopened.metering_model(None).unwrap().commit_id,
         CommitId::new(1)
     );
+    let branch = reopened.begin().unwrap();
+    let created = reopened.create(
+        branch,
+        RecordOp::create(RecordKey([2; 32]), Budget::Limited(474))
+            .field("x", CellValue::from_u64(12)),
+    );
+    created.result.unwrap();
+    assert_eq!(created.receipt.cost, 474);
+    assert_eq!(created.receipt.priced_at, Some(CommitId::new(1)));
+    reopened.discard(branch).unwrap();
 }
 
 #[test]
@@ -219,6 +229,18 @@ fn reopening_loads_committed_weights_instead_of_replacing_them_with_genesis() {
             999
         );
         assert_eq!(db.genesis().metering.weights["read.cell"], 11);
+        let branch = db.begin().unwrap();
+        let key = RecordKey([3; 32]);
+        db.create(branch, RecordOp::create(key, Budget::Unlimited))
+            .result
+            .unwrap();
+        // An empty patch reads #meta and #key at the committed patched price,
+        // not the genesis value or the former hardcoded zero schedule.
+        let patched = db.patch(branch, RecordOp::patch(key, Budget::Limited(1998)));
+        patched.result.unwrap();
+        assert_eq!(patched.receipt.cost, 1998);
+        assert_eq!(patched.receipt.ledger.count("read.cell"), 2);
+        assert_eq!(patched.receipt.priced_at, Some(CommitId::new(1)));
     }
 }
 
@@ -281,6 +303,14 @@ fn reopening_requires_active_host_code_not_retired_genesis_host_code() {
     // Reopening at activation selects the new schema without requiring the old
     // host implementation. Live activation/cache replacement remains deferred.
     db.commit(db.begin().unwrap()).unwrap();
+    let branch = db.begin().unwrap();
+    let blocked = db.create(
+        branch,
+        RecordOp::create(RecordKey([4; 32]), Budget::Unlimited),
+    );
+    assert!(matches!(blocked.result, Err(ApiError::Internal { .. })));
+    assert_eq!(blocked.receipt, Receipt::default());
+    assert_eq!(db.branch_info(branch).unwrap().version, 0);
     drop(db);
     cfg.host_schemas = vec![HostMeteringSchema {
         code_version: 8,
