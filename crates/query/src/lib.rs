@@ -65,4 +65,4 @@ pub use query_op::{
     Bounds, CountOp, Direction, EqValue, ExistsType, Filter, InValues, QueryOp, QueryPage, SortKey,
     ValuesError,
 };
-pub use sorting::{FetchAndSort, SortPlan, SortingStrategy, Window};
+pub use sorting::{FetchAndSort, SortLevel, SortPlan, SortingStrategy, Window};

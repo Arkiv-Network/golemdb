@@ -1,15 +1,16 @@
 //! Sorting: how a query's match set is put in sort order.
 //!
-//! [`SortPlan`] is the sort after admission, and [`SortPlan::compare`] the
-//! one order every strategy produces. A [`SortingStrategy`] decides what is
-//! read to produce it: [`FetchAndSort`] reads every matched record's sort
-//! value. [`Queries`](crate::Queries) runs the strategy it is built with.
+//! [`SortPlan`] is the sort after admission, its [`SortLevel`]s the order
+//! every strategy produces. A [`SortingStrategy`] decides what is read to
+//! produce it: [`FetchAndSort`] reads every matched record's first sort
+//! value, and the deeper ones of the records the page needs them for.
+//! [`Queries`](crate::Queries) runs the strategy it is built with.
 
 mod fetch_and_sort;
 
 pub use fetch_and_sort::FetchAndSort;
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, ops::Range};
 
 use golemdb_cells::{CellName, CellType, CellValue};
 use golemdb_index::{Bitmap, IndexTerm};
@@ -21,7 +22,9 @@ use crate::{
 /// How a match set is put in sort order.
 ///
 /// Every strategy returns the same page for the same state and inputs: the
-/// records of the window, in the order [`SortPlan::compare`] defines.
+/// records of the window, in the order of the plan's first level
+/// ([`SortLevel::compare`]), records it ties ordered by each deeper level in
+/// turn, and records every level ties in ascending record ID order.
 /// Strategies differ only in what they read to find it, and so in what they
 /// cost.
 pub trait SortingStrategy {
@@ -38,14 +41,12 @@ pub trait SortingStrategy {
     ) -> Result<Vec<u64>>;
 }
 
-/// A query's sort after admission: one key for now. Built by
-/// [`SortPlan::admit`] only, so its name is a valid cell name and its type
-/// indexable.
+/// A query's sort after admission: one level per sort key, most significant
+/// first, at least one. Built by [`SortPlan::admit`] only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SortPlan {
-    field: CellName,
-    ty: CellType,
-    direction: Direction,
+    first: SortLevel,
+    deeper: Vec<SortLevel>,
 }
 
 impl SortPlan {
@@ -53,25 +54,59 @@ impl SortPlan {
     ///
     /// # Errors
     ///
-    /// [`QueryError::InvalidArgument`] for a key whose name is not a valid
-    /// cell name, as for a filter leaf's; [`QueryError::NotImplemented`]
-    /// for more than one key. A key's type is indexable by construction.
-    pub fn admit(keys: &[SortKey]) -> Result<Option<Self>> {
-        match keys {
-            [] => Ok(None),
-            [key] => {
-                IndexTerm::check_cell_name(key.field().as_view())
-                    .map_err(|source| invalid_argument(key.field(), source))?;
-                Ok(Some(Self {
-                    field: key.field().clone(),
-                    ty: key.cell_type(),
-                    direction: key.direction(),
-                }))
-            }
-            [_, _, ..] => Err(QueryError::NotImplemented {
-                operation: "query: multi-key sort",
-            }),
+    /// [`QueryError::LimitExceeded`] for more keys than `max_sort_keys`,
+    /// checked first; then [`QueryError::InvalidArgument`] for the first
+    /// key whose name is not a valid cell name, as for a filter leaf's. A
+    /// key's type is indexable by construction.
+    pub fn admit(keys: &[SortKey], max_sort_keys: Option<u32>) -> Result<Option<Self>> {
+        if let Some(max) = max_sort_keys
+            && keys.len() > max as usize
+        {
+            return Err(QueryError::LimitExceeded {
+                limit: "sort key count",
+                max,
+            });
         }
+        let mut levels = keys.iter().map(SortLevel::admit);
+        let Some(first) = levels.next() else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            first: first?,
+            deeper: levels.collect::<Result<_>>()?,
+        }))
+    }
+
+    /// The most significant level.
+    pub fn first(&self) -> &SortLevel {
+        &self.first
+    }
+
+    /// The levels after the first, in order: each orders the records the
+    /// ones before it tie.
+    pub fn deeper(&self) -> &[SortLevel] {
+        &self.deeper
+    }
+}
+
+/// One level of a [`SortPlan`]: a sort key after admission, so its name is
+/// a valid cell name and its type indexable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortLevel {
+    field: CellName,
+    ty: CellType,
+    direction: Direction,
+}
+
+impl SortLevel {
+    fn admit(key: &SortKey) -> Result<Self> {
+        IndexTerm::check_cell_name(key.field().as_view())
+            .map_err(|source| invalid_argument(key.field(), source))?;
+        Ok(Self {
+            field: key.field().clone(),
+            ty: key.cell_type(),
+            direction: key.direction(),
+        })
     }
 
     /// The name of the cell records are ordered by.
@@ -89,26 +124,24 @@ impl SortPlan {
     }
 
     /// The sort value a record's cell gives: the cell when it is of the
-    /// plan's type, whatever its kind; `None`, absent, when it is of
+    /// level's type, whatever its kind; `None`, absent, when it is of
     /// another type or there is no cell.
     pub fn sort_value(&self, cell: Option<CellValue>) -> Option<CellValue> {
         cell.filter(|cell| cell.cell_type() == self.ty)
     }
 
-    /// The order of two matched records, each given by its record ID and
-    /// its sort value's order-encoded payload ([`CellValue::value`]), `None`
-    /// when absent. Payloads of one type compare as bytes in the type's
-    /// order; an absent value sorts below every present one. Descending
-    /// reverses both, so absent values come first ascending and last
-    /// descending. Ties fall to ascending record ID, in either direction.
-    pub fn compare(&self, a: (u64, Option<&[u8]>), b: (u64, Option<&[u8]>)) -> Ordering {
-        let ((a_id, a_value), (b_id, b_value)) = (a, b);
-        let by_value = a_value.cmp(&b_value);
+    /// The order of two records' sort values at this level, each given by
+    /// its order-encoded payload ([`CellValue::value`]), `None` when absent.
+    /// Payloads of one type compare as bytes in the type's order; an absent
+    /// value sorts below every present one. Descending reverses both, so
+    /// absent values come first ascending and last descending. `Equal` is a
+    /// tie, for the next level to break, and record ID after the last.
+    pub fn compare(&self, a: Option<&[u8]>, b: Option<&[u8]>) -> Ordering {
+        let by_value = a.cmp(&b);
         match self.direction {
             Direction::Asc => by_value,
             Direction::Desc => by_value.reverse(),
         }
-        .then(a_id.cmp(&b_id))
     }
 }
 
@@ -125,6 +158,11 @@ impl Window {
     /// size, saturating.
     pub fn end(self) -> usize {
         self.skipped().saturating_add(self.page_size)
+    }
+
+    /// Whether the page takes any of the order's `positions`.
+    pub fn overlaps(self, positions: Range<usize>) -> bool {
+        positions.start.max(self.skipped()) < positions.end.min(self.end())
     }
 
     /// `ids`, in order, cut to the window.
@@ -144,7 +182,7 @@ impl Window {
 #[cfg(test)]
 mod tests {
     use golemdb_cells::{
-        CellKind, CellNameRef, Width,
+        CellKind, Width,
         marker::{I32, Str, U32, U64},
     };
     use golemdb_index::TermError;
@@ -155,43 +193,85 @@ mod tests {
 
     #[test]
     fn no_key_is_no_sort() {
-        assert!(matches!(SortPlan::admit(&[]), Ok(None)));
+        assert!(matches!(SortPlan::admit(&[], None), Ok(None)));
+        assert!(matches!(SortPlan::admit(&[], Some(0)), Ok(None)));
     }
 
     #[test]
-    fn one_key_is_admitted_as_written() {
-        let plan = SortPlan::admit(&[SortKey::desc("price", U64)])
-            .expect("a valid key")
-            .expect("one key");
-        assert_eq!(plan.field(), &CellName::from(CellNameRef::raw(b"price")));
-        assert_eq!(plan.cell_type(), CellType::Uint(Width::W8));
-        assert_eq!(plan.direction(), Direction::Desc);
+    fn keys_are_admitted_as_written_most_significant_first() {
+        let keys = [
+            SortKey::desc("price", U64),
+            SortKey::asc("name", Str),
+            SortKey::desc("age", I32),
+        ];
+        let plan = SortPlan::admit(&keys, None)
+            .expect("valid keys")
+            .expect("three keys");
+        let levels: Vec<_> = std::iter::once(plan.first())
+            .chain(plan.deeper())
+            .map(|level| {
+                (
+                    level.field().as_bytes(),
+                    level.cell_type(),
+                    level.direction(),
+                )
+            })
+            .collect();
+        let expected: [(&[u8], _, _); 3] = [
+            (b"price", CellType::Uint(Width::W8), Direction::Desc),
+            (b"name", CellType::Str, Direction::Asc),
+            (b"age", CellType::Int(Width::W4), Direction::Desc),
+        ];
+        assert_eq!(levels, expected);
     }
 
     #[test]
     fn a_key_with_a_bad_name_is_an_invalid_argument() {
         for name in [&b"1bad"[..], b"a b", b"", &[0xff]] {
-            assert!(
-                matches!(
-                    SortPlan::admit(&[SortKey::asc(name, U32)]),
-                    Err(QueryError::InvalidArgument {
-                        field,
-                        source: TermError::InvalidName,
-                    }) if field.as_bytes() == name
-                ),
-                "{name:?}"
-            );
+            // As the only key, and after a good one.
+            for keys in [
+                vec![SortKey::asc(name, U32)],
+                vec![SortKey::asc("good", U32), SortKey::desc(name, U32)],
+            ] {
+                assert!(
+                    matches!(
+                        SortPlan::admit(&keys, None),
+                        Err(QueryError::InvalidArgument {
+                            field,
+                            source: TermError::InvalidName,
+                        }) if field.as_bytes() == name
+                    ),
+                    "{name:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn more_than_one_key_is_not_implemented_yet() {
-        let keys = [SortKey::asc("a", U32), SortKey::desc("b", Str)];
+    fn more_keys_than_the_cap_exceed_it() {
+        let keys = [
+            SortKey::asc("a", U32),
+            SortKey::desc("b", Str),
+            SortKey::asc("c", I32),
+        ];
+        for max_sort_keys in [None, Some(3), Some(4)] {
+            assert!(
+                SortPlan::admit(&keys, max_sort_keys).is_ok(),
+                "{max_sort_keys:?}"
+            );
+        }
         assert!(matches!(
-            SortPlan::admit(&keys),
-            Err(QueryError::NotImplemented {
-                operation: "query: multi-key sort"
+            SortPlan::admit(&keys, Some(2)),
+            Err(QueryError::LimitExceeded {
+                limit: "sort key count",
+                max: 2
             })
+        ));
+        // The count is checked before the names.
+        let bad_names = [SortKey::asc("1bad", U32), SortKey::asc("2bad", U32)];
+        assert!(matches!(
+            SortPlan::admit(&bad_names, Some(1)),
+            Err(QueryError::LimitExceeded { .. })
         ));
     }
 
@@ -204,6 +284,19 @@ mod tests {
         assert!(window(u64::MAX, usize::MAX).cut(0..5).is_empty());
         assert_eq!(window(2, 3).end(), 5);
         assert_eq!(window(u64::MAX, 1).end(), usize::MAX);
+    }
+
+    #[test]
+    fn a_window_overlaps_the_positions_it_takes_one_of() {
+        let window = |offset, page_size| Window { offset, page_size };
+        // Positions 2, 3 and 4.
+        assert!(window(2, 3).overlaps(0..3));
+        assert!(window(2, 3).overlaps(4..6));
+        assert!(window(2, 3).overlaps(0..9));
+        assert!(!window(2, 3).overlaps(0..2));
+        assert!(!window(2, 3).overlaps(5..7));
+        assert!(!window(2, 0).overlaps(0..9));
+        assert!(!window(u64::MAX, 1).overlaps(0..usize::MAX));
     }
 
     // The conformance cases: what every strategy must return. Each is
@@ -224,7 +317,12 @@ mod tests {
         attribute(CellValue::from_u32(n))
     }
 
-    /// The page `strategy` returns over `state`, for the records `matched`.
+    fn string(s: &str) -> CellValue {
+        attribute(CellValue::from_str(s))
+    }
+
+    /// The page `strategy` returns over `state`, for the records `matched`,
+    /// sorted by one key.
     fn page(
         strategy: &impl SortingStrategy,
         state: &FakeState,
@@ -232,9 +330,21 @@ mod tests {
         key: SortKey,
         window: Window,
     ) -> Vec<u64> {
-        let sort = SortPlan::admit(&[key])
-            .expect("a valid key")
-            .expect("one key");
+        page_by(strategy, state, matched, &[key], window)
+    }
+
+    /// The page `strategy` returns over `state`, for the records `matched`,
+    /// sorted by `keys`.
+    fn page_by(
+        strategy: &impl SortingStrategy,
+        state: &FakeState,
+        matched: impl IntoIterator<Item = u64>,
+        keys: &[SortKey],
+        window: Window,
+    ) -> Vec<u64> {
+        let sort = SortPlan::admit(keys, None)
+            .expect("valid keys")
+            .expect("a key at least");
         strategy
             .sorted_page(&state.index, &state.cells, &bitmap(matched), &sort, window)
             .expect("in-memory reads")
@@ -387,7 +497,7 @@ mod tests {
         let state = [(64, "b"), (65, "ab"), (66, ""), (67, "a")]
             .into_iter()
             .fold(FakeState::default(), |state, (id, s)| {
-                state.with(id, "s", attribute(CellValue::from_str(s)))
+                state.with(id, "s", string(s))
             });
         let asc = page(
             strategy,
@@ -415,7 +525,94 @@ mod tests {
         assert!(desc(u64::MAX, usize::MAX).is_empty());
     }
 
-    /// A record's cell `n`, for the reference check.
+    /// The example of design §12: six records with a `status` and an
+    /// `amount`.
+    fn statuses_and_amounts() -> FakeState {
+        [
+            (100, "active", 100),
+            (101, "closed", 50),
+            (102, "active", 300),
+            (103, "active", 100),
+            (104, "closed", 70),
+            (105, "pending", 10),
+        ]
+        .into_iter()
+        .fold(FakeState::default(), |state, (id, status, amount)| {
+            state
+                .with(id, "status", string(status))
+                .with(id, "amount", u32(amount))
+        })
+    }
+
+    fn deeper_keys_break_the_ties_of_the_ones_before(strategy: &impl SortingStrategy) {
+        let state = statuses_and_amounts();
+        let sorted = |keys: &[SortKey]| page_by(strategy, &state, 100..=105, keys, EVERYTHING);
+        // 100 and 103 tie on both keys: ascending record ID, in either
+        // direction.
+        assert_eq!(
+            sorted(&[SortKey::asc("status", Str), SortKey::desc("amount", U32)]),
+            [102, 100, 103, 104, 101, 105]
+        );
+        assert_eq!(
+            sorted(&[SortKey::desc("status", Str), SortKey::asc("amount", U32)]),
+            [105, 101, 104, 100, 103, 102]
+        );
+        // A deeper key that breaks no tie changes nothing.
+        assert_eq!(
+            sorted(&[SortKey::desc("amount", U32), SortKey::asc("status", Str)]),
+            [102, 100, 103, 104, 101, 105]
+        );
+    }
+
+    fn absent_values_sort_below_every_value_at_any_level(strategy: &impl SortingStrategy) {
+        // Every record but 68 ties on `a`. Their `b` is absent for 65, a
+        // `str` for 66, and a field for 67.
+        let state = FakeState::default()
+            .with(64, "a", u32(1))
+            .with(64, "b", u32(2))
+            .with(65, "a", u32(1))
+            .with(66, "a", u32(1))
+            .with(66, "b", string("x"))
+            .with(67, "a", u32(1))
+            .with(67, "b", CellValue::from_u32(1))
+            .with(68, "a", u32(0));
+        let sorted = |b| {
+            page_by(
+                strategy,
+                &state,
+                64..=68,
+                &[SortKey::asc("a", U32), b],
+                EVERYTHING,
+            )
+        };
+        assert_eq!(sorted(SortKey::asc("b", U32)), [68, 65, 66, 67, 64]);
+        assert_eq!(sorted(SortKey::desc("b", U32)), [68, 64, 67, 65, 66]);
+    }
+
+    fn the_page_is_the_window_of_a_multi_key_order(strategy: &impl SortingStrategy) {
+        // `a` ties in threes; `b` descending orders each three.
+        let state = (64..=72).fold(FakeState::default(), |state, id| {
+            let id32 = u32::try_from(id).expect("small ID");
+            state
+                .with(id, "a", u32((id32 - 64) / 3))
+                .with(id, "b", u32(id32))
+        });
+        let keys = [SortKey::asc("a", U32), SortKey::desc("b", U32)];
+        let sorted = |offset, page_size| {
+            let window = Window { offset, page_size };
+            page_by(strategy, &state, 64..=72, &keys, window)
+        };
+        assert_eq!(sorted(0, usize::MAX), [66, 65, 64, 69, 68, 67, 72, 71, 70]);
+        // Pages that start or end inside a tie, or both.
+        assert_eq!(sorted(1, 4), [65, 64, 69, 68]);
+        assert_eq!(sorted(2, 2), [64, 69]);
+        assert_eq!(sorted(4, 1), [68]);
+        assert_eq!(sorted(8, 5), [70]);
+        assert!(sorted(0, 0).is_empty());
+        assert!(sorted(9, 1).is_empty());
+    }
+
+    /// A record's cell, for the reference check.
     #[derive(Debug, Clone, Copy)]
     enum Cell {
         Absent,
@@ -423,6 +620,16 @@ mod tests {
         Field(i32),
         /// A `u32` attribute: absent to an `i32` key.
         OtherType(u32),
+    }
+
+    impl Cell {
+        /// The record's sort value under an `i32` key.
+        fn value(self) -> Option<i32> {
+            match self {
+                Cell::Attribute(n) | Cell::Field(n) => Some(n),
+                Cell::Absent | Cell::OtherType(_) => None,
+            }
+        }
     }
 
     fn cell() -> impl Strategy<Value = Cell> {
@@ -435,9 +642,22 @@ mod tests {
         ]
     }
 
-    /// Records from ID 64 up: each one's cell, and whether it matched.
-    fn records() -> impl Strategy<Value = Vec<(Cell, bool)>> {
-        prop::collection::vec((cell(), any::<bool>()), 0..24)
+    /// The names of a reference record's cells.
+    const NAMES: [&str; 3] = ["a", "b", "c"];
+
+    /// A record of the reference check: its cells `NAMES`, and whether it
+    /// matched.
+    type Record = ([Cell; 3], bool);
+
+    /// Records from ID 64 up.
+    fn records() -> impl Strategy<Value = Vec<Record>> {
+        prop::collection::vec(([cell(), cell(), cell()], any::<bool>()), 0..24)
+    }
+
+    /// One to three sort keys, each by one of `NAMES`, which may repeat.
+    fn keys() -> impl Strategy<Value = Vec<(usize, Direction)>> {
+        let direction = prop_oneof![Just(Direction::Asc), Just(Direction::Desc)];
+        prop::collection::vec((0..NAMES.len(), direction), 1..=3)
     }
 
     fn window() -> impl Strategy<Value = Window> {
@@ -445,46 +665,52 @@ mod tests {
     }
 
     /// The strategy's page equals the reference's: the matched records
-    /// sorted by native `i32` values, absent below every value, then
-    /// reversed for descending, ties by ascending ID, then cut.
+    /// sorted by each key's native `i32` values in turn, absent below every
+    /// value, then reversed for descending; ties by ascending ID; then cut.
     fn agrees_with_the_reference(
         strategy: &impl SortingStrategy,
-        records: &[(Cell, bool)],
-        direction: Direction,
+        records: &[Record],
+        keys: &[(usize, Direction)],
         window: Window,
     ) -> std::result::Result<(), TestCaseError> {
-        let records: Vec<_> = (64..).zip(records.iter().copied()).collect();
-        let state =
-            records
-                .iter()
-                .fold(FakeState::default(), |state, &(id, (cell, _))| match cell {
+        let records: Vec<(u64, Record)> = (64..).zip(records.iter().copied()).collect();
+        let state = records
+            .iter()
+            .flat_map(|&(id, (cells, _))| NAMES.into_iter().zip(cells).map(move |cell| (id, cell)))
+            .fold(
+                FakeState::default(),
+                |state, (id, (name, cell))| match cell {
                     Cell::Absent => state,
-                    Cell::Attribute(n) => state.with(id, "n", attribute(CellValue::from_i32(n))),
-                    Cell::Field(n) => state.with(id, "n", CellValue::from_i32(n)),
-                    Cell::OtherType(n) => state.with(id, "n", u32(n)),
-                });
-        let matched: Vec<(u64, Option<i32>)> = records
+                    Cell::Attribute(n) => state.with(id, name, attribute(CellValue::from_i32(n))),
+                    Cell::Field(n) => state.with(id, name, CellValue::from_i32(n)),
+                    Cell::OtherType(n) => state.with(id, name, u32(n)),
+                },
+            );
+        let matched: Vec<(u64, [Option<i32>; 3])> = records
             .iter()
             .filter(|(_, (_, matched))| *matched)
-            .map(|&(id, (cell, _))| match cell {
-                Cell::Attribute(n) | Cell::Field(n) => (id, Some(n)),
-                Cell::Absent | Cell::OtherType(_) => (id, None),
-            })
+            .map(|&(id, (cells, _))| (id, cells.map(Cell::value)))
             .collect();
         let expected = {
             let mut sorted = matched.clone();
             sorted.sort_by(|(a_id, a), (b_id, b)| {
-                match direction {
-                    Direction::Asc => a.cmp(b),
-                    Direction::Desc => b.cmp(a),
-                }
-                .then(a_id.cmp(b_id))
+                keys.iter()
+                    .map(|&(cell, direction)| match direction {
+                        Direction::Asc => a[cell].cmp(&b[cell]),
+                        Direction::Desc => b[cell].cmp(&a[cell]),
+                    })
+                    .fold(Ordering::Equal, Ordering::then)
+                    .then(a_id.cmp(b_id))
             });
             window.cut(sorted.into_iter().map(|(id, _)| id))
         };
-        let key = SortKey::try_new("n", CellType::Int(Width::W4), direction).expect("i32");
+        let i32 = CellType::Int(Width::W4);
+        let keys: Vec<_> = keys
+            .iter()
+            .map(|&(cell, direction)| SortKey::try_new(NAMES[cell], i32, direction).expect("i32"))
+            .collect();
         let ids = matched.iter().map(|(id, _)| *id);
-        prop_assert_eq!(page(strategy, &state, ids, key, window), expected);
+        prop_assert_eq!(page_by(strategy, &state, ids, &keys, window), expected);
         Ok(())
     }
 
@@ -532,15 +758,29 @@ mod tests {
                     super::the_page_is_the_window_of_the_order(&$strategy);
                 }
 
+                #[test]
+                fn deeper_keys_break_the_ties_of_the_ones_before() {
+                    super::deeper_keys_break_the_ties_of_the_ones_before(&$strategy);
+                }
+
+                #[test]
+                fn absent_values_sort_below_every_value_at_any_level() {
+                    super::absent_values_sort_below_every_value_at_any_level(&$strategy);
+                }
+
+                #[test]
+                fn the_page_is_the_window_of_a_multi_key_order() {
+                    super::the_page_is_the_window_of_a_multi_key_order(&$strategy);
+                }
+
                 proptest! {
                     #[test]
                     fn agrees_with_the_reference(
                         records in records(),
-                        descending in any::<bool>(),
+                        keys in keys(),
                         window in window(),
                     ) {
-                        let direction = if descending { Direction::Desc } else { Direction::Asc };
-                        super::agrees_with_the_reference(&$strategy, &records, direction, window)?;
+                        super::agrees_with_the_reference(&$strategy, &records, &keys, window)?;
                     }
                 }
             }

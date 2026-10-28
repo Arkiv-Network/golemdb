@@ -229,6 +229,11 @@ const MAX_QUERY_DEPTH: u32 = 64;
 /// (`#maxQueryLimit`) in the scope of issues #48 and #49.
 const MAX_QUERY_LIMIT: u32 = 100;
 
+/// The most keys a query sorts by: more fail as `LimitExceeded`. Hardcoded
+/// for now: it will be read from genesis (`#maxSortKeys`) in the scope of
+/// issues #48 and #49.
+const MAX_SORT_KEYS: u32 = 4;
+
 /// All layers share one store, through clones of its handle, and record and
 /// branch share one branch registry. Immutable reads use the store and reader
 /// directly, with head and metadata taken from the same committed snapshot.
@@ -261,6 +266,7 @@ impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
             hasher,
             Some(MAX_QUERY_DEPTH),
             Some(MAX_QUERY_LIMIT),
+            Some(MAX_SORT_KEYS),
             FetchAndSort,
         );
         Ok(Self {

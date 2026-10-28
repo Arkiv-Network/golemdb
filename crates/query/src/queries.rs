@@ -4,9 +4,9 @@
 //!
 //! 1. Open one storage snapshot and select its head. A requested commit other
 //!    than that head is rejected; historical reads are not implemented yet.
-//! 2. `query` only: reject a sort of more than one key, not implemented yet,
-//!    then a `limit` of 0 or above `max_query_limit`.
-//! 3. Admit the filter, then, for `query`, the sort. Evaluate the filter,
+//! 2. `query` only: reject a `limit` of 0 or above `max_query_limit`.
+//! 3. Admit the filter, then, for `query`, the sort: no more keys than
+//!    `max_sort_keys`, then each key's name, in order. Evaluate the filter,
 //!    order its matches with the sorting strategy when the query sorts, and
 //!    materialize the page's records from the same snapshot: past the first
 //!    `offset` matches, at most `limit`, or with no limit `max_query_limit`.
@@ -38,6 +38,7 @@ pub struct Queries<S, H, O = FetchAndSort> {
     hasher: H,
     max_query_depth: Option<u32>,
     max_query_limit: Option<u32>,
+    max_sort_keys: Option<u32>,
     sorting: O,
 }
 
@@ -54,6 +55,10 @@ impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
     /// are not read. With no cap, any limit holds, and a query with none
     /// returns every match past its offset.
     ///
+    /// `max_sort_keys` caps how many keys a query sorts by: more fail as
+    /// [`QueryError::LimitExceeded`] at admission. With no cap, a query
+    /// sorts by any number.
+    ///
     /// `sorting` orders the matches of a query that sorts. Every strategy
     /// returns the same records; they differ in what they read.
     pub fn new(
@@ -61,6 +66,7 @@ impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
         hasher: H,
         max_query_depth: Option<u32>,
         max_query_limit: Option<u32>,
+        max_sort_keys: Option<u32>,
         sorting: O,
     ) -> Self {
         Self {
@@ -68,6 +74,7 @@ impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
             hasher,
             max_query_depth,
             max_query_limit,
+            max_sort_keys,
             sorting,
         }
     }
@@ -76,14 +83,14 @@ impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
     /// in query order, projected as `get` projects: past the first `offset`
     /// of them, the first `limit`, or with no limit the first
     /// `max_query_limit`, while `total_matched` counts every match. Query
-    /// order is the sort key's, as [`SortKey`](crate::SortKey) describes,
-    /// and record ID order with no sort. The next page's offset is this one
-    /// plus the records returned; an offset past the last match gives an
-    /// empty page. A `limit` of 0 fails as [`QueryError::InvalidQuery`], one
-    /// above `max_query_limit` as [`QueryError::LimitExceeded`]. A sort of
-    /// more than one key returns `NotImplemented` for now, and the budget is
-    /// not enforced yet. Use [`Self::query_report`] to retain the execution
-    /// context on failure.
+    /// order is the first sort key's, as [`SortKey`](crate::SortKey)
+    /// describes, records it ties in each next key's order, and record ID
+    /// order after the last or with no sort. The next page's offset is this
+    /// one plus the records returned; an offset past the last match gives an
+    /// empty page. A `limit` of 0 fails as [`QueryError::InvalidQuery`]; one
+    /// above `max_query_limit`, or more sort keys than `max_sort_keys`, as
+    /// [`QueryError::LimitExceeded`]. The budget is not enforced yet. Use
+    /// [`Self::query_report`] to retain the execution context on failure.
     pub fn query(&self, commit: Option<CommitId>, op: QueryOp) -> Result<QueryPage> {
         self.query_report(commit, op).result
     }
@@ -95,15 +102,9 @@ impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
         op: QueryOp,
     ) -> Outcome<QueryPage, QueryError> {
         self.read_report(commit, |snapshot, head| {
-            // An unbuilt part first, at no cost; admitting the sort repeats it.
-            if op.sort.len() > 1 {
-                return Err(QueryError::NotImplemented {
-                    operation: "query: multi-key sort",
-                });
-            }
             let page_size = page_size(op.limit, self.max_query_limit)?;
             let plan = Plan::admit(&op.filter, self.max_query_depth)?;
-            let sort = SortPlan::admit(&op.sort)?;
+            let sort = SortPlan::admit(&op.sort, self.max_sort_keys)?;
             let index = Index::new(&self.hasher);
             let postings = IndexSource::new(&index, snapshot);
             let matches = match_set(&postings, plan)?;

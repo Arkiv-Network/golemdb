@@ -24,8 +24,9 @@ pub enum QueryError {
     InvalidQuery { reason: &'static str },
     /// The request exceeds a cap, named by `limit`, whose value is `max`: a
     /// filter nested deeper than the `max_query_depth` of its
-    /// [`Queries`](crate::Queries) (`"filter depth"`), or a `limit` above its
-    /// `max_query_limit` (`"query limit"`). Raised at admission, before index
+    /// [`Queries`](crate::Queries) (`"filter depth"`), a `limit` above its
+    /// `max_query_limit` (`"query limit"`), or more sort keys than its
+    /// `max_sort_keys` (`"sort key count"`). Raised at admission, before index
     /// or record reads.
     #[error("limit exceeded: {limit} is capped at {max}")]
     LimitExceeded { limit: &'static str, max: u32 },

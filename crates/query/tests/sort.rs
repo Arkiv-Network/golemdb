@@ -1,5 +1,5 @@
-//! Sorted queries against a real database: the order one sort key gives,
-//! page by page, and the sort keys admission rejects.
+//! Sorted queries against a real database: the order sort keys give, page
+//! by page, and the sort keys admission rejects.
 
 mod support;
 
@@ -35,21 +35,30 @@ fn keys(page: QueryPage) -> Vec<RecordKey> {
 }
 
 /// The keys of the records `filter` matches, in the order `sort` gives.
-fn try_sorted(test: &TestDb, filter: Filter, sort: SortKey) -> Result<Vec<RecordKey>, ApiError> {
-    let op = QueryOp::from_filter(filter, BUDGET).sort([sort]);
+fn try_sorted(
+    test: &TestDb,
+    filter: Filter,
+    sort: impl IntoIterator<Item = SortKey>,
+) -> Result<Vec<RecordKey>, ApiError> {
+    let op = QueryOp::from_filter(filter, BUDGET).sort(sort);
     test.db.query(None, op).into_result().map(keys)
 }
 
 /// The keys of every record, in the order `sort` gives.
-fn sorted(test: &TestDb, sort: SortKey) -> Vec<RecordKey> {
+fn sorted(test: &TestDb, sort: impl IntoIterator<Item = SortKey>) -> Vec<RecordKey> {
     try_sorted(test, everything(), sort).expect("a valid query")
 }
 
 /// The page of every record `sort` gives past `offset`, at most `limit`,
 /// with the match count.
-fn page(test: &TestDb, sort: SortKey, offset: u64, limit: u64) -> QueryPage {
+fn page(
+    test: &TestDb,
+    sort: impl IntoIterator<Item = SortKey>,
+    offset: u64,
+    limit: u64,
+) -> QueryPage {
     let op = QueryOp::from_filter(everything(), BUDGET)
-        .sort([sort])
+        .sort(sort)
         .offset(offset)
         .limit(limit)
         .with_total();
@@ -71,11 +80,11 @@ fn absent_values_come_first_ascending_and_last_descending() {
         tagged(key(5)).attribute("n", u32(3)),
     ]);
     assert_eq!(
-        sorted(&test, SortKey::asc("n", U32)),
+        sorted(&test, [SortKey::asc("n", U32)]),
         [2, 4, 3, 1, 5].map(key)
     );
     assert_eq!(
-        sorted(&test, SortKey::desc("n", U32)),
+        sorted(&test, [SortKey::desc("n", U32)]),
         [5, 1, 3, 2, 4].map(key)
     );
 }
@@ -89,11 +98,11 @@ fn ties_come_in_creation_order_in_either_direction() {
             .map(|(n, size)| tagged(key(n)).attribute("size", u32(size))),
     );
     assert_eq!(
-        sorted(&test, SortKey::asc("size", U32)),
+        sorted(&test, [SortKey::asc("size", U32)]),
         [5, 4, 3, 1, 2].map(key)
     );
     assert_eq!(
-        sorted(&test, SortKey::desc("size", U32)),
+        sorted(&test, [SortKey::desc("size", U32)]),
         [1, 2, 5, 4, 3].map(key)
     );
 }
@@ -108,9 +117,12 @@ fn a_field_sorts_among_attributes_of_its_type() {
         // A field of another type is absent, as an attribute would be.
         tagged(key(4)).field("n", CellValue::from_str("x")),
     ]);
-    assert_eq!(sorted(&test, SortKey::asc("n", U32)), [4, 2, 1, 3].map(key));
     assert_eq!(
-        sorted(&test, SortKey::desc("n", U32)),
+        sorted(&test, [SortKey::asc("n", U32)]),
+        [4, 2, 1, 3].map(key)
+    );
+    assert_eq!(
+        sorted(&test, [SortKey::desc("n", U32)]),
         [3, 1, 2, 4].map(key)
     );
 }
@@ -136,17 +148,17 @@ fn values_come_in_their_types_order() {
     );
     // Numeric order: negative values first.
     assert_eq!(
-        sorted(&test, SortKey::asc("i", I32)),
+        sorted(&test, [SortKey::asc("i", I32)]),
         [2, 3, 4, 1, 5].map(key)
     );
     // UTF-8 byte order: a prefix first, and "é" after every ASCII letter.
     assert_eq!(
-        sorted(&test, SortKey::asc("s", Str)),
+        sorted(&test, [SortKey::asc("s", Str)]),
         [3, 4, 2, 1, 5].map(key)
     );
     // IEEE order, the infinities at the ends.
     assert_eq!(
-        sorted(&test, SortKey::asc("f", F64)),
+        sorted(&test, [SortKey::asc("f", F64)]),
         [2, 5, 4, 1, 3].map(key)
     );
 }
@@ -160,7 +172,7 @@ fn pages_follow_one_another_through_the_sorted_matches() {
         Some(size) => tagged(key(n)).attribute("size", u32(size)),
         None => tagged(key(n)),
     }));
-    let by_size = || SortKey::desc("size", U32);
+    let by_size = || [SortKey::desc("size", U32)];
     let all = sorted(&test, by_size());
     assert_eq!(all, [5, 7, 1, 2, 4, 6, 3].map(key));
     let mut paged = Vec::new();
@@ -175,12 +187,91 @@ fn pages_follow_one_another_through_the_sorted_matches() {
     assert_eq!(past_the_end.total_matched, Some(7));
 }
 
+/// The example of design §12: six records with a `status` and an `amount`.
+fn statuses_and_amounts(test: &TestDb) {
+    test.create(
+        [
+            (1, "active", 100),
+            (2, "closed", 50),
+            (3, "active", 300),
+            (4, "active", 100),
+            (5, "closed", 70),
+            (6, "pending", 10),
+        ]
+        .map(|(n, status, amount)| {
+            tagged(key(n))
+                .attribute("status", CellValue::from_str(status))
+                .attribute("amount", u32(amount))
+        }),
+    );
+}
+
+#[test]
+fn each_key_orders_the_records_the_ones_before_it_tie() {
+    let test = TestDb::default();
+    statuses_and_amounts(&test);
+    // 1 and 4 tie on both keys: creation order, in either direction.
+    assert_eq!(
+        sorted(
+            &test,
+            [SortKey::asc("status", Str), SortKey::desc("amount", U32)]
+        ),
+        [3, 1, 4, 5, 2, 6].map(key)
+    );
+    assert_eq!(
+        sorted(
+            &test,
+            [SortKey::desc("status", Str), SortKey::asc("amount", U32)]
+        ),
+        [6, 2, 5, 1, 4, 3].map(key)
+    );
+}
+
+#[test]
+fn pages_of_a_multi_key_sort_follow_one_another() {
+    let test = TestDb::default();
+    statuses_and_amounts(&test);
+    let by_status_then_amount = || [SortKey::asc("status", Str), SortKey::desc("amount", U32)];
+    let all = sorted(&test, by_status_then_amount());
+    // Pages of every size up to four, which start or end inside the ties.
+    for limit in 1..=4 {
+        let paged: Vec<_> = (0..6)
+            .filter(|offset| offset % limit == 0)
+            .flat_map(|offset| keys(page(&test, by_status_then_amount(), offset, limit)))
+            .collect();
+        assert_eq!(paged, all, "{limit}");
+    }
+}
+
+#[test]
+fn more_sort_keys_than_the_cap_exceed_it() {
+    let test = TestDb::default();
+    statuses_and_amounts(&test);
+    // `Database` sorts by four keys at most.
+    let by_status = || SortKey::asc("status", Str);
+    assert_eq!(
+        sorted(&test, vec![by_status(); 4]),
+        [1, 3, 4, 2, 5, 6].map(key)
+    );
+    let error = try_sorted(&test, everything(), vec![by_status(); 5]).expect_err("five keys");
+    assert!(
+        matches!(
+            error,
+            ApiError::LimitExceeded {
+                limit: "sort key count",
+                max: 4
+            }
+        ),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn a_sort_key_with_a_bad_name_is_an_invalid_argument() {
     let test = TestDb::default();
     test.create([tagged(key(1))]);
     for name in ["1bad", "a b", "", "#key"] {
-        let error = try_sorted(&test, everything(), SortKey::asc(name, U32))
+        let error = try_sorted(&test, everything(), [SortKey::asc(name, U32)])
             .expect_err("a bad sort key name");
         assert!(
             matches!(error, ApiError::InvalidArgument { .. }),
@@ -195,14 +286,19 @@ fn a_sort_key_with_a_bad_name_is_an_invalid_argument() {
 }
 
 #[test]
-fn a_bad_filter_is_reported_before_a_bad_sort_key() {
+fn a_bad_filter_is_reported_before_a_bad_sort() {
     let test = TestDb::default();
-    let error = try_sorted(&test, eq("1filter", u32(1)), SortKey::asc("1sort", U32))
-        .expect_err("two bad names");
-    assert!(
-        matches!(&error, ApiError::InvalidArgument { message, .. } if message.contains("1filter")),
-        "{error:?}"
-    );
+    let bad_filter = || eq("1filter", u32(1));
+    for sort in [
+        vec![SortKey::asc("1sort", U32)],
+        vec![SortKey::asc("n", U32); 5],
+    ] {
+        let error = try_sorted(&test, bad_filter(), sort).expect_err("a bad filter");
+        assert!(
+            matches!(&error, ApiError::InvalidArgument { message, .. } if message.contains("1filter")),
+            "{error:?}"
+        );
+    }
 }
 
 /// A record of the reference check: its cell `n`, if any, whether that cell
@@ -280,6 +376,6 @@ proptest! {
             .collect();
         let direction = if descending { Direction::Desc } else { Direction::Asc };
         let sort = SortKey::try_new("n", ty, direction).expect("an indexable type");
-        prop_assert_eq!(keys(page(&test, sort, offset, limit)), expected);
+        prop_assert_eq!(keys(page(&test, [sort], offset, limit)), expected);
     }
 }
