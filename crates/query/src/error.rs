@@ -9,9 +9,9 @@ pub type Result<T> = std::result::Result<T, QueryError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
-    /// A leaf names no valid index term: a bad field name. A leaf's values
-    /// are of an indexable type by construction. Raised at admission, before
-    /// index or record reads.
+    /// A filter leaf or a sort key names an invalid cell: a bad field name.
+    /// Their values and types are indexable by construction. Raised at
+    /// admission, before index or record reads.
     #[error("invalid argument: field `{field}`: {source}")]
     InvalidArgument {
         field: CellName,

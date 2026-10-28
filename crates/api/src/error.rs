@@ -98,11 +98,11 @@ impl From<CellValueParseError> for ApiError {
 }
 
 /// The runtime constructors of the query operands (`EqValue::try_from`,
-/// `InValues::try_from`, `Bounds::try_new`, `ExistsType::try_from`) check
-/// caller input.
+/// `InValues::try_from`, `Bounds::try_new`, `ExistsType::try_from`,
+/// `SortKey::try_new`) check caller input.
 impl From<ValuesError> for ApiError {
     fn from(error: ValuesError) -> Self {
-        Self::invalid_input("invalid filter values", error)
+        Self::invalid_input("invalid query operand", error)
     }
 }
 
@@ -132,7 +132,7 @@ impl From<QueryError> for ApiError {
     fn from(error: QueryError) -> Self {
         match error {
             QueryError::InvalidArgument { field, source } => Self::InvalidArgument {
-                message: format!("invalid filter on cell `{field}`"),
+                message: format!("invalid cell `{field}` in a filter or sort key"),
                 source: Some(Box::new(source)),
             },
             QueryError::InvalidQuery { reason } => Self::InvalidQuery { reason },
