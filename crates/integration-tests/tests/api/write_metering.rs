@@ -65,7 +65,7 @@ fn create(key: RecordKey, budget: Budget) -> RecordOp<op::Create> {
 fn record(db: &Database, branch: BranchId, key: RecordKey) -> Record {
     db.get(
         ReadTarget::Branch(branch),
-        RecordOp::get(key, Budget::Limited(0)),
+        RecordOp::get(key, Budget::Unlimited),
     )
     .result
     .unwrap()
@@ -122,7 +122,7 @@ fn cud_exact_budgets_preserve_state_and_return_only_completed_work_on_failure() 
             assert!(matches!(
                 db.get(
                     ReadTarget::Branch(branch),
-                    RecordOp::get(KEY, Budget::Limited(0))
+                    RecordOp::get(KEY, Budget::Unlimited)
                 )
                 .result,
                 Err(ApiError::NotFound)
@@ -345,7 +345,7 @@ fn term_creation_uses_committed_origin_across_repeated_joins_and_recreation() {
 }
 
 #[test]
-fn public_reads_remain_unmetered_with_nonzero_write_and_planning_read_prices() {
+fn queries_remain_unmetered_while_get_uses_shared_read_weights() {
     each_backend(genesis(), |db| {
         let branch = db.begin().unwrap();
         db.create(branch, create(KEY, Budget::Unlimited))
@@ -353,7 +353,7 @@ fn public_reads_remain_unmetered_with_nonzero_write_and_planning_read_prices() {
             .unwrap();
         let head = db.commit(branch).unwrap();
         let get = db.get(ReadTarget::Head, RecordOp::get(KEY, Budget::Limited(0)));
-        get.result.unwrap();
+        refused(&get, 0, None);
         let filter = Filter::Eq {
             field: CellNameRef::raw(b"color").into(),
             value: EqValue::try_from(CellValue::from_str("red")).unwrap(),
@@ -365,7 +365,7 @@ fn public_reads_remain_unmetered_with_nonzero_write_and_planning_read_prices() {
         assert_eq!(query.result.unwrap().records.len(), 1);
         let count = db.count(None, CountOp::filter(filter, Budget::Limited(0)));
         assert_eq!(count.result.unwrap(), 1);
-        for receipt in [get.receipt, query.receipt, count.receipt] {
+        for receipt in [query.receipt, count.receipt] {
             assert_eq!(receipt.priced_at, Some(head));
             assert_eq!(receipt.cost, 0);
             assert_eq!(receipt.details, Details::default());

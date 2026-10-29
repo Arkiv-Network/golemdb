@@ -66,6 +66,20 @@ impl<T: ReadTransaction> ReadTransaction for Observed<T> {
     fn cursor(&self, t: Table, k: &[u8]) -> Result<Self::Cursor<'_>> {
         self.tx.cursor(t, k)
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        self.tx.with_value(table, key, |row| {
+            if row.is_some() {
+                *self.counts.borrow_mut().hits.entry(table).or_default() += 1;
+            }
+            inspect(row)
+        })
+    }
 }
 impl<T: WriteTransaction> WriteTransaction for Observed<T> {
     fn put(&mut self, t: Table, k: &[u8], v: &[u8]) -> Result<()> {

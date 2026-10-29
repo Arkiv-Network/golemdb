@@ -8,17 +8,6 @@ pub(crate) fn binding(key: RecordKey) -> CellKey {
     CellKey::new(system::RECORD_KEYS.id, CellNameRef::raw(&key.0))
 }
 
-pub(crate) fn resolve<R: ReadTransaction>(
-    cell_reader: &CellRead<'_, R>,
-    key: RecordKey,
-) -> Result<Option<u64>> {
-    let Some(id) = record_id(key, cell_reader.get(&binding(key))?)? else {
-        return Ok(None);
-    };
-    check_identity(key, cell_reader.get(&CellKey::new(id, reserved::KEY))?)?;
-    Ok(Some(id))
-}
-
 /// Decode and validate the binding's record-level meaning after cell decoding.
 pub(crate) fn record_id(key: RecordKey, binding_value: Option<CellValue>) -> Result<Option<u64>> {
     let Some(value) = binding_value else {

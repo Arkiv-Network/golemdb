@@ -92,6 +92,15 @@ impl<R: ReadTransaction> ReadTransaction for CountRead<R> {
             steps: self.steps.clone(),
         })
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        self.inner.with_value(table, key, inspect)
+    }
 }
 impl<C: ReadCursor> ReadCursor for CountCursor<C> {
     fn next(&mut self) -> golemdb_storage::Result<Option<Entry>> {
@@ -101,6 +110,14 @@ impl<C: ReadCursor> ReadCursor for CountCursor<C> {
     fn prev(&mut self) -> golemdb_storage::Result<Option<Entry>> {
         self.steps.set(self.steps.get() + 1);
         self.inner.prev()
+    }
+
+    fn with_next<Output>(
+        &mut self,
+        inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        self.steps.set(self.steps.get() + 1);
+        self.inner.with_next(inspect)
     }
 }
 

@@ -297,6 +297,18 @@ impl<W: ReadTransaction> ReadTransaction for ControlledWrite<W> {
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
         self.inner.cursor(table, key)
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if matches!(self.fault, Fault::HeadRead) && table == SUPERBLOCK && key == b"head" {
+            return Err(injected());
+        }
+        self.inner.with_value(table, key, inspect)
+    }
 }
 impl<W> ControlledWrite<W> {
     fn mutation(&mut self, table: Table) -> golemdb_storage::Result<()> {

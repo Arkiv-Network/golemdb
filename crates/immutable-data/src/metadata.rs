@@ -331,6 +331,15 @@ mod tests {
                 self.seeks.set(self.seeks.get() + 1);
                 self.inner.cursor(table, key)
             }
+
+            fn with_value<Output>(
+                &self,
+                table: golemdb_storage::Table,
+                key: &[u8],
+                inspect: impl FnOnce(Option<&[u8]>) -> Output,
+            ) -> golemdb_storage::Result<Output> {
+                self.inner.with_value(table, key, inspect)
+            }
         }
         let store = MemoryStore::new();
         let mut tx = store.begin_write().unwrap();

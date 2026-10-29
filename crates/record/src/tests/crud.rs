@@ -191,7 +191,16 @@ fn initialize(db: &impl Store) {
 
 pub(super) fn zero_pricing() -> WritePricing {
     WritePricing::new(
-        pricing_provider(Schedule::zero_write()),
+        pricing_provider(
+            Schedule::new(
+                golemdb_metering::WRITE_CODE_VERSION,
+                golemdb_metering::PricingConfig::zero()
+                    .weights
+                    .into_iter()
+                    .map(|(name, value)| (name.into(), value)),
+            )
+            .unwrap(),
+        ),
         CellLimits {
             max_cell_name_len: 32,
             max_str_len: 64,
@@ -794,7 +803,12 @@ fn inconsistent_identity_and_reserved_id_aliases_are_rejected() {
         .unwrap();
     assert!(matches!(
         records
-            .get(ReadTarget::Branch(b), OTHER, Some(&[]), Budget::Unlimited)
+            .get(
+                ReadTarget::Branch(b),
+                OTHER,
+                Some(&[name(b"#key")]),
+                Budget::Unlimited
+            )
             .result,
         Err(RecordError::CorruptState(_))
     ));
@@ -1012,7 +1026,7 @@ fn metadata_has_the_specified_encoding_and_equal_size_updates_do_not_rewrite_it(
 }
 
 #[test]
-fn reads_return_stored_metadata_while_writes_reject_corruption() {
+fn projections_return_stored_metadata_while_full_reads_and_writes_require_valid_counts() {
     use crate::RecordMeta;
     let valid = RecordMeta {
         cells: 1,
@@ -1065,7 +1079,13 @@ fn reads_return_stored_metadata_while_writes_reject_corruption() {
         let before = snapshot(&branches, b);
         let info = branches.branch_info(b).unwrap();
         let meta_projection = [name(b"#meta")];
-        let projections = [None, Some(meta_projection.as_slice())];
+        let projections = [Some(meta_projection.as_slice())];
+        assert!(matches!(
+            records
+                .get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited)
+                .result,
+            Err(RecordError::CorruptState(_))
+        ));
         for projection in projections {
             let record = records
                 .get(ReadTarget::Branch(b), KEY, projection, Budget::Unlimited)
@@ -1101,6 +1121,12 @@ fn reads_return_stored_metadata_while_writes_reject_corruption() {
         tx.commit().unwrap();
         let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
         let reader = golemdb_cells::CellReader::new(&tx);
+        assert!(matches!(
+            records
+                .get(ReadTarget::Head, KEY, None, Budget::Unlimited)
+                .result,
+            Err(RecordError::CorruptState(_))
+        ));
         for projection in projections {
             let record = records
                 .get(ReadTarget::Head, KEY, projection, Budget::Unlimited)

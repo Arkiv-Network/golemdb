@@ -67,16 +67,6 @@ pub(crate) fn patch(
     Ok(changes)
 }
 
-/// Reads accept raw reserved/binary names. Normalize only after target selection.
-pub(crate) fn projection(names: Option<&[CellName]>) -> Option<Vec<CellName>> {
-    names.map(|names| {
-        let mut names = names.to_vec();
-        names.sort_unstable();
-        names.dedup();
-        names
-    })
-}
-
 fn write_step(kind: CellKind) -> &'static str {
     match kind {
         CellKind::Field => "field",

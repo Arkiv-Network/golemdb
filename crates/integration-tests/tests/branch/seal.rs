@@ -368,6 +368,22 @@ impl<R: golemdb_storage::ReadTransaction> golemdb_storage::ReadTransaction for F
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
         self.origin.cursor(table, key)
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if table == golemdb_index::tables::BITMAP_CONTAINER.table()
+            && self.fail.load(Ordering::Relaxed)
+        {
+            return Err(golemdb_storage::StorageError::Backend(
+                "injected bitmap read failure".into(),
+            ));
+        }
+        self.origin.with_value(table, key, inspect)
+    }
 }
 impl Store for FaultReads {
     type Read<'a> = FaultSnapshot<<MemoryStore as Store>::Read<'a>>;

@@ -45,7 +45,7 @@ impl<T> Metered<T> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Receipt {
-    /// Charged planning and approved mutations. Public reads remain unmetered.
+    /// Charged read work, or write planning and approved mutations.
     pub cost: u64,
     pub priced_at: Option<CommitId>,
     pub details: Details,
