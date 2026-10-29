@@ -85,7 +85,10 @@ mod tests {
     use golemdb_index::{IndexError, IndexTerm, TermError, TermRange};
 
     use super::*;
-    use crate::{Bounds, EqValue, ExistsType, Filter, InValues, QueryError, fakes::FakeSource};
+    use crate::{
+        Bounds, EqValue, ExistsType, Filter, InValues, QueryError,
+        fakes::{FakeSource, bitmap},
+    };
 
     /// A [`FakeSource`] that records every term it reads, in order: asked
     /// for, or stepped to by a scan.
