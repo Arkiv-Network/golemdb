@@ -32,8 +32,8 @@ impl ImmutableDataReader {
     ) -> StorageResult<ImmutableDataRow> {
         let segment = self.catalogue.segment(segment)?;
         let projection = segment.schema.projection(options)?;
-        let latest = metadata::last_range_at(tx, segment.id, published_commit)?;
-        let end = latest.as_ref().map_or(0, |(_, range)| range.end);
+        let latest_batch = metadata::last_range_at(tx, segment.id, published_commit)?;
+        let end = latest_batch.as_ref().map_or(0, |(_, range)| range.end);
         let ordinal = match address {
             ImmutableDataAddress::Ordinal(ordinal) => {
                 if ordinal >= end {
@@ -50,11 +50,25 @@ impl ImmutableDataReader {
                 ordinal
             }
         };
-        let (latest_commit, _) = latest.expect("nonempty published prefix");
-        let raw = self
+        let shard_start_commit = metadata::shard_start_for_ordinal(
+            tx,
+            segment.id,
+            ordinal,
+            latest_batch.expect("nonempty published prefix"),
+            self.catalogue.config.shard_span,
+        )?;
+        let mut rows = self
             .backend
-            .get(segment, ordinal, latest_commit, projection.indices())
+            .read_range(
+                segment,
+                shard_start_commit,
+                ordinal..ordinal + 1,
+                projection.indices(),
+            )
             .map_err(missing_row)?;
+        let raw = rows
+            .pop()
+            .ok_or(Error::Corrupt("missing published immutable row"))?;
         Ok(projection.decode(&raw.iter().map(Vec::as_slice).collect::<Vec<_>>())?)
     }
 

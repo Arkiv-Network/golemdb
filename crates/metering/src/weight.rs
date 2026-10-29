@@ -3,33 +3,62 @@ use std::{borrow::Cow, fmt};
 /// A name in a pricing schedule or receipt ledger, ordered by its exact text.
 ///
 /// Names are open-ended so future models and host weights do not change the
-/// receipt type. The constants are the weights this write model actually uses.
+/// receipt type. The constants declare GolemDB code version 1's weight names,
+/// including read/log weights whose execution metering is still deferred.
 /// Declaration/form checks at genesis and activation belong to their loader;
 /// constructing a name does not declare or price it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WeightName(Cow<'static, str>);
 
-impl WeightName {
-    pub const WRITE_ADMISSION_BASE: Self = Self(Cow::Borrowed("write.admission.base"));
-    pub const WRITE_ADMISSION_ENTRY: Self = Self(Cow::Borrowed("write.admission.entry"));
-    pub const WRITE_ADMISSION_BYTE: Self = Self(Cow::Borrowed("write.admission.byte"));
-    pub const WRITE_RECORD_CREATE: Self = Self(Cow::Borrowed("write.record.create"));
-    pub const WRITE_RECORD_PATCH: Self = Self(Cow::Borrowed("write.record.patch"));
-    pub const WRITE_RECORD_DELETE: Self = Self(Cow::Borrowed("write.record.delete"));
-    pub const WRITE_CELL_CREATE: Self = Self(Cow::Borrowed("write.cell.create"));
-    pub const WRITE_CELL_UPDATE: Self = Self(Cow::Borrowed("write.cell.update"));
-    pub const WRITE_CELL_DELETE: Self = Self(Cow::Borrowed("write.cell.delete"));
-    pub const WRITE_CELL_TRIE_UPDATE: Self = Self(Cow::Borrowed("write.cell_trie_update"));
-    pub const WRITE_CELL_BYTE: Self = Self(Cow::Borrowed("write.cell_byte"));
-    pub const WRITE_INDEX_JOIN: Self = Self(Cow::Borrowed("write.index.join"));
-    pub const WRITE_INDEX_LEAVE: Self = Self(Cow::Borrowed("write.index.leave"));
-    pub const WRITE_INDEX_TERM_CREATE: Self = Self(Cow::Borrowed("write.index_term_create"));
-    pub const WRITE_INDEX_TRIE_UPDATE: Self = Self(Cow::Borrowed("write.index_trie_update"));
-    pub const WRITE_INDEX_BYTE: Self = Self(Cow::Borrowed("write.index_byte"));
-    pub const READ_KEY: Self = Self(Cow::Borrowed("read.key"));
-    pub const READ_CELL: Self = Self(Cow::Borrowed("read.cell"));
-    pub const READ_TERM: Self = Self(Cow::Borrowed("read.term"));
+// Keep pricing constants and the configuration catalogue on one declaration.
+macro_rules! define_weights {
+    ($($constant:ident => $name:literal),* $(,)?) => {
+        impl WeightName {
+            $(pub const $constant: Self = Self(Cow::Borrowed($name));)*
+        }
 
+        /// Names declared by GolemDB code version 1 (metering D10). Declaring
+        /// read/log names permits configuration before their execution metering.
+        pub const GOLEMDB_WEIGHT_NAMES: &[&str] = &[$($name),*];
+    };
+}
+
+define_weights! {
+    WRITE_ADMISSION_BASE => "write.admission.base",
+    WRITE_ADMISSION_ENTRY => "write.admission.entry",
+    WRITE_ADMISSION_BYTE => "write.admission.byte",
+    WRITE_RECORD_CREATE => "write.record.create",
+    WRITE_RECORD_PATCH => "write.record.patch",
+    WRITE_RECORD_DELETE => "write.record.delete",
+    WRITE_CELL_CREATE => "write.cell.create",
+    WRITE_CELL_UPDATE => "write.cell.update",
+    WRITE_CELL_DELETE => "write.cell.delete",
+    WRITE_CELL_TRIE_UPDATE => "write.cell_trie_update",
+    WRITE_CELL_BYTE => "write.cell_byte",
+    WRITE_INDEX_JOIN => "write.index.join",
+    WRITE_INDEX_LEAVE => "write.index.leave",
+    WRITE_INDEX_TERM_CREATE => "write.index_term_create",
+    WRITE_INDEX_TRIE_UPDATE => "write.index_trie_update",
+    WRITE_INDEX_BYTE => "write.index_byte",
+    READ_KEY => "read.key",
+    READ_CELL => "read.cell",
+    READ_CELL_SCAN => "read.cell_scan",
+    READ_BYTE => "read.byte",
+    READ_TERM => "read.term",
+    READ_BASE => "read.base",
+    READ_ADMISSION_BASE => "read.admission.base",
+    READ_ADMISSION_ENTRY => "read.admission.entry",
+    READ_ADMISSION_BYTE => "read.admission.byte",
+    READ_TERM_STEP => "read.term_step",
+    READ_CONTAINER => "read.container",
+    READ_SET_CONTAINER => "read.set_container",
+    READ_SORT_COMPARE => "read.sort_compare",
+    WRITE_LOG_APPEND_BASE => "write.log_append.base",
+    WRITE_LOG_APPEND_BYTE => "write.log_append.byte",
+    READ_LOG_ROW => "read.log_row",
+}
+
+impl WeightName {
     pub fn as_str(&self) -> &str {
         &self.0
     }

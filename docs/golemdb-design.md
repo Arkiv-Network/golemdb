@@ -108,6 +108,7 @@ The metering layer itself (property 7 in §1) is out of scope here: it is specif
 - **[9. Trie Representation: Canonical vs. Physical](#9-trie-representation-canonical-vs-physical)**
   - [The Canonical Trie and the Physical Trie](#the-canonical-trie-and-the-physical-trie)
   - [Precedent: How Ethereum Clients Chose](#precedent-how-ethereum-clients-chose)
+  - [Garbage Collection](#garbage-collection)
   - [Trade-offs: Physical Storage Layouts](#trade-offs-physical-storage-layouts)
 - **[10. Write Branches and Checkpoint Frames](#10-write-branches-and-checkpoint-frames)**
   - [Branches over the Head](#branches-over-the-head)
@@ -177,7 +178,7 @@ adopted here is stated and the document follows it.
 | **locator** | Where a stored root is: its hash, the commit that wrote its row (if it has one) and, for a single-leaf root, its path; empty for an empty root. Held by `Roots` and `Index` (§2, §4) |
 | **domain prefix** | The one-byte tag that begins every hash preimage, separating kinds of preimage (§8) |
 | **head** | The most recent commit: `(commitNr, StateRoot, IndexRoot)` in the `Superblock` (§4) |
-| **superblock** | An uncommitted table: format identifiers and the head (§4). `Roots` is the other |
+| **superblock** | An uncommitted table: format identifiers and the head (§4). `Roots` and `Stale` are the others |
 | **reserved records** | `recordID` 0–63: **system** records (0–31, `#`) written by the engine, **admin** records (32–63, `@`) written by admin operations; everything ≥ 64 is a **user** record (§4) |
 | **pre-image** | The value an item held immediately before a given commit changed it; what `CellChangeSet` / `IndexChangeSet` store, and what the branch log stores per operation (§7, §10) |
 | **history** | `CellHistory` / `IndexHistory`: per item, the Roaring set of commits that changed it — the reverse index over the change-sets (§7) |
@@ -313,8 +314,8 @@ encoded parts, and the value is a byte payload; both sides pass through the type
 
 The schema is written entirely in the abstractions of [§1](#abstract-primitives-to-physical-mdbx-mapping):
 a set of **tables**, each with a composite **key** of one or more typed parts and one typed **value**,
-every field passing through its type's **codec**. Ten tables carry the data; two more, the
-`Superblock` and `Roots`, stand outside the cell machinery ([§4](#the-superblock)).
+every field passing through its type's **codec**. Ten tables carry the data; three more, the
+`Superblock`, `Roots` and `Stale`, stand outside the cell machinery ([§4](#the-superblock)).
 
 ```mermaid
 flowchart TB
@@ -348,14 +349,15 @@ flowchart TB
         Superblock["<b>Superblock</b><br/>─────────────────────<br/>PK · superKey : Bytes<br/>─────────────────────<br/>superValue : Bytes"]
         Roots["<b>Roots</b><br/>─────────────────────<br/>PK · commitNr : u64<br/>─────────────────────<br/>stateRoot : locator<br/>indexRoot : locator"]
         BNC["<b>BranchNodeCompact</b><br/><i>value payload, not a table</i><br/>─────────────────────<br/>prefix : Bytes<br/>prefix_len : u8<br/>state_mask : u16<br/>tree_mask : u16<br/>child_hashes : B256 list<br/>leaf_paths : path list<br/>child_commits : u64 list"]
-        Superblock ~~~ Roots ~~~ BNC
+        Stale["<b>Stale</b><br/>─────────────────────<br/>PK · commitNr : u64<br/>PK · table : u8<br/>PK · key<br/>─────────────────────<br/>(empty)"]
+        Superblock ~~~ Roots ~~~ Stale ~~~ BNC
     end
 
     classDef committed fill:#d5e8d4,stroke:#82b366,color:#000000
     classDef utility fill:#f5f5f5,stroke:#666666,color:#000000
     classDef payload fill:#ffe6cc,stroke:#d79b00,color:#000000
     class Cell,Index,BitmapTrie,BitmapContainer committed
-    class CellTrie,IndexTrie,CellHistory,CellChangeSet,IndexHistory,IndexChangeSet,Superblock,Roots utility
+    class CellTrie,IndexTrie,CellHistory,CellChangeSet,IndexHistory,IndexChangeSet,Superblock,Roots,Stale utility
     class BNC payload
 ```
 
@@ -372,25 +374,26 @@ route is `[]`), encoded as its nibble count (`u8`) then the packed nibbles; `ter
 
 ### Table Dictionary
 
-| Table             | Key schema                                                         | Value schema                                    | Purpose                                                                               |
-| ----------------- | ------------------------------------------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `Cell`            | `recordID: u64` ‖ `cellKey`                                        | `typeTag: u8` ‖ `cellValue: Bytes`              | Primary state: the live value of every cell, prefixed by its kind/type tag.           |
-| `CellTrie`        | `commitNr: u64` ‖ `route`                                          | `BranchNodeCompact`                             | Nodes of the primary-state MPT — produces `StateRoot`.                                |
-| `Index`           | `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue`                   | `bitmapHash: B256` ‖ `commitNr: u64` [‖ `hi48`] | Tier 1: an index term → the root of that term's `BitmapTrie`, as a locator.           |
-| `IndexTrie`       | `commitNr: u64` ‖ `route`                                          | `BranchNodeCompact`                             | Nodes of the meta-trie over index terms — produces `IndexRoot`.                       |
-| `BitmapTrie`      | `commitNr: u64` ‖ `termPath: B256` ‖ `route`                       | `BranchNodeCompact`                             | Tier 2: per-term trie over the chunks of that term's bitmap — produces `bitmapHash`.  |
-| `BitmapContainer` | `commitNr: u64` ‖ `termPath: B256` ‖ `hi48: 6 B`                   | `hi48: 6 B` ‖ `roaring`                         | Bitmap chunks: the `recordID`s of one 48-bit region of a term's bitmap.               |
-| `CellHistory`     | `recordID: u64` ‖ `cellKey`                                        | `commitsList: Roaring64`                        | Every commit number that modified a given cell.                                       |
-| `CellChangeSet`   | `commitNr: u64` ‖ `recordID: u64` ‖ `cellKey`                      | `typeTag: u8` ‖ `cellOldValue: Bytes`           | Pre-image of a cell **before** the change made at `commitNr`.                         |
-| `IndexHistory`    | `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue`                   | `commitsList: Roaring64`                        | Every commit number that modified a given index term.                                 |
-| `IndexChangeSet`  | `commitNr: u64` ‖ `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue` | `bitmapHash: B256` ‖ `commitNr: u64` [‖ `hi48`] | Pre-image of a term's bitmap root before the change made at `commitNr`, as a locator. |
-| `Superblock`      | `superKey: Bytes`                                                  | `superValue: Bytes`                             | Uncommitted engine state: format identifiers and the head ([§4](#the-superblock)).    |
-| `Roots`           | `commitNr: u64`                                                    | `len(state): u8` ‖ `state` ‖ `index` locators   | Uncommitted: where each commit's two roots are stored, so old tries stay walkable.    |
+| Table             | Key schema                                                         | Value schema                                    | Purpose                                                                                                |
+| ----------------- | ------------------------------------------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `Cell`            | `recordID: u64` ‖ `cellKey`                                        | `typeTag: u8` ‖ `cellValue: Bytes`              | Primary state: the live value of every cell, prefixed by its kind/type tag.                            |
+| `CellTrie`        | `commitNr: u64` ‖ `route`                                          | `BranchNodeCompact`                             | Nodes of the primary-state MPT — produces `StateRoot`.                                                 |
+| `Index`           | `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue`                   | `bitmapHash: B256` ‖ `commitNr: u64` [‖ `hi48`] | Tier 1: an index term → the root of that term's `BitmapTrie`, as a locator.                            |
+| `IndexTrie`       | `commitNr: u64` ‖ `route`                                          | `BranchNodeCompact`                             | Nodes of the meta-trie over index terms — produces `IndexRoot`.                                        |
+| `BitmapTrie`      | `commitNr: u64` ‖ `termPath: B256` ‖ `route`                       | `BranchNodeCompact`                             | Tier 2: per-term trie over the chunks of that term's bitmap — produces `bitmapHash`.                   |
+| `BitmapContainer` | `commitNr: u64` ‖ `termPath: B256` ‖ `hi48: 6 B`                   | `hi48: 6 B` ‖ `roaring`                         | Bitmap chunks: the `recordID`s of one 48-bit region of a term's bitmap.                                |
+| `CellHistory`     | `recordID: u64` ‖ `cellKey`                                        | `commitsList: Roaring64`                        | Every commit number that modified a given cell.                                                        |
+| `CellChangeSet`   | `commitNr: u64` ‖ `recordID: u64` ‖ `cellKey`                      | `typeTag: u8` ‖ `cellOldValue: Bytes`           | Pre-image of a cell **before** the change made at `commitNr`.                                          |
+| `IndexHistory`    | `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue`                   | `commitsList: Roaring64`                        | Every commit number that modified a given index term.                                                  |
+| `IndexChangeSet`  | `commitNr: u64` ‖ `cellKey` ‖ `0x00` ‖ `typeTag: u8` ‖ `cellValue` | `bitmapHash: B256` ‖ `commitNr: u64` [‖ `hi48`] | Pre-image of a term's bitmap root before the change made at `commitNr`, as a locator.                  |
+| `Superblock`      | `superKey: Bytes`                                                  | `superValue: Bytes`                             | Uncommitted engine state: format identifiers and the head ([§4](#the-superblock)).                     |
+| `Roots`           | `commitNr: u64`                                                    | `len(state): u8` ‖ `state` ‖ `index` locators   | Uncommitted: where each commit's two roots are stored, so old tries stay walkable.                     |
+| `Stale`           | `commitNr: u64` ‖ `table: u8` ‖ `key`                              | empty                                           | Uncommitted: rows each commit superseded, in key order, awaiting deletion ([§9](#garbage-collection)). |
 
 The ten data tables fall into three groups — **primary state and its commitment** (`Cell`,
 `CellTrie`), **indexing** (`Index`, `IndexTrie`, `BitmapTrie`, `BitmapContainer`) and **history**
-(`CellHistory`, `CellChangeSet`, `IndexHistory`, `IndexChangeSet`) — with the `Superblock` and
-`Roots` standing apart from all three, outside the transactional cell machinery.
+(`CellHistory`, `CellChangeSet`, `IndexHistory`, `IndexChangeSet`) — with the `Superblock`, `Roots`
+and `Stale` standing apart from all three, outside the transactional cell machinery.
 
 The history group mirrors the primary/index split exactly: `CellHistory`/`CellChangeSet` stand to
 `Cell` precisely as `IndexHistory`/`IndexChangeSet` stand to `Index`. `BitmapTrie` is named for what
@@ -399,8 +402,9 @@ it holds; the hash of a `BitmapTrie` root **is** the `bitmapHash` stored in `Ind
 **There is no identity table, no committed root table and no engine-singleton table.** The
 `recordKey → recordID` mapping, the root history and the ID allocator are all ordinary committed
 cells of reserved system records ([§4](#record-classes-and-the-reserved-catalogue)). Only the four
-`Superblock` rows and the `Roots` rows sit outside the commitment: the former structurally cannot sit
-inside it, and `Roots` only locates stored roots, which are re-hashed when read.
+`Superblock` rows and the `Roots` and `Stale` rows sit outside the commitment: the former structurally
+cannot sit inside it, `Roots` only locates stored roots, which are re-hashed when read, and `Stale`
+only lists rows to delete.
 
 ### Dependencies
 
@@ -2056,6 +2060,7 @@ same root can hold different `Index` bytes. The same holds for the row keys of t
 | `CellHistory`, `CellChangeSet`, `IndexHistory`, `IndexChangeSet` | They record **past** states, and the `GlobalRoot` commits the present one. Each historical state was committed by its own root when it was current.                                                                                                            |
 | `Superblock`                                                     | Format identifiers must be readable before decoding, and the head cannot commit to itself ([§4](#the-superblock)).                                                                                                                                             |
 | `Roots`                                                          | Locators are physical; committing them would bind the root to the storage layout ([§4](#the-superblock)).                                                                                                                                                      |
+| `Stale`                                                          | Garbage-collection bookkeeping: which stored rows only older roots reach ([§9](#garbage-collection)).                                                                                                                                                          |
 
 The reserved records of [§4](#4-system-admin-and-user-records) live in `Cell`, so the commitment binds the
 engine's own bookkeeping as well as the user's data; a conformant engine must reproduce it byte for
@@ -2078,7 +2083,7 @@ Third, and new relative to a design with dedicated side tables: **the engine's o
 is inside the commitment,** because it lives in `Cell`. The root history, the `recordKey → recordID`
 mapping, the ID allocator and the chain parameters are all committed cells, so two nodes agreeing on
 the root necessarily agree on all of them. The uncommitted surface is exactly four `Superblock` rows
-plus the `Roots` rows.
+plus the `Roots` and `Stale` rows.
 
 ### Depth Bounds and Future Optimization Paths
 
@@ -2216,6 +2221,23 @@ store. GolemDB deliberately takes the other branch. Never overwriting a node kee
 root directly walkable, so a proof at commit 150 is the same operation as a proof at the tip, and the
 change-set tables of [§7](#7-point-in-time-history) exist to time-travel _values_, not to
 reconstruct tries. The bill for that choice is the disk footprint and the garbage collection named below.
+
+### Garbage Collection
+
+A row superseded at commit `s` is reached only by roots before `s`, so it can be deleted once all of
+them have left the node's retention window `W`: once `s ≤ head − W`. Each commit registers the rows
+it supersedes in the uncommitted `Stale` table, one `commitNr ‖ table ‖ key` row each with an empty
+value. A row the same commit wrote is never listed: if the commit replaces it, it is deleted at
+once. Due rows are deleted in batches: once `MIN_BATCH_ROWS` are due, or the oldest has waited
+`MAX_WAIT_COMMITS` commits, a commit takes the oldest, at most `MAX_BATCH_ROWS`, sorts them by table
+and key and deletes them with their `Stale` rows. A trie row's key starts with the commit that wrote
+it, so one commit's superseded rows are scattered across pages; sorting a batch puts rows sharing a
+page together, so most pages are rewritten once. The commits that delete a batch take longer than
+the others. Both steps run in the commit's own transaction, so `Stale` itself is the sweep's
+progress, safe across crashes. The commit also drops `Roots` rows before `head − W`, so the first
+`Roots` row is the node's earliest retained commit. `W` is node configuration; without it, nothing
+is listed or deleted, and rows superseded while pruning was off are never registered, so turning it
+on later leaves them stored. Pruning the history tables is separate (`CHANGES.md` D05).
 
 ### Trade-offs: Physical Storage Layouts
 
@@ -2754,7 +2776,9 @@ experiences all nine as one operation.
 
 7. **Persist**, inside a single MDBX write transaction so the whole of it is atomic with respect to
    readers and to crashes: every row computed in steps 3–6, the `#alloc` cell among them. Trie rows
-   carry the new `commitNr`, so publication appends them in key order.
+   carry the new `commitNr`, so publication appends them in key order. With garbage collection on,
+   the same transaction lists the rows this commit superseded and deletes due ones
+   ([§9](#garbage-collection)).
 8. **Advance the `Superblock` head** to `(commitNr, StateRoot, IndexRoot)`, and write
    `Roots[commitNr]` with both roots' locators. The guard of step 1 is
    re-checked here, since an arbitrary
@@ -3098,18 +3122,20 @@ resolved before the byte comparison rather than inside it; direction then applie
 else — absent first under ASC, last under DESC.
 
 **A sort is a list of terms, applied in order.** Only the first term's value is fetched for every
-record; deeper terms are fetched only where they are needed to break a tie, and which records those
-are is fixed by the data:
+record; deeper terms are fetched only where they are needed to break a tie on the page, and which
+records those are is fixed by the data and the page:
 
 > A record needs its level-_k_ sort value **iff** it belongs to a group of ≥ 2 records tied on levels
-> 1 … *k*−1.
+> 1 … *k*−1 that holds a position of the page.
 
-Singleton groups are already ordered and are never descended into. Because any correct sort must
-resolve tied records against each other, this set is the same whichever algorithm produces it — the
-fetch count is a property of the data, not of the sort. The bounds follow directly: level 1 always
-costs N, each deeper level costs only the records still tied, so with S terms the total lies in
-**`[N, N × S]`** — the lower bound when level 1 has no ties at all, the upper when every record ties
-through to the last term.
+Singleton groups are already ordered and are never descended into. Nor is a group the page holds no
+position of: it sits wholly before or after the page, so its block of positions is known from level
+1 alone, and no record of it is returned. Because any correct sort must resolve the tied records the
+page returns against each other, this set is the same whichever algorithm produces it — the fetch
+count is a property of the data and the page, not of the sort. The bounds follow directly: level 1
+always costs N, each deeper level costs only the records still tied in groups the page reaches, so
+with S terms the total lies in **`[N, N × S]`** — the lower bound when level 1 has no ties on the
+page, the upper when every record ties through to the last term.
 
 **Direction is per term; the tie-break is not.** Each term carries its own ASC or DESC. Records that
 remain tied after every term are ordered by **ascending `recordID`, always** — independent of any
@@ -3123,8 +3149,10 @@ equal. That is a second property, distinct from determinism, and paging depends 
 to name exactly one such place.
 
 **Direction costs nothing.** Every value is in memory before any ordering happens, so direction is a
-property of the comparator, not of the access path: DESC fetches the same cells as ASC, compares the
-same number of times, and descends the same tied groups. Absent values need no special handling
+property of the comparator, not of the access path: DESC fetches the same level-1 cells as ASC and
+compares the same number of times. The deeper cells it fetches follow the same rule, but the page
+holds different positions of a reversed order, so it can reach different tied groups: never more than
+ordering the whole match set would, in either direction. Absent values need no special handling
 either, since ordering them below every present value and then reversing puts them last. Mixed
 directions are free for the same reason — each term's comparator is reversed on its own. A strategy
 that drew its order from an index instead would have to hold that ordering physically, which is why
@@ -3143,7 +3171,7 @@ is allocated monotonically by a deterministic allocator, so the order is identic
 it is **creation order — oldest first**, which is a meaning a caller can use rather than an arbitrary
 permutation.
 
-Six matched records, sorted by `(status ASC, amount DESC)`:
+Six matched records, sorted by `(status ASC, amount DESC)`, on a page that takes all six:
 
 ```
 match set  { 100, 101, 102, 103, 104, 105 }
@@ -3173,7 +3201,9 @@ fetches    6 + 5 = 11                       worst case  N × S = 12
 
 `105` is never read twice: `"pending"` is a group of one, so its position was settled at level 1 and
 its `amount` is never fetched. That single saved lookup is the whole of the level-2 rule at small
-scale; over a match set where one value dominates, it is the difference between S passes and one.
+scale; over a match set where one value dominates, it is the difference between S passes and one. A
+page of the first two records would fetch only the three `active` amounts, 9 in all: `closed` comes
+fourth and fifth, past the page, so its order is never needed.
 
 Group order is a byte comparison of the `str` values — `"active" < "closed" < "pending"` — which for
 raw UTF-8 is lexicographic order.

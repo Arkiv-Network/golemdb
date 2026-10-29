@@ -1,8 +1,9 @@
 use crate::{BranchError, Branches};
 use golemdb_cells::{
-    CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, tables,
+    CELL_TRIE_PATH_BYTES, CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef,
+    Cells, tables,
 };
-use golemdb_index::{Index, IndexTerm, PostingChange};
+use golemdb_index::{INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange};
 use golemdb_merkle::{Blake3Hasher, Hash, HashProvider, Keccak256Hasher, RootRef, TrieTable};
 use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction, scan_prefix};
 use std::{
@@ -24,10 +25,10 @@ const TABLES: [Table; 8] = [
     SUPERBLOCK,
     crate::ROOTS,
 ];
-fn key(id: u64, name: &[u8]) -> CellKey {
+pub(crate) fn key(id: u64, name: &[u8]) -> CellKey {
     CellKey::new(id, CellNameRef::raw(name))
 }
-fn value(text: &str, indexed: bool) -> CellValue {
+pub(crate) fn value(text: &str, indexed: bool) -> CellValue {
     CellValueRef::new(CellType::Str, text.as_bytes(), indexed)
         .unwrap()
         .into()
@@ -37,13 +38,18 @@ fn head(
     tx: &mut impl WriteTransaction,
     hash: &impl HashProvider,
     id: u64,
-    state: RootRef<32>,
-    index: RootRef<32>,
+    state: RootRef<CELL_TRIE_PATH_BYTES>,
+    index: RootRef<INDEX_TRIE_PATH_BYTES>,
 ) {
     let roots = crate::Roots { state, index };
     crate::write_head(tx, crate::CommitId::new(id), &roots, hash).unwrap();
 }
-fn seed(db: &impl Store, hash: &impl HashProvider, id: u64, rows: &[(CellKey, CellValue)]) {
+pub(crate) fn seed(
+    db: &impl Store,
+    hash: &impl HashProvider,
+    id: u64,
+    rows: &[(CellKey, CellValue)],
+) {
     let mut tx = db.begin_write().unwrap();
     let cells = Cells::new(hash)
         .apply(
@@ -123,7 +129,7 @@ fn invalid_attribute_failure_keeps_overlay_and_frames_retryable() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
     let before = snapshot(&db);
-    let branches = Branches::new(ReadOnly::new(db.clone()), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(ReadOnly::new(db.clone()), Keccak256Hasher, None, None).unwrap();
     let branch = branches.begin().unwrap();
     branches
         .write(branch, |cells| {
@@ -157,7 +163,7 @@ fn panicking_seal_does_not_freeze_or_poison_the_branch() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
     let fail = Arc::new(AtomicBool::new(true));
-    let branches = Branches::new(ReadOnly::new(db), PanicHasher(fail.clone()), None).unwrap();
+    let branches = Branches::new(ReadOnly::new(db), PanicHasher(fail.clone()), None, None).unwrap();
     let branch = branches.begin().unwrap();
     assert!(std::panic::catch_unwind(AssertUnwindSafe(|| branches.seal(branch))).is_err());
     assert!(!branches.branch_info(branch).unwrap().sealed);
@@ -169,10 +175,10 @@ fn panicking_seal_does_not_freeze_or_poison_the_branch() {
 fn stale_sealed_branches_and_commit_number_overflow_are_rejected() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
-    let branches = Branches::new(ReadOnly::new(db.clone()), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(ReadOnly::new(db.clone()), Keccak256Hasher, None, None).unwrap();
     let branch = branches.begin().unwrap();
     let sealed = branches.seal(branch).unwrap();
-    let publisher = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+    let publisher = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
     publisher.commit(publisher.begin().unwrap()).unwrap();
     assert!(matches!(
         branches.seal(branch),
@@ -206,7 +212,7 @@ fn stale_sealed_branches_and_commit_number_overflow_are_rejected() {
 fn wrong_roots_and_duplicate_lag_one_cell_fail_without_freezing() {
     let db = MemoryStore::new();
     seed(&db, &Blake3Hasher, 0, &[]);
-    let branches = Branches::new(ReadOnly::new(db), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(ReadOnly::new(db), Keccak256Hasher, None, None).unwrap();
     let branch = branches.begin().unwrap();
     // The seeded roots were hashed with another algorithm, so `Roots[head]` disagrees.
     assert!(matches!(
@@ -222,7 +228,7 @@ fn wrong_roots_and_duplicate_lag_one_cell_fail_without_freezing() {
         0,
         &[(key(2, &0u64.to_be_bytes()), value("already exists", false))],
     );
-    let branches = Branches::new(ReadOnly::new(db), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(ReadOnly::new(db), Keccak256Hasher, None, None).unwrap();
     let branch = branches.begin().unwrap();
     assert!(matches!(
         branches.seal(branch),
@@ -258,7 +264,7 @@ fn explicit_seal_is_not_recomputed_by_commit() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
     let fail = Arc::new(AtomicBool::new(false));
-    let branches = Branches::new(db, SwitchHash(fail.clone()), None).unwrap();
+    let branches = Branches::new(db, SwitchHash(fail.clone()), None, None).unwrap();
     let branch = stage(&branches, "Alice");
     branches.seal(branch).unwrap();
     fail.store(true, Ordering::Relaxed);
@@ -270,7 +276,7 @@ fn implicit_seal_failure_keeps_branch_open_and_never_opens_writer() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
     let controlled = ReadOnly::new(db);
-    let branches = Branches::new(controlled, Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(controlled, Keccak256Hasher, None, None).unwrap();
     let branch = branches.begin().unwrap();
     branches
         .write(branch, |cells| {
@@ -287,7 +293,7 @@ fn implicit_seal_failure_keeps_branch_open_and_never_opens_writer() {
 
 /// Row keys of `table`, whose paths have `N` bytes, reachable from `roots`,
 /// each in its namespace.
-fn reachable_rows<const N: usize, const NS: usize>(
+pub(crate) fn reachable_rows<const N: usize, const NS: usize>(
     tx: &impl golemdb_storage::ReadTransaction,
     table: TrieTable<NS>,
     domain: u8,
@@ -332,7 +338,7 @@ fn reachable_rows<const N: usize, const NS: usize>(
 
 /// The bitmap root of every term in the committed index, namespaced by the
 /// term's routing path.
-fn bitmap_roots(
+pub(crate) fn bitmap_roots(
     db: &impl Store,
 ) -> Vec<(Hash, RootRef<{ golemdb_index::BITMAP_TRIE_PATH_BYTES }>)> {
     let tx = db.begin_read().unwrap();
@@ -352,7 +358,7 @@ fn bitmap_roots(
 fn commits_store_only_trie_rows_reachable_from_committed_roots() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
-    let branches = Branches::new(db, Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db, Keccak256Hasher, None, None).unwrap();
     let (mut states, mut indexes) = (Vec::new(), Vec::new());
     let mut bitmaps = bitmap_roots(branches.store());
     // Commit 1 creates 40 records; commit 2 rewrites most of them and removes some cells.
@@ -454,7 +460,7 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
 fn every_row_a_commit_writes_is_keyed_by_its_commit_number() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
-    let branches = Branches::new(db, Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db, Keccak256Hasher, None, None).unwrap();
     let versioned: Vec<_> = (tables::VERSIONED.into_iter())
         .chain(golemdb_index::tables::VERSIONED)
         .collect();
@@ -509,7 +515,7 @@ fn every_row_a_commit_writes_is_keyed_by_its_commit_number() {
 fn every_commit_records_roots_that_keep_its_tries_walkable() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
-    let branches = Branches::new(db, Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db, Keccak256Hasher, None, None).unwrap();
     let mut published = Vec::new();
     for commit in 1..=3 {
         let text = format!("v{commit}");
@@ -541,7 +547,13 @@ fn every_commit_records_roots_that_keep_its_tries_walkable() {
         golemdb_index::INDEX_BRANCH_DOMAIN,
         &Keccak256Hasher,
     );
-    let path = Keccak256Hasher.hash(&key(64, b"name").encode());
+    // A cell's path is its record ID followed by the hash of its encoded key.
+    let cell = key(64, b"name");
+    let digest = Keccak256Hasher.hash(&cell.encode());
+    let path: [u8; CELL_TRIE_PATH_BYTES] = [&cell.record_id().to_be_bytes()[..], &digest]
+        .concat()
+        .try_into()
+        .unwrap();
     for (commit, roots, value) in published {
         assert_eq!(crate::read_roots(&tx, commit).unwrap(), Some(roots));
         // Each old state trie still holds that commit's value, after later commits.
@@ -625,7 +637,7 @@ fn malformed_roots_rows_are_invalid() {
 fn a_failed_append_keeps_the_sealed_branch_retryable() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
-    let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
     let branch = stage(&branches, "Alice");
     let sealed = branches.seal(branch).unwrap();
     // Occupy the sealed root's row, so commit's append of it fails.
@@ -696,7 +708,7 @@ fn heads_are_published_once_and_in_order() {
 fn a_stale_roots_row_fails_the_commit_and_keeps_the_branch_retryable() {
     let db = MemoryStore::new();
     seed(&db, &Keccak256Hasher, 0, &[]);
-    let branches = Branches::new(db.clone(), Keccak256Hasher, None).unwrap();
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
     let branch = stage(&branches, "Alice");
     branches.seal(branch).unwrap();
     // A row for the commit about to be published: `Roots` is appended, never

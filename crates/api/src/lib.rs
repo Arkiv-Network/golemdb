@@ -7,7 +7,8 @@
 //! [`Database`] implements Api on a cloneable handle with a shared branch registry.
 //! Its constructors initialize or validate genesis and select the configured hash.
 //! CRUD, query and count return [`Metered`] results on success and failure.
-//! Budgets are explicit but not enforced yet; receipt costs remain zero.
+//! CUD enforces budgets using committed prices and returns charged work on failure.
+//! Public reads remain unmetered and their budgets are not yet enforced.
 //! Current record storage supports branch reads and committed-head reads only.
 //! Immutable rows are staged on branches and read from committed storage, with
 //! named column projections and native typed access.
@@ -21,6 +22,7 @@
 //! },
 //!     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
 //!     None,
+//!     golemdb_api::PricingConfig::zero(),
 //! ));
 //! let db = Database::open_memory(&config.genesis)?;
 //! let branch = db.begin()?;
@@ -43,6 +45,7 @@ mod genesis;
 mod metered;
 mod open;
 mod open_error;
+mod pricing;
 mod record_op;
 mod types;
 
@@ -57,11 +60,13 @@ pub use golemdb_immutable_data::{
     ImmutableDataSegment,
 };
 pub use golemdb_merkle::HashAlgorithm;
-pub use golemdb_metering::{Budget, Ledger, WeightName};
+pub use golemdb_metering::{Budget, HostMeteringSchema, Ledger, PricingConfig, WeightName};
+pub use golemdb_pruning::PruningConfig;
 pub use golemdb_storage_mdbx::MdbxOptions;
 pub use metered::{Details, Metered, Receipt};
 pub use open::OpenInfo;
 pub use open_error::{OpenError, OpenResult};
+pub use pricing::{MeteringModelInfo, MeteringModelMetadata, ModelWeights};
 pub use record_op::{RecordOp, op};
 pub use types::SealInfo;
 
@@ -97,21 +102,34 @@ pub trait Api {
     /// Delete the record and its binding without reclaiming the internal ID.
     fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Metered<()>;
 
-    /// Committed records matching the operation's filter, in record ID order,
-    /// projected as `get` projects. A page skips the operation's offset, then
-    /// holds the next matches in that order, up to the operation's limit, or
-    /// with no limit up to the implementation's page size; `total_matched`
-    /// counts every match. An offset past the last match gives an empty page.
-    /// A limit of 0 returns InvalidQuery, and one above the page size
-    /// LimitExceeded, naming the page size. Matching and materialization
-    /// share one snapshot. `commit` names the commit to read, `None` the head;
-    /// explicit non-head commits are not yet supported; sort returns
-    /// NotImplemented.
+    /// Committed records matching the operation's filter, in the order of its
+    /// sort keys, ties and an unsorted query in record ID order, projected as
+    /// `get` projects. A page skips the operation's offset, then holds the
+    /// next matches in that order, up to the operation's limit, or with no
+    /// limit up to the implementation's page size; `total_matched` counts
+    /// every match. An offset past the last match gives an empty page. A
+    /// limit of 0 returns InvalidQuery; one above the page size, or more sort
+    /// keys than the implementation's cap, LimitExceeded, naming the cap.
+    /// Matching and materialization share one snapshot. `commit` names the
+    /// commit to read, `None` the head; explicit non-head commits are not yet
+    /// supported.
     fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Metered<QueryPage>;
 
     /// The number of committed records matching the operation's filter, under
     /// the same commit rules as `query`.
     fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Metered<u64>;
+
+    /// Unmetered committed pricing inspection. None selects head; explicit
+    /// non-head commits return CommitUnavailable until historical reads exist.
+    fn metering_model(&self, commit_id: Option<CommitId>) -> Result<MeteringModelInfo>;
+
+    /// Weights (including host.*) at the selected commit. None selects its active
+    /// model. Use the same explicit commit for related model/weight lookups.
+    fn model_weights(
+        &self,
+        commit_id: Option<CommitId>,
+        version: Option<u64>,
+    ) -> Result<ModelWeights>;
 
     // Branch lifecycle. IDs are valid only for their issuing engine.
     fn head(&self) -> Result<CommitId>;

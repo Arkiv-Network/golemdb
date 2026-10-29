@@ -2,6 +2,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 use golemdb_immutable_data::{ImmutableDataStorageError as DataError, metadata};
 use golemdb_merkle::HashProvider;
+use golemdb_pruning::Pruner;
 use golemdb_storage::{Store, WriteTransaction};
 
 use crate::{
@@ -19,10 +20,13 @@ pub(crate) fn persist(
     origin: CommitId,
     sealed: &SealedCommit,
     hasher: &impl HashProvider,
+    pruner: Option<&Pruner>,
 ) -> Result<CommitId> {
     // Drop a failed writer outside unwinding so backend mutexes are not poisoned
     // by a panic while reading head or replaying rows. Nothing has been published.
-    match catch_unwind(AssertUnwindSafe(|| stage(&mut tx, origin, sealed, hasher))) {
+    match catch_unwind(AssertUnwindSafe(|| {
+        stage(&mut tx, origin, sealed, hasher, pruner)
+    })) {
         Ok(result) => result?,
         Err(panic) => {
             drop(tx);
@@ -38,6 +42,7 @@ pub(crate) fn stage(
     origin: CommitId,
     sealed: &SealedCommit,
     hasher: &impl HashProvider,
+    pruner: Option<&Pruner>,
 ) -> Result<()> {
     // Checked before replaying, so a lost race does no work; `advance_head`
     // checks again with the head it publishes.
@@ -64,6 +69,15 @@ pub(crate) fn stage(
         state: sealed.cells.root,
         index: sealed.index.root,
     };
+    if let Some(pruner) = pruner {
+        let commit = sealed.commit_id.get();
+        let superseded = (sealed.cells.superseded.iter())
+            .chain(&sealed.index.superseded)
+            .map(|(table, key)| (*table, key.as_slice()));
+        pruner.register_tries(tx, commit, superseded)?;
+        pruner.sweep_tries(tx, commit)?;
+        pruner.prune_commit_keyed_rows(tx, crate::ROOTS, commit)?;
+    }
     // Publishes `origin + 1`, the commit seal wrote these rows under.
     advance_head(tx, origin, &roots, hasher)?;
     Ok(())
@@ -71,6 +85,7 @@ pub(crate) fn stage(
 
 /// Called with the immutable writer lock held through outcome resolution
 /// and rollback. Committed readers use their own handles and never take this lock.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn publish(
     writer: &mut ImmutableWriter,
     store: &impl Store,
@@ -79,6 +94,7 @@ pub(crate) fn publish(
     staged: &ImmutableStaging,
     segments: &ImmutableSegments,
     hasher: &impl HashProvider,
+    pruner: Option<&Pruner>,
 ) -> Result<CommitId> {
     if writer.recovery_required {
         return Err(BranchError::RecoveryRequired);
@@ -92,7 +108,7 @@ pub(crate) fn publish(
     writer.recovery_required = true;
     let mut attempted_commit = false;
     let outcome = (|| -> Result<()> {
-        crate::commit::stage(&mut tx, origin, sealed, hasher)?;
+        crate::commit::stage(&mut tx, origin, sealed, hasher, pruner)?;
         for (id, batch) in staged.batches() {
             let name = segments.by_id(id).schema.name();
             if metadata::end_ordinal_at(&tx, id, origin.get())? != batch.first_ordinal

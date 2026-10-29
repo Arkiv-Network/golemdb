@@ -79,76 +79,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        cell::RefCell,
-        collections::BTreeMap,
-        ops::{Bound, RangeBounds},
-    };
+    use std::{cell::RefCell, ops::Bound};
 
     use golemdb_cells::{CellKind, CellName, CellNameRef, CellType, CellValue, Width, marker::I32};
-    use golemdb_index::{BitmapContainer, IndexError, IndexTerm, TermError, TermRange, path};
+    use golemdb_index::{IndexError, IndexTerm, TermError, TermRange};
 
     use super::*;
-    use crate::{Bounds, EqValue, ExistsType, Filter, InValues, QueryError};
-
-    /// Posting lists in a `BTreeMap`: byte-ordered like the `Index` table.
-    #[derive(Default)]
-    struct FakeSource(BTreeMap<IndexTerm, Bitmap>);
-
-    impl FakeSource {
-        /// Index `ids` under `field = value` the way the write path does: as
-        /// an attribute cell, through `IndexTerm::from_cell`.
-        fn with(
-            mut self,
-            field: &str,
-            value: CellValue,
-            ids: impl IntoIterator<Item = u64>,
-        ) -> Self {
-            let attribute = value
-                .with_kind(CellKind::Attribute)
-                .expect("indexable type");
-            let term = IndexTerm::from_cell(field, attribute.as_view())
-                .expect("valid term")
-                .expect("attribute");
-            self.0.insert(term, bitmap(ids));
-            self
-        }
-    }
-
-    /// Chunk record IDs by their 48-bit path, as the BitmapTrie stores them.
-    fn bitmap(ids: impl IntoIterator<Item = u64>) -> Bitmap {
-        let mut chunks: BTreeMap<u64, Vec<u16>> = BTreeMap::new();
-        for id in ids {
-            let (path, offset) = path::split(id);
-            chunks.entry(path).or_default().push(offset);
-        }
-        Bitmap::from_containers(chunks.into_iter().map(|(path, offsets)| {
-            BitmapContainer::from_values(path, offsets).expect("48-bit path")
-        }))
-        .expect("unique, ordered paths")
-    }
-
-    impl FakeSource {
-        /// The entries in `range`, in key order, as a storage scan yields them.
-        fn run(&self, range: TermRange) -> impl Iterator<Item = (&IndexTerm, &Bitmap)> {
-            self.0
-                .iter()
-                .filter(move |(term, _)| range.bounds().contains(term.as_bytes()))
-        }
-    }
-
-    impl PostingSource for FakeSource {
-        fn postings(&self, term: &IndexTerm) -> golemdb_index::Result<Bitmap> {
-            Ok(self.0.get(term).cloned().unwrap_or_default())
-        }
-
-        fn scan(
-            &self,
-            range: TermRange,
-        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
-            Ok(self.run(range).map(|(_, postings)| Ok(postings.clone())))
-        }
-    }
+    use crate::{Bounds, EqValue, ExistsType, Filter, InValues, QueryError, fakes::FakeSource};
 
     /// A [`FakeSource`] that records every term it reads, in order: asked
     /// for, or stepped to by a scan.

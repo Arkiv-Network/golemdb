@@ -21,7 +21,7 @@ pub enum ApiError {
     NotFound,
     #[error("cell {name} not found")]
     CellNotFound { name: crate::CellName },
-    /// Spent is receipt.cost. Database calls start emitting this after planner integration.
+    /// Spent is receipt.cost. Required is known only after complete write planning.
     #[error("operation exceeds its budget (required: {required:?})")]
     OutOfBudget { required: Option<u64> },
     #[error("key already exists")]
@@ -98,11 +98,11 @@ impl From<CellValueParseError> for ApiError {
 }
 
 /// The runtime constructors of the query operands (`EqValue::try_from`,
-/// `InValues::try_from`, `Bounds::try_new`, `ExistsType::try_from`) check
-/// caller input.
+/// `InValues::try_from`, `Bounds::try_new`, `ExistsType::try_from`,
+/// `SortKey::try_new`) check caller input.
 impl From<ValuesError> for ApiError {
     fn from(error: ValuesError) -> Self {
-        Self::invalid_input("invalid filter values", error)
+        Self::invalid_input("invalid query operand", error)
     }
 }
 
@@ -132,7 +132,7 @@ impl From<QueryError> for ApiError {
     fn from(error: QueryError) -> Self {
         match error {
             QueryError::InvalidArgument { field, source } => Self::InvalidArgument {
-                message: format!("invalid filter on cell `{field}`"),
+                message: format!("invalid cell `{field}` in a filter or sort key"),
                 source: Some(Box::new(source)),
             },
             QueryError::InvalidQuery { reason } => Self::InvalidQuery { reason },
@@ -155,6 +155,15 @@ impl From<BranchError> for ApiError {
             BranchError::Sealed => Self::Sealed,
             BranchError::NoFrameToRollback => Self::NoFrameToRollback,
             BranchError::ImmutableData(error) => error.into(),
+            error => Self::internal(error),
+        }
+    }
+}
+
+impl From<golemdb_metering::ModelError> for ApiError {
+    fn from(error: golemdb_metering::ModelError) -> Self {
+        match error {
+            golemdb_metering::ModelError::ModelNotFound(_) => Self::NotFound,
             error => Self::internal(error),
         }
     }
@@ -193,6 +202,7 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
     use golemdb_cells::CellError;
     use golemdb_index::IndexError;
     use golemdb_merkle::MerkleError;
+    use golemdb_pruning::PruningError;
     use golemdb_storage::StorageError;
     if matches!(
         error.downcast_ref::<StorageError>(),
@@ -206,6 +216,7 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
                 RecordError::Storage(e) => Some(e),
                 RecordError::Cells(e) => Some(e),
                 RecordError::Branch(e) => Some(e),
+                RecordError::Pricing(e) => Some(e),
                 _ => None,
             }
         } else if let Some(error) = error.downcast_ref::<BranchError>() {
@@ -214,10 +225,15 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
                 BranchError::Cells(e) => Some(e),
                 BranchError::Index(e) => Some(e),
                 BranchError::ImmutableData(e) => Some(e),
+                BranchError::Pruning(e) => Some(e),
                 _ => None,
             }
         } else if let Some(ImmutableDataStorageError::Store(error)) =
             error.downcast_ref::<ImmutableDataStorageError>()
+        {
+            Some(error)
+        } else if let Some(golemdb_metering::ModelError::Cells(error)) =
+            error.downcast_ref::<golemdb_metering::ModelError>()
         {
             Some(error)
         } else if let Some(error) = error.downcast_ref::<CellError>() {
@@ -233,6 +249,8 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
                 _ => None,
             }
         } else if let Some(MerkleError::Storage(error)) = error.downcast_ref::<MerkleError>() {
+            Some(error)
+        } else if let Some(PruningError::Storage(error)) = error.downcast_ref::<PruningError>() {
             Some(error)
         } else {
             error.source()

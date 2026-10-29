@@ -142,6 +142,47 @@ pub(crate) fn last_range_at(
     Ok(Some((commit, decode_range(&value)?)))
 }
 
+/// Return the starting commit of the shard containing a visible ordinal.
+/// `candidate_last_batch` is (commit ID, appended ordinal range), initially the
+/// segment's last published batch from the caller's snapshot. Seek once per
+/// populated shard, skipping individual commits and entirely empty spans.
+pub(crate) fn shard_start_for_ordinal(
+    tx: &impl ReadTransaction,
+    segment: u32,
+    ordinal: u64,
+    mut candidate_last_batch: (u64, Range<u64>),
+    shard_span: u64,
+) -> StorageResult<u64> {
+    let published_end = candidate_last_batch.1.end;
+    if ordinal >= published_end {
+        return Err(Error::NotFound);
+    }
+    loop {
+        let (candidate_commit, candidate_range) = &candidate_last_batch;
+        let shard_start_commit = crate::backend::span_start(*candidate_commit, shard_span)?;
+        let previous_last_batch = match shard_start_commit.checked_sub(1) {
+            Some(before) => last_range_at(tx, segment, before)?,
+            None => None,
+        };
+        // Ordinals are contiguous across shards. Retention must preserve this
+        // boundary (or its equivalent) before older metadata can be pruned.
+        let first_ordinal = previous_last_batch
+            .as_ref()
+            .map_or(0, |(_, range)| range.end);
+        // Use the preceding shard's end rather than this batch's start: the
+        // batch may start partway through the shard. This also keeps an intact
+        // older prefix readable if a later batch's start was damaged.
+        if first_ordinal > candidate_range.end {
+            return Err(Error::Corrupt("decreasing published shard ends"));
+        }
+        if ordinal >= first_ordinal {
+            return Ok(shard_start_commit);
+        }
+        candidate_last_batch =
+            previous_last_batch.expect("ordinal precedes a nonzero shard boundary");
+    }
+}
+
 fn decode_range(bytes: &[u8]) -> StorageResult<Range<u64>> {
     if bytes.len() != 16 {
         return Err(Error::Corrupt("invalid commit range encoding"));
@@ -193,4 +234,124 @@ pub(crate) fn recovery_ranges(
             .or_insert(range);
     }
     Ok(ranges)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use golemdb_storage::{MemoryStore, Store};
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn ordinal_routing_matches_the_appending_commit(
+            span in 1u64..100,
+            batches in prop::collection::vec((0u64..200, 1u64..5), 1..30),
+        ) {
+            let store = MemoryStore::new();
+            let mut tx = store.begin_write().unwrap();
+            // A predecessor seek must not borrow another segment's boundary.
+            record_commit_range(&mut tx, 0, u64::MAX, 0..999).unwrap();
+            record_commit_range(&mut tx, 2, 0, 0..999).unwrap();
+            let mut commit = 0;
+            let mut end = 0;
+            let mut expected = Vec::new();
+            for (gap, count) in batches {
+                commit += gap;
+                record_commit_range(&mut tx, 1, commit, end..end + count).unwrap();
+                expected.extend(std::iter::repeat_n(commit / span * span, count as usize));
+                end += count;
+                // Exercise every publication prefix, including heads beyond the
+                // last append, with empty commits and entirely skipped shards.
+                let latest = last_range_at(&tx, 1, commit + 200).unwrap().unwrap();
+                for (ordinal, &shard) in expected.iter().enumerate() {
+                    prop_assert_eq!(
+                        shard_start_for_ordinal(&tx, 1, ordinal as u64, latest.clone(), span).unwrap(),
+                        shard,
+                    );
+                }
+                commit += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn shard_zero_and_first_append_in_a_later_shard() {
+        for first_commit in [0, 9] {
+            let store = MemoryStore::new();
+            let mut tx = store.begin_write().unwrap();
+            record_commit_range(&mut tx, 0, 100, 0..100).unwrap();
+            record_commit_range(&mut tx, 1, first_commit, 0..2).unwrap();
+            record_commit_range(&mut tx, 1, first_commit + 1, 2..3).unwrap();
+            let latest = last_range_at(&tx, 1, 100).unwrap().unwrap();
+            assert_eq!(
+                shard_start_for_ordinal(&tx, 1, 0, latest, 4).unwrap(),
+                first_commit / 4 * 4,
+            );
+        }
+    }
+
+    #[test]
+    fn routing_rejects_decreasing_shard_ends() {
+        let store = MemoryStore::new();
+        let mut tx = store.begin_write().unwrap();
+        record_commit_range(&mut tx, 1, 10, 0..20).unwrap();
+        // Each batch is individually valid, but the newer shard's end goes backward.
+        record_commit_range(&mut tx, 1, 110, 10..15).unwrap();
+        tx.commit().unwrap();
+        let tx = store.begin_read().unwrap();
+        let latest_batch = last_range_at(&tx, 1, 110).unwrap().unwrap();
+        assert!(matches!(
+            shard_start_for_ordinal(&tx, 1, 12, latest_batch, 100),
+            Err(Error::Corrupt("decreasing published shard ends")),
+        ));
+    }
+
+    #[test]
+    fn routing_seeks_by_shard_not_by_commit_or_empty_span() {
+        struct CountSeeks<T> {
+            inner: T,
+            seeks: std::cell::Cell<usize>,
+        }
+        impl<T: ReadTransaction> ReadTransaction for CountSeeks<T> {
+            type Cursor<'tx>
+                = T::Cursor<'tx>
+            where
+                Self: 'tx;
+
+            fn get(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Option<Vec<u8>>> {
+                self.inner.get(table, key)
+            }
+
+            fn cursor(
+                &self,
+                table: Table,
+                key: &[u8],
+            ) -> golemdb_storage::Result<Self::Cursor<'_>> {
+                self.seeks.set(self.seeks.get() + 1);
+                self.inner.cursor(table, key)
+            }
+        }
+        let store = MemoryStore::new();
+        let mut tx = store.begin_write().unwrap();
+        record_commit_range(&mut tx, 1, 10, 0..1).unwrap();
+        for i in 0..100 {
+            record_commit_range(&mut tx, 1, 1000 + i, i + 1..i + 2).unwrap();
+        }
+        record_commit_range(&mut tx, 1, 1_000_050, 101..102).unwrap();
+        tx.commit().unwrap();
+        let tx = CountSeeks {
+            inner: store.begin_read().unwrap(),
+            seeks: std::cell::Cell::new(0),
+        };
+        let latest = last_range_at(&tx, 1, 2_000_000).unwrap().unwrap();
+        for (ordinal, shard, seeks) in [(101, 1_000_000, 1), (50, 1000, 2), (0, 0, 2)] {
+            tx.seeks.set(0);
+            assert_eq!(
+                shard_start_for_ordinal(&tx, 1, ordinal, latest.clone(), 100).unwrap(),
+                shard
+            );
+            assert_eq!(tx.seeks.get(), seeks);
+        }
+    }
 }

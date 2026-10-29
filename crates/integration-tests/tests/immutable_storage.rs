@@ -29,6 +29,73 @@ fn row(height: u64) -> ImmutableDataRow {
 }
 
 #[test]
+fn committed_reads_route_sparse_shards_from_their_snapshot() {
+    fn check(store: impl Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = ImmutableDataStorage::open(config(), [9; 32], dir.path()).unwrap();
+        let reader = storage.reader();
+        let mut snapshots = Vec::new();
+        let mut end = 0;
+        // span=3: include commit zero, exact boundaries, missing boundaries,
+        // multiple batches per shard, and several entirely empty spans.
+        for (commit, count) in [(0, 2), (2, 1), (3, 2), (5, 1), (22, 2), (23, 2)] {
+            let mut tx = store.begin_write().unwrap();
+            for ordinal in end..end + count {
+                storage.append("events", commit, &row(ordinal)).unwrap();
+                metadata::bind_key(&mut tx, 0, ImmutableDataKey([ordinal as u8; 32]), ordinal)
+                    .unwrap();
+            }
+            metadata::record_commit_range(&mut tx, 0, commit, end..end + count).unwrap();
+            storage.sync().unwrap();
+            tx.commit().unwrap();
+            end += count;
+            snapshots.push((store.begin_read().unwrap(), commit, end));
+        }
+        // All physical configurations now include later appends. Older database
+        // snapshots must still route correctly and hide those later rows/keys.
+        for (tx, commit, end) in snapshots {
+            for ordinal in 0..end {
+                for address in [
+                    ImmutableDataAddress::Ordinal(ordinal),
+                    ImmutableDataAddress::Key(ImmutableDataKey([ordinal as u8; 32])),
+                ] {
+                    assert_eq!(
+                        reader
+                            .get(
+                                &tx,
+                                commit + 100,
+                                "events",
+                                address,
+                                &ImmutableDataReadOptions::all()
+                            )
+                            .unwrap(),
+                        row(ordinal),
+                    );
+                }
+            }
+            for address in [
+                ImmutableDataAddress::Ordinal(end),
+                ImmutableDataAddress::Key(ImmutableDataKey([end as u8; 32])),
+            ] {
+                assert!(matches!(
+                    reader.get(
+                        &tx,
+                        commit + 100,
+                        "events",
+                        address,
+                        &ImmutableDataReadOptions::all()
+                    ),
+                    Err(ImmutableDataStorageError::NotFound),
+                ));
+            }
+        }
+    }
+    check(golemdb_storage::MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    check(MdbxStore::open(dir.path()).unwrap());
+}
+
+#[test]
 fn caller_publishes_key_and_range_metadata_and_rolls_back_files_explicitly() {
     let dir = tempfile::tempdir().unwrap();
     let kv = dir.path().join("kv");
@@ -176,7 +243,7 @@ fn builder_recovers_tail_and_staging_uses_published_mdbx_ranges() {
     drop(files);
     let files = ImmutableDataStorage::open(config(), [9; 32], dir.path().join("files")).unwrap();
     let reader = files.reader();
-    let branches = Branches::new(store.clone(), Keccak256Hasher, Some(files)).unwrap();
+    let branches = Branches::new(store.clone(), Keccak256Hasher, Some(files), None).unwrap();
     let id = branches.begin().unwrap();
     assert!(matches!(
         branches.immutable_data_append(id, "events", Some(ImmutableDataKey([1; 32])), row(11)),

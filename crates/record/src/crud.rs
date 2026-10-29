@@ -148,9 +148,12 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         let result = self
             .branches
             .write_with_origin(branch, |origin, writer| {
-                priced_at = Some(origin);
                 let pricing = &self.write_pricing;
-                let mut meter = WriteMeter::new(&pricing.schedule, pricing.depths, budget);
+                // The branch guard has validated the origin against its storage snapshot.
+                // Record now captures cached pricing for that commit, before admission.
+                let snapshot = pricing.provider.snapshot(origin.get())?;
+                priced_at = Some(origin);
+                let mut meter = WriteMeter::new(&snapshot.model.schedule, pricing.depths, budget);
                 let (value, plan) = match operation(&writer.as_read(), pricing, &mut meter) {
                     Ok(planned) => planned,
                     Err(error) => {

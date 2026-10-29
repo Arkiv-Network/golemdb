@@ -1,6 +1,6 @@
 # Write metering implementation plan
 
-Implement the public receipt contract first, then per-record metadata, then budgeted write planning and execution. Metering orchestration belongs in `golemdb-record`; `golemdb-metering` owns `Budget`, pricing rules, weights, ledgers and budget accounting. The branch crate continues to provide state access, isolation, rollback and commit.
+Implement the public receipt contract first, then per-record metadata, then budgeted write planning and execution. Metering orchestration belongs in `golemdb-record`; `golemdb-metering` owns `Budget`, pricing rules, persisted models, shared pricing snapshots, weights, ledgers and budget accounting. The branch crate continues to provide state access, isolation, rollback and commit.
 
 This plan covers `create`, `patch` and `delete`, including their planning reads. `get`, `query` and `count` receive the new result shape immediately, but their pricing remains outside this write-metering implementation. Returning a receipt does not yet imply that a call enforces a work budget.
 
@@ -13,7 +13,7 @@ Sources: [metering specification](golemdb-metering.md), [API receipts](golemdb-a
 - Record builders only collect input. Admission validation and normalization belong in record execution, after handle/snapshot selection; there is no public unmetered validation shortcut. Pass raw ordered entries and budgets across the API/record boundary. Input allocation, typed value construction and transport decoding remain host responsibilities.
 - Change the API before introducing actual charges. All six operations return `Metered<T>`, including failures. Initially `cost = 0`; successful write effects and `priced_at` must already be correct.
 - Add `#meta` before enforcing write prices. Its four counters describe one record's user cells, not database-wide populations or accumulated operation charges.
-- The record crate builds and applies write plans. The metering crate prices logical steps and mutations; it does not discover old values, access storage or construct an executable plan.
+- The record crate builds and applies write plans. The metering calculation engine prices logical steps and mutations without storage access or executable plans. Separate modules in the metering crate load and validate reserved model/weight cells through `cells` and `storage`; they do not depend on record, query or branch.
 - Define `Budget` in the metering crate and re-export it from API and query. Keep `QueryOp` and `CountOp` in query for now; moving their public builders into API is deferred.
 - Planning reads are budgeted while the plan is being built. Building an unrestricted plan and pricing it afterward would not meet the specification.
 - Use index-term existence at the branch base for the initial creation surcharge. Do not implement a branch-aware index overlay for pricing in this work.
@@ -26,7 +26,7 @@ Sources: [metering specification](golemdb-metering.md), [API receipts](golemdb-a
 | --- | --- |
 | `api` | Public CRUD requests, query/count and `Budget` re-exports, `Metered<T>`, receipts and error conversion; genesis/admin integration and database construction. |
 | `record` | Admission, record semantics, metered planning reads, `WritePlan`, metadata and effect calculation, final approval and application. |
-| `metering` | `Budget`, immutable schedules, supported code identifiers, checked pricing/count arithmetic, explicit modeled depths, ledgers and per-call accounting. No database dependencies. |
+| `metering` | `Budget`, immutable schedules, supported code identifiers, checked pricing/count arithmetic, explicit modeled depths, ledgers and per-call accounting; persisted model codecs, loading and a shared immutable pricing provider over `cells`/`storage`. The calculation engine remains pure. |
 | `branch` | A stable state view while planning/applying, origin/head validation, overlay mutation, rollback, sealing and commit; access to base state needed by record planning. |
 | `cells` / `index` | Encodings and storage primitives, including a point lookup that checks whether a term exists without loading its posting list. Record calls using these primitives are charged through the meter; the storage crates neither choose prices nor track a caller's budget. |
 | `query` | Query/count request builders, existing query planning/execution and receipt context now; its own metered execution later. |
@@ -124,14 +124,15 @@ are checked, including counts whose weights are zero.
 `Outcome` carries accounting separately from effects. The API forwards it to
 `Receipt.cost` and `Receipt.ledger`; metering failures map to the existing
 `OutOfBudget { required }`. Other failures also retain their charged work, while
-failed effects remain zero. Database writes use an explicit zero-weight schedule
-and return full ledgers at zero cost; read calls still return empty ledgers.
+failed effects remain zero. Database writes now use the persisted schedule captured
+at the validated branch origin; read calls still return zero cost and empty ledgers.
 Public request signatures and `Budget` are unchanged. Read-related
 `evaluated_at` changes remain deferred.
 
-Keep `CommitId` and database access outside the metering core. Record integration
-combines the pricing commit, immutable schedule and depths. Persisting this context
-is iteration 5; supplying logical work from real CRUD execution is iteration 4.
+Keep `CommitId` and branch selection outside metering: its loader receives the numeric
+commit and a reader from the same caller-selected committed snapshot. Pricing calculations
+remain storage-independent. Iterations 5 and 6 share persisted loading between
+inspection and the existing record execution path.
 
 ### Record-side planning reads (iteration 4)
 
@@ -183,12 +184,12 @@ canonical typed-value construction happen before the call and remain host work.
    covered by the fixed `write.record.delete` scan work; counters are also verified
    against the resulting effects. Binding, `#key` and `#meta` are then deleted.
 
-`Records::new` requires a `WritePricing` containing the schedule, depths and
-immutable cell/record limits. The API supplies validated genesis limits and
-`Schedule::zero_write` with `INITIAL_DEPTHS` (6). Admission and planning call
+`Records::new` requires a `WritePricing` containing a shared `PricingProvider`, depths
+and immutable cell/record limits. The API supplies validated genesis limits and
+the provider loaded at opening, with `INITIAL_DEPTHS` (6). Admission and planning call
 `WriteMeter` directly: there is no optional adapter or unpriced path, and admission
 performs no database reads. Zero weights still produce ledgers and budget checks;
-missing weights remain errors. Persisted schedule loading remains iterations 5/6.
+missing weights remain errors. Snapshot capture precedes admission inside the branch guard.
 The example's depth-4 create remains 266 total, with 24 spent planning. Under the
 same fixture, deleting those two cells costs 61 total with 15 spent planning;
 empty-record deletion costs 33.
@@ -387,8 +388,9 @@ Each iteration should leave the workspace compiling and have its own focused che
 an explicit budget; builders only collect raw ordered input; patch `set` preserves stored kind.
 Record execution now owns admission and projection normalization. `first_error` and
 builder `validate()` have been removed; budgets and raw entries reach the record crate.
-Receipt effects and pricing context are populated, while costs remain zero and
-budgets remain unenforced. See the [Rust API guide](../crates/api/README.md).
+Receipt effects and pricing context were populated in this iteration, with costs
+still zero and budgets unenforced at that stage. Iteration 6 enables write pricing
+and budgets. See the [Rust API guide](../crates/api/README.md).
 
 **Outcome:** callers can adopt the final result shape before the pricing implementation exists.
 
@@ -468,9 +470,9 @@ production enforcement, population counters or public read pricing.
 **Implemented:** shared CUD planning/application, metered admission and state reads,
 prospective user/system/index charges, bounded live-cell scanning, and the PR #87
 metadata-decoding cleanup. `Records` requires immutable pricing and calls
-`WriteMeter` directly. Public database writes use explicit zero weights with full
-ledgers; tests supply nonzero schedules through the same constructor. Persisted
-schedules and their production connection remain iterations 5/6. Public
+`WriteMeter` directly. At iteration 4, public database writes used explicit zero weights
+with full ledgers; iteration 6 connects the shared persisted provider. Tests select
+explicit prices through that same provider path. Public
 estimation remains iteration 7.
 
 1. Refactor current record CRUD, which interleaves reads and overlay writes, into internal planning and application functions. First establish equivalent behavior with a supplied test pricing context.
@@ -485,32 +487,53 @@ estimation remains iteration 7.
 
 **Acceptance:** an instrumented read source proves that no later logical reads run after a cutoff; early refusal and validation failures change no branch state; no-op patches still perform required reads but create no mutations; all three operations apply exactly their approved plan without a second pricing/validation pass.
 
-### Iteration 5 — Persisted initial pricing context
+### Iteration 5 — Persisted initial pricing and shared inspection
 
 **Priority:** 1 — Mumbai release.
 
-**Outcome:** production calls load an initial schedule from committed state,
-including after restart. Depths remain the temporary `INITIAL_DEPTHS` constant.
+**Implemented:** initial models and weights persist at genesis and reload on opening.
+A shared `PricingProvider` in `metering` supplies immutable cached pricing. Read-only
+API accessors expose model metadata and weights, including `host.*`.
+Iteration 6 connects this provider to CUD execution.
 
-1. Define genesis encoding/loading of the initial `@meteringModel` and `@modelWeight`
-   admin records and necessary model configuration. Reuse the deployment caps
-   already implemented in iteration 2. Validate declared names and code versions;
-   retain missing weights as unpriced. Cache immutable configuration.
-2. Construct an immutable pricing context with the committed pricing head and
-   schedule, pinned for each call/branch. Keep storage outside the pure meter.
-3. Rebuild pricing state on open/recovery. Unsupported active code versions or
-   malformed schedules prevent priced service; absent individual weights fail only
-   operations needing them. Expose missing-weight diagnostics to operators.
-4. Use fixed depth 6 for both tries. Defer `#liveCells`, `#indexTerms`, their genesis
-   values, net commit tracking, sealing/root changes and population-based depths.
-   Their eventual implementation must count actual net state, not receipt effects.
+1. `metering` owns `PricingConfig`, `HostMeteringSchema`, model metadata, reserved-cell codecs,
+   validation, `PricingProvider` and `PricingSnapshot`. Dependencies on `cells` and
+   `storage` permit direct reads of IDs 32/33 without calling record CRUD. No reverse
+   dependency on record, query, API or branch is introduced. `WriteMeter` remains pure.
+2. `Genesis.metering` explicitly defines code versions and named weights for model 1,
+   active at commit 0. Values are included in genesis identity. There is no implicit
+   zero schedule: tests/development can explicitly use `PricingConfig::zero()`.
+   `OpenConfig.host_schemas` declares supported host code versions and their names;
+   these local capabilities do not alter genesis identity. YAML parsing stays in API.
+   `PricingConfig` holds both GolemDB and host values without fixing a model version
+   or activation. API genesis supplies those to the shared `model_cells` codec.
+3. Initialization and loading use the same serialized storage view. New genesis
+   rejects undeclared names; opening validates the committed active model. Unsupported
+   active GolemDB/host code versions or malformed cells fail opening. Missing weights
+   remain absent (unpriced), with warning logs; explicit zero is valid.
+   Persisted undeclared names are logged as ignored, as D9 specifies.
+4. `Api::metering_model(commit_id)` returns the resolved commit, active metadata and
+   optional pending metadata, both using `MeteringModelMetadata` with a typed activation
+   `CommitId`. Model version and GolemDB/host code versions remain separate fields.
+   `Api::model_weights(commit_id, version)` returns the resolved commit/version and a
+   shared immutable map including host values. Both use optional `CommitId`, like query;
+   absent = head. Absent version = active at that commit. Unknown models return NotFound;
+   explicit non-head commits return CommitUnavailable until historical reads exist.
+   Inspection is unmetered and bypasses record CRUD and branch overlays.
+5. Load the provider once during opening/recovery; clones and repeated reads share it.
+   Ordinary commits reuse weights while each call captures its own pricing commit.
+   There is no per-call scan, mutable cache-head field or runtime invalidation hook yet.
+   The caller supplies validated committed state, never an independent newer head.
+   Runtime refresh/publication belongs to iteration 8. Direct low-level pricing writes
+   require reopening; rewind also requires reconstruction rather than commit-number reuse.
+6. Keep trie depths at `INITIAL_DEPTHS` (6 for both). Defer `#liveCells`, `#indexTerms`,
+   their genesis values, net commit tracking and population-based depth calculation.
 
-This iteration can proceed separately from the planner refactor. Runtime weight
-patches, model installation and delayed activation remain iteration 8.
-
-**Acceptance:** reopening restores identical prices; the context has a coherent
-head/schedule pair; missing weights remain distinguishable from explicit zero;
-unsupported or malformed initial models cannot silently use fallback prices.
+**Acceptance:** both backends and hashes reopen with identical prices; initial pricing
+changes genesis identity while local host capabilities do not; cache references survive
+ordinary commits with distinct call commit IDs; missing/zero/host weights remain distinct;
+malformed/unsupported active models cannot fall back to genesis prices; invalid fresh
+configuration publishes no partial genesis. Explicit zero configurations remain supported.
 
 ### Iteration 6 — Enforce real CUD prices and budgets
 
@@ -518,14 +541,38 @@ unsupported or malformed initial models cannot silently use fallback prices.
 
 **Outcome:** all three write operations return actual charges and reject unfunded work before application.
 
-1. Replace the API's explicit zero schedule with the persisted pricing context. All CUD paths already use `WriteMeter`; verify their nonzero production prices in reviewable increments.
+**Implemented:** API inspection and Records share one `Arc<PricingProvider>`.
+`WritePricing::new` supplies that provider, deployment limits and fixed depth 6;
+`Records::execute_write` captures its snapshot inside `write_with_origin`, after
+handle/origin validation and before admission. An unavailable schedule fails before
+charging or applying anything. No per-call model scan, extra head lookup or zero fallback.
+
+1. Use the shared metering provider from iteration 5. Resolve its snapshot against the validated branch origin and reuse it for the whole call. All CUD paths use `WriteMeter` with the configured persisted prices.
 2. Verify admission, base, cell-read and index-read charges against the persisted schedule; retain the existing accumulation of user/system mutation prices and final approval before applying.
 3. Return the full approved cost on success. On planning failure return only completed planning cost, zero effects, and the specified error/`required` value. Forward the meter's per-weight ledger separately from user-effect `Details`; it is always present in the in-process receipt, including system charges and failed planning.
 4. Preserve receipts across rollback/discard; there are no refunds or additional rollback charges. Commit overhead and final global-counter/allocator persistence do not become additional client-call charges.
-5. Add the simplified index rule to the model documentation and golden examples in the same change that enables it.
+5. Use the committed-origin index rule documented in metering D2: each join to a term absent at the origin pays term creation, even after an earlier branch join. A term present at the origin pays no creation charge after remove/recreate. There is no branch-aware term population tracker.
 6. Keep `get`, `query` and `count` at zero cost with their correct receipt context. Document that their budgets remain unenforced until read metering lands; do not describe them as budget-bounded reads.
 
 **Acceptance:** end-to-end conformance examples cover fields and attributes, system mutations, no-ops, preserved-kind `set`, caps, missing cells, exact cutoffs, missing weights and overflow. Repeated joins and remove/recreate sequences match the explicit base-term rule. Failed planning leaves IDs, overlay state and counters untouched.
+
+Public API conformance uses the earlier example's weights with the runtime depth 6,
+without changing the original depth-4 worked example:
+
+| Call | Planning cost | Approved total / required |
+| --- | --- | --- |
+| Create `age: u32(7)` field and `color: "red"` attribute, absent term at origin | 24 | 278 |
+| Same create, budget 23 | 22 | unknown; next term read is unfunded |
+| Same create, budget 277 | 24 | 278; zero effects |
+| Set `age` from 7 to 8 | 19 | 47 |
+| Set `age` to its existing value 7 | 19 | 19; no mutations |
+| Delete the two-cell record | 15 | 73 |
+| Create another such record with the term already present at origin | 24 | 271 |
+
+Receipts reconstruct from their ledger and the API's weights. Tests cover both storage
+backends and hash algorithms, retained receipts across rollback/discard, and unmetered
+public reads with nonzero planning-read prices. Unpriced failures emit a warning naming
+the weight; `Unlimited` still rejects missing weights and arithmetic overflow.
 
 ### Iteration 7 — Shared estimation and deletion bounds
 
@@ -547,7 +594,7 @@ unsupported or malformed initial models cannot silently use fallback prices.
 
 **Outcome:** hosts can install models, update weights and activate schedules according to D9 without changing a call's prices midway. Mumbai uses the persisted initial schedule from iteration 5.
 
-1. Implement install/patch/introspection through the specified administrative API, including supported GolemDB/host code versions and host weight names.
+1. Implement install/patch through the administrative API and extend the read-only introspection from iteration 5. Include GolemDB/host code versions and host weight names.
 2. Enforce one pending model, monotonic model versions and the minimum activation delay. Validate known active-model names and the specified weaker form checks for unsupported pending models.
 3. Publish a new head and its corresponding schedule coherently after a successful commit. Failed/discarded administration must not change active pricing.
 4. Handle activation, missing/ignored weights and unsupported active versions as specified. Missing weights are not silently zero and do not require disabling unrelated priced operations.

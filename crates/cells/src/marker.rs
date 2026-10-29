@@ -44,7 +44,7 @@ use crate::{CellType, CellValue, FloatWidth, NotNan32, NotNan64, Width};
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a cell type marker",
     label = "expected a marker such as `U32`, `Str` or `Dec32`",
-    note = "the markers are in `golemdb_cells::marker`; values only known as `CellValue`s at run time, or a type only known as a `CellType`, go through the operand's runtime constructor: `EqValue::try_from`, `InValues::try_from`, `Bounds::try_new` or `ExistsType::try_from`"
+    note = "the markers are in `golemdb_cells::marker`; values only known as `CellValue`s at run time, or a type only known as a `CellType`, go through the operand's runtime constructor: `EqValue::try_from`, `InValues::try_from`, `Bounds::try_new`, `ExistsType::try_from` or `SortKey::try_new`"
 )]
 pub trait CellMarker: sealed::Sealed + Copy {
     /// The cell type this marker names.
@@ -61,12 +61,12 @@ pub trait CellMarker: sealed::Sealed + Copy {
 /// A cell type the index holds: every type but variable-length `bytes`.
 ///
 /// The bound of every query operand: an `Eq`'s value, an `In`'s values, a
-/// `Range`'s bounds, an `Exists`' type.
+/// `Range`'s bounds, an `Exists`' type, a sort key's type.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not an indexable cell type",
     label = "expected the marker of an indexable cell type, such as `U32`, `Str` or `Dec32`",
     note = "variable-length `bytes` has no index term, so its marker `Bytes` is not `Indexable`; every other type's marker is",
-    note = "values only known as `CellValue`s at run time, or a type only known as a `CellType`, go through the operand's runtime constructor: `EqValue::try_from`, `InValues::try_from`, `Bounds::try_new` or `ExistsType::try_from`"
+    note = "values only known as `CellValue`s at run time, or a type only known as a `CellType`, go through the operand's runtime constructor: `EqValue::try_from`, `InValues::try_from`, `Bounds::try_new`, `ExistsType::try_from` or `SortKey::try_new`"
 )]
 pub trait Indexable: CellMarker {}
 

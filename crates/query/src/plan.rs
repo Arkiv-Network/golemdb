@@ -158,7 +158,7 @@ fn term(field: &CellName, value: &CellValue) -> Result<IndexTerm> {
         .map_err(|source| invalid_argument(field, source))
 }
 
-fn invalid_argument(field: &CellName, source: TermError) -> QueryError {
+pub(crate) fn invalid_argument(field: &CellName, source: TermError) -> QueryError {
     QueryError::InvalidArgument {
         field: field.clone(),
         source,

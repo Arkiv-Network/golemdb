@@ -48,14 +48,26 @@ fn capacity_errors_remain_public_through_internal_wrappers() {
         RecordError::Storage(StorageError::Full),
         RecordError::Cells(CellError::Storage(StorageError::Full)),
         RecordError::Cells(CellError::Merkle(MerkleError::Storage(StorageError::Full))),
+        RecordError::Pricing(golemdb_metering::ModelError::Cells(CellError::Storage(
+            StorageError::Full,
+        ))),
         RecordError::Branch(BranchError::Storage(StorageError::Full)),
         RecordError::Branch(BranchError::Index(IndexError::Storage(StorageError::Full))),
         RecordError::Branch(BranchError::Index(IndexError::Merkle(
             MerkleError::Storage(StorageError::Full),
         ))),
+        RecordError::Branch(BranchError::Pruning(
+            golemdb_pruning::PruningError::Storage(StorageError::Full),
+        )),
     ] {
         assert!(matches!(ApiError::from(error), ApiError::StoreFull));
     }
+    assert!(matches!(
+        ApiError::from(golemdb_metering::ModelError::Cells(CellError::Storage(
+            StorageError::Full
+        ))),
+        ApiError::StoreFull
+    ));
 }
 
 #[test]

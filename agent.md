@@ -13,8 +13,8 @@ and adapters.
 | Crate | Responsibility |
 | --- | --- |
 | `api` | Public `Api` trait, `Database` handle, typed CRUD requests, opening, genesis initialization and validation. |
-| `metering` | `Budget`, immutable named schedules, checked write pricing, `WriteMeter` and per-weight ledgers. No storage dependency. |
-| `record` | Record identity, admission, metered CUD planning, final approval and atomic plan application over branch cell views. Production pricing context loading remains deferred. |
+| `metering` | `Budget`, immutable named schedules, checked write pricing, `WriteMeter` and per-weight ledgers; persisted model loading and shared pricing snapshots over `cells`/`storage`. Calculations remain storage-independent. |
+| `record` | Record identity, admission, metered CUD planning against the shared persisted provider, final approval and atomic plan application over branch cell views. |
 | `branch` | Branch registry, overlays, undo frames, guarded reads and writes, sealing, and atomic publication. |
 | `cells` | Cell names, keys, types, canonical values, deployment limits, reserved-record constants, `Cell` storage and its commitment. |
 | `immutable-data` | Typed rows and genesis schemas using cell codecs, NippyJar/memory files, physical reads/recovery and transactional log metadata. |
@@ -64,11 +64,11 @@ with zeroes. Every listed record has its own `#key` and a binding in `#recordKey
 | 2 | `#roots` | Previous-commit roots, addressed by raw big-endian commit IDs. |
 | 3 | `#recordKeys` | Public-key-to-record-ID bindings. |
 | 4 | `#rootIndex` | Reserved identity for index-root-related schema. |
-| 32 | `@meteringModel` | Reserved identity for metering models. |
-| 33 | `@modelWeight` | Reserved identity for pricing weights. |
+| 32 | `@meteringModel` | Model version (u64 BE) → bytes field of activation commit, GolemDB code, host code (three u64 BE). |
+| 33 | `@modelWeight` | Model version (u64 BE) ‖ weight name → non-indexed u64, including host values. |
 
 Genesis initializes the catalogue, identities, bindings, limits, and allocator.
-The root and metering records start with identity cells only. Reserved cells are
+Root records start with identity cells only. Metering installs model 1 at commit 0 and the explicit genesis weights. Reserved cells are
 fields and do not produce attribute index terms.
 
 ### Canonical cell and term encoding
@@ -305,14 +305,14 @@ There is no create `.insert()`. Patch also has `.remove()`. Operations implement
 `golemdb-query`. Query/count builders remain in the query crate; moving them into
 the API crate is deferred.
 
-`Metered<T>` holds a result and a receipt on every outcome. Cost remains zero and
-write budgets are checked against explicit zero prices, while read budgets remain
+`Metered<T>` holds a result and a receipt on every outcome. CUD costs use the
+committed pricing snapshot captured at the validated branch origin; read budgets remain
 unenforced. User effects exclude system cells, failed writes and
 no-ops. `priced_at` comes from the same validated branch origin or committed snapshot
 as execution; unavailable history uses the captured head. Unknown/stale handles and
 sealed writes have no pricing snapshot. `.into_result()` explicitly drops a receipt;
 `map` and `map_err` preserve it. Write budget failures map to `OutOfBudget { required }`;
-the API's explicit zero weights currently make valid writes affordable at any budget.
+only explicit zero prices make charged work free. Missing prices never default to zero.
 
 The metering core prices `PlanningStep` and `MutationCharge` against an immutable
 `Schedule`. `WriteMeter::run_step` checks and records a complete charge before its
@@ -320,17 +320,18 @@ action, including failed validation; the record base combines `read.key` and
 `write.record.{op}` atomically. Prospective mutations are separate until `finish`.
 Missing weights and checked cost/count overflow stop the meter, even with Unlimited.
 `INITIAL_DEPTHS` supplies temporary cell/index depth 6; fixtures may supply others.
-Population counters/depth selection and persisted weights are not implemented.
+Population counters/depth selection remain deferred; weights persist at genesis.
 `Outcome.accounting` carries cost and `Ledger` through API conversion. Receipts
 always have a ledger keyed by `WeightName`, re-exported by API; failed effects stay
-zero while charged work survives. Database writes use `Schedule::zero_write` and
-produce zero cost with full ledgers. Read costs remain zero and their ledgers empty.
-Persisted scheduling remains iterations 5/6; missing weights never fall back to zero.
+zero while charged work survives. Database writes use the same `Arc<PricingProvider>`
+as API inspection. Record captures a snapshot inside the branch guard before admission,
+with no extra head read or model scan. Missing-weight failures log the weight name.
+Read costs remain zero and their ledgers empty.
 Read `evaluated_at` changes are deferred.
 
 CUD executes one read-only `WritePlan` followed by approval and application under
 the same branch guard. `Records::new(branches, WritePricing)` requires immutable
-configuration; the API supplies zero weights and its validated genesis limits.
+configuration containing the shared provider, depths and validated genesis limits.
 Admission and planning use the metering crate's `WriteMeter` directly, with no
 record-side meter adapter or unpriced path. Patch/delete read #meta
 and then #key before user cells. Every indexed leave/join reads its term at the
@@ -364,10 +365,12 @@ available through `Error::source()`.
 `Database::open(path, &OpenConfig)` opens MDBX directly. `open_with_options` accepts
 `MdbxOptions`; `open_memory(&Genesis)` creates a memory-backed database;
 `from_store(store, &OpenConfig)` accepts a supplied store. `OpenConfig` contains
-`Genesis` and `OpenMode::{CreateIfMissing, ExistingOnly, CreateNew}`.
+`Genesis`, `OpenMode::{CreateIfMissing, ExistingOnly, CreateNew}`, host code declarations and the optional immutable-data directory.
 
-`Genesis` contains the hash algorithm, cell limits and optional immutable-data
-configuration. `None`, omitted YAML or `immutable_data: null` disables the feature.
+`Genesis` contains the hash algorithm, cell/record limits, required `PricingConfig`
+(`metering` in YAML) and optional immutable-data configuration. `Genesis::new` takes
+initial pricing as its fifth argument; `PricingConfig::zero()` is an explicit
+development/test choice, never an implicit default. `None`, omitted YAML or `immutable_data: null` disables the feature.
 An enabled configuration requires a positive shard span and at least one segment.
 YAML loading uses an explicit path and rejects missing required, duplicate or
 unknown fields; an omitted immutable column type resolves to bytes. Backend capacity and paths
@@ -412,6 +415,27 @@ Operation options fit on `RecordOp`; receipt/result wrappers, precise counts, an
 metadata encoding require a single consistent contract across API, record, and
 branch layers. Detailed formulas and schedule semantics belong in
 `docs/golem-db-metering.md`.
+
+`metering::PricingProvider` loads model/weight records directly through `CellReader`
+in the same serialized view used by opening. It has no dependency on record/query/branch.
+The loader receives the commit number from its caller. Models contain declared GolemDB
+and host weights; absent values remain unpriced, while missing/ignored names produce
+warning logs. Unsupported active GolemDB/host code versions or
+malformed pricing fail opening. New genesis rejects undeclared weight names. Host
+capabilities (`OpenConfig::with_host_schemas`) are local and do not alter genesis identity.
+`HostMeteringSchema` declares a host code version's weight names; `PricingConfig`
+contains selected code versions and actual values for both GolemDB and host weights.
+API genesis chooses model 1/commit 0 and uses metering's shared `model_cells` codec.
+
+`Api::metering_model(commit_id)` and `model_weights(commit_id, version)` are unmetered
+inspection: absent commit means head; explicit non-head commits are unavailable. Results
+carry the resolved commit; absent version means active, unknown versions return NotFound.
+Active and pending models share API `MeteringModelMetadata`, converting the numeric
+activation commit from metering's metadata into `CommitId`. No diagnostics list is exposed.
+Weight maps and models are shared through Arc. Ordinary commits change the call's commit
+context but do not reread schedules. Runtime admin writes and activation refresh remain
+iteration 8; low-level price changes and any rewind require reopening/reloading. Public
+CUD enforces persisted prices and budgets; public read metering is deferred.
 
 ### Generated record keys and typed input conversion
 
@@ -467,7 +491,7 @@ exclusive end, `.conf`/`.off` companions and no active/closed rename. Custom hea
 store format, genesis identity, segment ID, first commit and first ordinal.
 NippyJar supplies row count, arity and compression. Active writers are retained
 across appends; explicit sync makes their changes durable. Physical reads may
-flush a selected writer. Historical reads inspect configurations newest-first;
+flush a selected writer and inspect older configurations newest-first;
 no historical reader/configuration cache is retained.
 
 Caller-owned transaction helpers bind keys, get by key, record commit ranges and
@@ -523,8 +547,11 @@ The API owns an independent `ImmutableDataReader` and a shared store handle;
 branches own only the immutable writer. The reader's projected `get` and `rows_of`
 take one caller-owned published snapshot and the
 commit number from that snapshot, enforcing key/range/ordinal visibility without
-locking or flushing the writer. Discovery excludes spans newer than the segment's
-last published batch. NippyJar's cursor uses EOF for its last column, so committed
+locking or flushing the writer. Ordinal/key reads route through commit-range
+metadata, seeking before shard boundaries to skip older populated shards and
+empty spans. Only the selected shard's
+configuration is opened by path; committed reads do not list the directory.
+NippyJar's cursor uses EOF for its last column, so committed
 reads use native offsets/codecs with stored terminal offsets and tolerate extra
 unpublished bytes. Only destructive cleanup waits for read mappings. Reader clones
 retain directory ownership; close them before reopening files. Future commits are

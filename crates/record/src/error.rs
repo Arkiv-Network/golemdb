@@ -20,6 +20,9 @@ pub enum RecordError {
     AccountingOverflow,
     #[error(transparent)]
     Metering(#[from] golemdb_metering::MeteringFailure),
+    /// Failure to obtain a usable committed schedule, before admission begins.
+    #[error(transparent)]
+    Pricing(#[from] golemdb_metering::ModelError),
     #[error("missing or inconsistent initialized record state: {0}")]
     CorruptState(&'static str),
     #[error("record ID space exhausted")]

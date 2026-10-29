@@ -1,5 +1,7 @@
 use crate::{BITMAP_BRANCH_DOMAIN, BITMAP_LEAF_DOMAIN};
-use golemdb_merkle::{HASH_BYTES, Hash, HashProvider, LeafPayload, LeafRef, PayloadTrie, RootRef};
+use golemdb_merkle::{
+    HASH_BYTES, Hash, HashProvider, LeafPayload, LeafRef, PayloadTrie, RootRef, TrieUpdate,
+};
 use golemdb_storage::{ReadTransaction, WriteTransaction};
 
 use crate::{
@@ -74,7 +76,7 @@ impl<'a, H: HashProvider> BitmapTrie<'a, H> {
         commit: u64,
         before: Option<RootRef<BITMAP_TRIE_PATH_BYTES>>,
         changes: impl IntoIterator<Item = (u64, u16, bool)>,
-    ) -> Result<Option<RootRef<BITMAP_TRIE_PATH_BYTES>>> {
+    ) -> Result<TrieUpdate<BITMAP_TRIE_PATH_BYTES>> {
         let root = before.unwrap_or(RootRef::Empty);
         let mut changes = changes.into_iter().peekable();
         let mut edits = Vec::new();
@@ -110,7 +112,6 @@ impl<'a, H: HashProvider> BitmapTrie<'a, H> {
                 edits.push((path, Some(LeafPayload { hash, bytes })));
             }
         }
-        let root = self.trie.apply(tx, commit, root, edits)?;
-        Ok((root != RootRef::Empty).then_some(root))
+        Ok(self.trie.apply(tx, commit, root, edits)?)
     }
 }

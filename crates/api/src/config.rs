@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use golemdb_cells::CellLimits;
 use golemdb_immutable_data::ImmutableDataConfig;
 use golemdb_merkle::HashAlgorithm;
+use golemdb_metering::{HostMeteringSchema, PricingConfig};
+use golemdb_pruning::PruningConfig;
 use golemdb_record::RecordLimits;
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +23,8 @@ pub struct Genesis {
     pub hash_function: HashAlgorithm,
     pub cell_limits: CellLimits,
     pub record_limits: RecordLimits,
+    /// Initial model 1 and explicit weights; missing weights remain unpriced.
+    pub metering: PricingConfig,
     /// None disables immutable storage. Some requires at least one segment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub immutable_data: Option<ImmutableDataConfig>,
@@ -32,12 +36,14 @@ impl Genesis {
         cell_limits: CellLimits,
         record_limits: RecordLimits,
         immutable_data: Option<ImmutableDataConfig>,
+        metering: PricingConfig,
     ) -> Self {
         Self {
             hash_function,
             cell_limits,
             record_limits,
             immutable_data,
+            metering,
         }
     }
 
@@ -79,6 +85,15 @@ impl Genesis {
                 "configured cells and engine rows need {value}-byte values; backend supports {max_value}"
             )));
         }
+        // Reserved pricing names are not subject to user-cell caps, but their
+        // actual encodings must fit this backend (including long host names).
+        for (key, value) in crate::genesis::pricing_cells(&self.metering) {
+            if key.encode().len() > max_key || value.encoded_bytes().len() > max_value {
+                return Err(OpenError::InvalidConfig(
+                    "metering cells exceed backend key/value limits".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -114,10 +129,14 @@ pub enum OpenMode {
 pub struct OpenConfig {
     pub genesis: Genesis,
     pub mode: OpenMode,
+    /// Local binary capabilities; names/versions, not persisted weight values.
+    pub host_schemas: Vec<HostMeteringSchema>,
     /// Local immutable-file directory; does not affect genesis identity.
     /// `Database::open` defaults to `<database>/immutable-data`. `from_store`
     /// requires an explicit directory when genesis declares immutable segments.
     pub immutable_data_directory: Option<PathBuf>,
+    /// Prune inside every commit with these settings; `None` turns pruning off.
+    pub pruning: Option<PruningConfig>,
 }
 
 impl OpenConfig {
@@ -125,7 +144,9 @@ impl OpenConfig {
         Self {
             genesis,
             mode: OpenMode::CreateIfMissing,
+            host_schemas: Vec::new(),
             immutable_data_directory: None,
+            pruning: None,
         }
     }
 
@@ -134,8 +155,19 @@ impl OpenConfig {
         self
     }
 
+    pub fn with_host_schemas(mut self, schemas: Vec<HostMeteringSchema>) -> Self {
+        self.host_schemas = schemas;
+        self
+    }
+
     pub fn with_immutable_data_directory(mut self, directory: impl AsRef<Path>) -> Self {
         self.immutable_data_directory = Some(directory.as_ref().to_path_buf());
+        self
+    }
+
+    /// Prune inside every commit with `pruning`.
+    pub const fn with_pruning(mut self, pruning: PruningConfig) -> Self {
+        self.pruning = Some(pruning);
         self
     }
 }

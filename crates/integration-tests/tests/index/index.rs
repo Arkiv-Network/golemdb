@@ -197,7 +197,8 @@ fn empty_singleton_branches_and_last_posting_removal() {
     assert_eq!(update.root, RootRef::Empty);
     assert_eq!(update.changed_terms[0].after, None);
     assert!(rows(&tx, tables::INDEX).is_empty());
-    assert!(!rows(&tx, tables::BITMAP_CONTAINER.table()).is_empty()); // immutable history retained
+    // Every write here is commit 0: rows it replaced are deleted, not kept as history.
+    assert!(rows(&tx, tables::BITMAP_CONTAINER.table()).is_empty());
 }
 
 #[test]
