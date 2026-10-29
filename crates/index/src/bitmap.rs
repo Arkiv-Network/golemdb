@@ -2,7 +2,13 @@ use std::ops::{BitAndAssign, BitOrAssign};
 
 use roaring::{MultiOps, RoaringTreemap};
 
-use crate::{BitmapContainer, BitmapError};
+use crate::{BitmapContainer, BitmapError, CHUNK_BITS};
+
+/// IDs per container from which Roaring stores a bitmap, not an array.
+const DENSE_SET: u64 = 4096;
+
+/// IDs per spanned container from which a batch merges in one multi-way union.
+const DENSE_UNION: u64 = 512;
 
 /// A materialized query bitmap assembled from storage chunks.
 ///
@@ -47,11 +53,36 @@ impl Bitmap {
         Ok(Self { values })
     }
 
-    /// The union of `bitmaps`.
-    pub fn union_all(bitmaps: impl IntoIterator<Item = Self>) -> Self {
-        Self {
-            values: bitmaps.into_iter().map(|bitmap| bitmap.values).union(),
+    /// Whether its containers are mostly bitmaps, which `|=` merges in place.
+    pub fn is_dense(&self) -> bool {
+        ids_per_container(self.values.len(), self.values.min(), self.values.max()) >= DENSE_SET
+    }
+
+    /// Add the union of `bitmaps`: in one multi-way union with this bitmap
+    /// when dense, otherwise one by one.
+    pub fn union_all(&mut self, bitmaps: Vec<Self>) {
+        let ids = bitmaps.iter().map(|bitmap| bitmap.values.len()).sum();
+        let min = bitmaps
+            .iter()
+            .filter_map(|bitmap| bitmap.values.min())
+            .min();
+        let max = bitmaps
+            .iter()
+            .filter_map(|bitmap| bitmap.values.max())
+            .max();
+        if ids_per_container(ids, min, max) < DENSE_UNION {
+            *self |= bitmaps
+                .into_iter()
+                .fold(Self::default(), |mut union, bitmap| {
+                    union |= bitmap;
+                    union
+                });
+            return;
         }
+        let current = std::mem::take(&mut self.values);
+        self.values = std::iter::once(current)
+            .chain(bitmaps.into_iter().map(|bitmap| bitmap.values))
+            .union();
     }
 
     pub fn treemap(&self) -> &RoaringTreemap {
@@ -86,6 +117,14 @@ impl BitOrAssign for Bitmap {
 impl BitAndAssign for Bitmap {
     fn bitand_assign(&mut self, other: Self) {
         self.values &= other.values;
+    }
+}
+
+/// `ids` per container spanned by `min..=max`; zero when empty.
+fn ids_per_container(ids: u64, min: Option<u64>, max: Option<u64>) -> u64 {
+    match (min, max) {
+        (Some(min), Some(max)) => ids / ((max >> CHUNK_BITS) - (min >> CHUNK_BITS) + 1),
+        _ => 0,
     }
 }
 

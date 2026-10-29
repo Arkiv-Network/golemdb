@@ -188,8 +188,9 @@ fn union_all_merges_containers_past_the_array_limit() {
     // Three overlapping sets whose union in container 0 exceeds 4096 IDs,
     // so it ends as a full bitmap rather than an array.
     let sets = [0..3000, 2000..5000, 4500..6000].map(bitmap_of);
-    let union = Bitmap::union_all(sets);
-    assert_eq!(union, bitmap_of(0..6000));
+    let mut union = bitmap_of([7000]);
+    union.union_all(sets.into());
+    assert_eq!(union, bitmap_of((0..6000).chain([7000])));
 }
 
 /// A bitmap of `ids`, assembled from containers as storage would.
@@ -273,7 +274,8 @@ proptest! {
     fn union_all_is_set_union(
         sets in prop::collection::vec(prop::collection::vec(shared_id(), 0..50), 0..40),
     ) {
-        let union = Bitmap::union_all(sets.iter().map(|ids| bitmap_of(ids.iter().copied())));
+        let mut union = Bitmap::default();
+        union.union_all(sets.iter().map(|ids| bitmap_of(ids.iter().copied())).collect());
         prop_assert_eq!(union, bitmap_of(sets.into_iter().flatten()));
     }
 
