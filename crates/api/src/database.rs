@@ -234,9 +234,9 @@ impl Api for Database {
     }
 }
 
-/// The most `And` / `Or` levels a query's filter may nest. Hardcoded for now:
-/// it will be read from genesis (`#maxQueryDepth`) in the scope of issues #48
-/// and #49.
+/// The most `And` / `Or` / `Not` levels a query's filter may nest. Hardcoded
+/// for now: it will be read from genesis (`#maxQueryDepth`) in the scope of
+/// issues #48 and #49.
 const MAX_QUERY_DEPTH: u32 = 64;
 
 /// The most records a query returns: a query with no limit that matches more

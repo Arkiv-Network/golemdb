@@ -1,9 +1,10 @@
-//! Filter semantics against a real database: which records `And` and `Or`
-//! trees match, over every kind of leaf, and which trees admission rejects.
+//! Filter semantics against a real database: which records `And`, `Or` and
+//! `Not` trees match, over every kind of leaf, and which trees admission
+//! rejects.
 
 mod support;
 
-use std::{collections::BTreeMap, ops::Bound};
+use std::{collections::BTreeMap, iter, ops::Bound};
 
 use golemdb_api::{ApiError, CellType, Filter, RecordKey};
 use golemdb_cells::CellValue;
@@ -102,6 +103,61 @@ fn every_kind_of_leaf_combines() {
         exists("color", None),
     ]);
     assert_eq!(test.keys(filter).unwrap(), [key(1), key(3)]);
+}
+
+fn not(filter: Filter) -> Filter {
+    Filter::Not(Box::new(filter))
+}
+
+#[test]
+fn not_keeps_the_records_its_child_does_not_match() {
+    let test = people();
+    // Adults who are not blue, including the one with no color.
+    let filter = Filter::And(vec![
+        range("age", Bound::Included(u32(18)), Bound::Unbounded),
+        not(eq("color", str("blue"))),
+    ]);
+    assert_eq!(test.keys(filter.clone()).unwrap(), [key(1), key(4)]);
+    assert_eq!(test.count(filter).unwrap(), 2);
+    // An age of another type matches no record, so its `Not` matches every one.
+    let filter = Filter::And(vec![exists("name", None), not(eq("age", str("30")))]);
+    assert_eq!(test.keys(filter).unwrap(), [key(1), key(2), key(3), key(4)]);
+    // Named "a…" with no color: both have one.
+    let filter = Filter::And(vec![prefix("name", "a"), not(exists("color", None))]);
+    assert!(test.keys(filter).unwrap().is_empty());
+    // Aged 30 and neither red nor blue.
+    let filter = Filter::And(vec![
+        eq("age", u32(30)),
+        not(is_in("color", [str("red"), str("blue")])),
+    ]);
+    assert_eq!(test.keys(filter).unwrap(), [key(4)]);
+}
+
+#[test]
+fn a_standalone_not_is_not_implemented() {
+    let test = people();
+    for filter in [
+        not(eq("color", str("blue"))),
+        Filter::Or(vec![eq("age", u32(30)), not(eq("color", str("blue")))]),
+        Filter::And(vec![not(eq("color", str("blue"))), eq("age", u32(30))]),
+    ] {
+        let not_implemented = |result| {
+            matches!(
+                result,
+                Err(ApiError::NotImplemented {
+                    operation: "query: standalone `Not`"
+                })
+            )
+        };
+        assert!(
+            not_implemented(test.keys(filter.clone()).map(drop)),
+            "{filter:?}"
+        );
+        assert!(
+            not_implemented(test.count(filter.clone()).map(drop)),
+            "{filter:?}"
+        );
+    }
 }
 
 #[test]
@@ -203,6 +259,7 @@ enum Tree {
     Exists(&'static str, Option<CellType>),
     And(Vec<Tree>),
     Or(Vec<Tree>),
+    Not(Box<Tree>),
 }
 
 impl Tree {
@@ -217,6 +274,7 @@ impl Tree {
             Self::Exists(field, ty) => exists(field, *ty),
             Self::And(children) => Filter::And(children.iter().map(Self::filter).collect()),
             Self::Or(children) => Filter::Or(children.iter().map(Self::filter).collect()),
+            Self::Not(child) => not(child.filter()),
         }
     }
 
@@ -238,6 +296,7 @@ impl Tree {
                 .is_some_and(|cell| ty.is_none_or(|ty| cell.cell_type() == ty)),
             Self::And(children) => children.iter().all(|child| child.matches(cells)),
             Self::Or(children) => children.iter().any(|child| child.matches(cells)),
+            Self::Not(child) => !child.matches(cells),
         }
     }
 }
@@ -259,11 +318,20 @@ fn leaf() -> impl Strategy<Value = Tree> {
 }
 
 /// Trees up to three levels of `And` / `Or` deep, each node with one to
-/// three children.
+/// three children. Each child of an `And` after its first may be under a
+/// `Not`, the one place a `Not` is admitted.
 fn tree() -> impl Strategy<Value = Tree> {
     leaf().prop_recursive(3, 24, 3, |inner| {
+        let further = (inner.clone(), any::<bool>()).prop_map(|(child, negated)| {
+            if negated {
+                Tree::Not(Box::new(child))
+            } else {
+                child
+            }
+        });
         prop_oneof![
-            prop::collection::vec(inner.clone(), 1..4).prop_map(Tree::And),
+            (inner.clone(), prop::collection::vec(further, 0..3))
+                .prop_map(|(first, rest)| Tree::And(iter::once(first).chain(rest).collect())),
             prop::collection::vec(inner, 1..4).prop_map(Tree::Or),
         ]
     })

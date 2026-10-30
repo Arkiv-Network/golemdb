@@ -1,4 +1,4 @@
-use std::ops::{BitAndAssign, BitOrAssign};
+use std::ops::{BitAndAssign, BitOrAssign, SubAssign};
 
 use roaring::RoaringTreemap;
 
@@ -8,7 +8,7 @@ use crate::{BitmapContainer, BitmapError};
 ///
 /// Owns the chunk-to-record-ID conversion, not storage or Merkle hashing.
 /// Set operations are operators on `Bitmap` (`|=` is union, `&=` is
-/// intersection), so callers need not name Roaring; [`Self::treemap`] reads
+/// intersection, `-=` is difference), so callers need not name Roaring; [`Self::treemap`] reads
 /// the record IDs, and [`Self::iter_skipping`] reads them past a rank. The
 /// default is the empty bitmap.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -81,6 +81,13 @@ impl BitAndAssign for Bitmap {
     }
 }
 
+/// Difference: `self` loses every record ID `other` holds.
+impl SubAssign for Bitmap {
+    fn sub_assign(&mut self, other: Self) {
+        self.values -= other.values;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -127,12 +134,36 @@ mod tests {
         prop::collection::btree_set(id, 0..100)
     }
 
+    #[test]
+    fn difference_drops_the_common_ids_across_containers() {
+        let mut difference = bitmap_of([1, 2, 1 << 40, u64::MAX]);
+        difference -= bitmap_of([2, 3, 1 << 40]);
+        assert_eq!(difference, bitmap_of([1, u64::MAX]));
+    }
+
+    #[test]
+    fn difference_with_the_empty_bitmap_keeps_or_stays_empty() {
+        let mut left = bitmap_of([7, 1 << 32]);
+        left -= Bitmap::default();
+        assert_eq!(left, bitmap_of([7, 1 << 32]));
+        let mut right = Bitmap::default();
+        right -= bitmap_of([7, 1 << 32]);
+        assert_eq!(right, Bitmap::default());
+    }
+
     proptest! {
         #[test]
         fn intersection_is_set_intersection(a in ids(), b in ids()) {
             let mut intersection = bitmap_of(a.iter().copied());
             intersection &= bitmap_of(b.iter().copied());
             prop_assert_eq!(intersection, bitmap_of(a.intersection(&b).copied()));
+        }
+
+        #[test]
+        fn difference_is_set_difference(a in ids(), b in ids()) {
+            let mut difference = bitmap_of(a.iter().copied());
+            difference -= bitmap_of(b.iter().copied());
+            prop_assert_eq!(difference, bitmap_of(a.difference(&b).copied()));
         }
     }
 

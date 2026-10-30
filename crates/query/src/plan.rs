@@ -25,20 +25,35 @@ pub(crate) enum Plan {
     /// A leaf no record can match, an `In` with no value or a `Range` whose
     /// bounds admit none: nothing is read.
     Empty,
-    /// The intersection of the children's match sets, evaluated in the
-    /// written order, `first` then `rest`, until the running set is empty.
-    And { first: Box<Plan>, rest: Vec<Plan> },
+    /// A running set that starts as `first`'s match set, then has each of
+    /// `rest` applied to it in the written order, until it is empty.
+    And {
+        first: Box<Plan>,
+        rest: Vec<AndChild>,
+    },
     /// The union of every child's match set, in the written order.
     Or { first: Box<Plan>, rest: Vec<Plan> },
+}
+
+/// A child of an `And` after its first: there is a running set to apply its
+/// match set to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AndChild {
+    /// The running set keeps only the child's matches.
+    Positive(Plan),
+    /// A `Not` child: the running set loses the matches of its own child.
+    Not(Plan),
 }
 
 impl Plan {
     /// Admission, depth-first and children left to right, so the first error
     /// in the written order is the one reported. Fails with
     /// [`QueryError::LimitExceeded`] on a node more than `max_depth` `And` /
-    /// `Or` levels deep (a leaf adds no level; `None` sets no cap), with
-    /// [`QueryError::InvalidQuery`] on an `And` or `Or` with no child, and
-    /// with [`QueryError::InvalidArgument`] on a leaf with a bad field name.
+    /// `Or` / `Not` levels deep (a leaf adds no level; `None` sets no cap),
+    /// with [`QueryError::InvalidQuery`] on an `And` or `Or` with no child,
+    /// with [`QueryError::NotImplemented`] on a standalone `Not`, one that is
+    /// not a child of an `And` after its first, and with
+    /// [`QueryError::InvalidArgument`] on a leaf with a bad field name.
     /// A leaf that admits no value is [`Plan::Empty`]. `Eq` values, `In`
     /// values, `Range` bounds and `Exists` types are of one indexable type
     /// by construction.
@@ -48,14 +63,15 @@ impl Plan {
 }
 
 /// One filter's admission, under its depth cap. Admission and evaluation
-/// recurse once per `And` / `Or` level, so the cap bounds their stack too: a
-/// node over it fails before admission goes any deeper.
+/// recurse once per `And` / `Or` / `Not` level, so the cap bounds their
+/// stack too: a node over it fails before admission goes any deeper.
 struct Admission {
     max_depth: Option<u32>,
 }
 
 impl Admission {
-    /// The plan of `filter`, with `depth` `And` / `Or` levels above it.
+    /// The plan of `filter`, with `depth` `And` / `Or` / `Not` levels above
+    /// it.
     fn plan(&self, filter: &Filter, depth: u32) -> Result<Plan> {
         match filter {
             Filter::Eq { field, value } => Ok(Plan::TermRead(term(field, value.as_cell())?)),
@@ -74,44 +90,74 @@ impl Admission {
                     .map_err(|source| invalid_argument(field, source))
             }
             Filter::And(children) => {
-                let (first, rest) =
-                    self.children(children, depth, "`And` needs at least one child")?;
+                let (first, rest) = self.children(
+                    children,
+                    depth,
+                    "`And` needs at least one child",
+                    Self::and_child,
+                )?;
                 Ok(Plan::And { first, rest })
             }
             Filter::Or(children) => {
                 let (first, rest) =
-                    self.children(children, depth, "`Or` needs at least one child")?;
+                    self.children(children, depth, "`Or` needs at least one child", Self::plan)?;
                 Ok(Plan::Or { first, rest })
+            }
+            // A `Not` after an `And`'s first child is admitted by `and_child`;
+            // here it has no running set to subtract from.
+            Filter::Not(_) => {
+                self.level(depth)?;
+                Err(QueryError::NotImplemented {
+                    operation: "query: standalone `Not`",
+                })
             }
         }
     }
 
     /// The plans of a node's `children`, in the written order: the first, and
-    /// the rest. The node adds one level to `depth`: over the cap, it fails
-    /// before anything else; with no child, it is an invalid query, reported
-    /// as `empty`.
-    fn children(
+    /// the rest, each planned by `further`. The node adds one level to
+    /// `depth`: over the cap, it fails before anything else; with no child,
+    /// it is an invalid query, reported as `empty`.
+    fn children<T>(
         &self,
         children: &[Filter],
         depth: u32,
         empty: &'static str,
-    ) -> Result<(Box<Plan>, Vec<Plan>)> {
-        let depth = depth + 1;
-        if let Some(max) = self.max_depth.filter(|&max| depth > max) {
-            return Err(QueryError::LimitExceeded {
-                limit: "filter depth",
-                max,
-            });
-        }
+        further: impl Fn(&Self, &Filter, u32) -> Result<T>,
+    ) -> Result<(Box<Plan>, Vec<T>)> {
+        let depth = self.level(depth)?;
         let [first, rest @ ..] = children else {
             return Err(QueryError::InvalidQuery { reason: empty });
         };
         let first = Box::new(self.plan(first, depth)?);
         let rest = rest
             .iter()
-            .map(|child| self.plan(child, depth))
+            .map(|child| further(self, child, depth))
             .collect::<Result<_>>()?;
         Ok((first, rest))
+    }
+
+    /// The plan of an `And`'s child after its first, with `depth` levels
+    /// above it: a `Not` is a level of its own over its child.
+    fn and_child(&self, filter: &Filter, depth: u32) -> Result<AndChild> {
+        let Filter::Not(child) = filter else {
+            return self.plan(filter, depth).map(AndChild::Positive);
+        };
+        let depth = self.level(depth)?;
+        self.plan(child, depth).map(AndChild::Not)
+    }
+
+    /// The depth below a node with `depth` levels above it, one more: over
+    /// the cap, the node fails as [`QueryError::LimitExceeded`].
+    fn level(&self, depth: u32) -> Result<u32> {
+        let depth = depth + 1;
+        match self.max_depth.filter(|&max| depth > max) {
+            Some(max) => Err(QueryError::LimitExceeded {
+                limit: "filter depth",
+                max,
+            }),
+            None => Ok(depth),
+        }
     }
 }
 
@@ -520,7 +566,10 @@ mod tests {
             plan_of(&and),
             Plan::And {
                 first: Box::new(plan_a.clone()),
-                rest: vec![plan_b.clone(), plan_c.clone()],
+                rest: vec![
+                    AndChild::Positive(plan_b.clone()),
+                    AndChild::Positive(plan_c.clone()),
+                ],
             }
         );
         let or = Filter::Or(vec![c, a]);
@@ -556,9 +605,92 @@ mod tests {
                     first: Box::new(plan_of(&a)),
                     rest: vec![plan_of(&b)],
                 }),
-                rest: vec![plan_of(&c)],
+                rest: vec![AndChild::Positive(plan_of(&c))],
             }
         );
+    }
+
+    fn not(filter: Filter) -> Filter {
+        Filter::Not(Box::new(filter))
+    }
+
+    #[test]
+    fn a_not_after_the_first_child_of_an_and_subtracts_its_child() {
+        let (a, b, c) = (eq_u32(b"a", 1), eq_u32(b"b", 2), eq_u32(b"c", 3));
+        let filter = Filter::And(vec![a.clone(), not(b.clone()), c.clone(), not(a.clone())]);
+        assert_eq!(
+            plan_of(&filter),
+            Plan::And {
+                first: Box::new(plan_of(&a)),
+                rest: vec![
+                    AndChild::Not(plan_of(&b)),
+                    AndChild::Positive(plan_of(&c)),
+                    AndChild::Not(plan_of(&a)),
+                ],
+            }
+        );
+        // The child of a `Not` is any filter with a plan of its own.
+        let or = Filter::Or(vec![b.clone(), c.clone()]);
+        let and = Filter::And(vec![b, not(c)]);
+        let filter = Filter::And(vec![a.clone(), not(or.clone()), not(and.clone())]);
+        assert_eq!(
+            plan_of(&filter),
+            Plan::And {
+                first: Box::new(plan_of(&a)),
+                rest: vec![AndChild::Not(plan_of(&or)), AndChild::Not(plan_of(&and))],
+            }
+        );
+    }
+
+    /// Whether `result` is the failure of a standalone `Not`.
+    fn standalone_not(result: &Result<Plan>) -> bool {
+        matches!(
+            result,
+            Err(QueryError::NotImplemented {
+                operation: "query: standalone `Not`"
+            })
+        )
+    }
+
+    #[test]
+    fn a_not_with_no_running_set_to_subtract_from_is_not_implemented() {
+        let (a, b) = (eq_u32(b"a", 1), eq_u32(b"b", 2));
+        for filter in [
+            not(a.clone()),
+            Filter::Or(vec![a.clone(), not(b.clone())]),
+            Filter::And(vec![not(a.clone()), b.clone()]),
+            Filter::And(vec![not(a.clone())]),
+            Filter::And(vec![a.clone(), not(not(b.clone()))]),
+            Filter::And(vec![
+                a.clone(),
+                not(Filter::And(vec![not(b.clone()), a.clone()])),
+            ]),
+            Filter::And(vec![a.clone(), Filter::Or(vec![b.clone(), not(a.clone())])]),
+        ] {
+            assert!(standalone_not(&admit(&filter)), "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn a_not_is_admitted_in_the_written_order() {
+        let (a, bad_name) = (eq_u32(b"a", 1), eq_u32(b"1bad", 1));
+        // A bad name under a `Not` is found as anywhere else.
+        let filter = Filter::And(vec![a.clone(), not(bad_name.clone())]);
+        assert!(matches!(
+            admit(&filter),
+            Err(QueryError::InvalidArgument { .. })
+        ));
+        // Whichever error is written first is the one reported.
+        let filter = Filter::And(vec![a.clone(), not(not(a.clone())), bad_name.clone()]);
+        assert!(standalone_not(&admit(&filter)));
+        let filter = Filter::And(vec![a.clone(), bad_name, not(not(a.clone()))]);
+        assert!(matches!(
+            admit(&filter),
+            Err(QueryError::InvalidArgument { .. })
+        ));
+        // A standalone `Not` fails before its child is looked at.
+        let filter = Filter::Or(vec![not(Filter::And(vec![]))]);
+        assert!(standalone_not(&admit(&filter)));
     }
 
     #[test]
@@ -655,6 +787,18 @@ mod tests {
                 "{uneven:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_not_is_a_level_of_its_own() {
+        let (a, b) = (eq_u32(b"a", 1), eq_u32(b"b", 2));
+        let filter = Filter::And(vec![a.clone(), not(b.clone())]);
+        Plan::admit(&filter, Some(2)).expect("two levels");
+        assert!(over_the_cap(&Plan::admit(&filter, Some(1)), 1));
+        // A standalone `Not` over the cap fails as any node there does.
+        let filter = Filter::Or(vec![not(b)]);
+        assert!(standalone_not(&Plan::admit(&filter, Some(2))));
+        assert!(over_the_cap(&Plan::admit(&filter, Some(1)), 1));
     }
 
     #[test]

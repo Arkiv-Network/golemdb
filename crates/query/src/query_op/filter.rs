@@ -6,12 +6,13 @@ use super::{Bounds, EqValue, ExistsType, InValues};
 
 /// A query's filter: plain data the caller builds, validated at admission.
 ///
-/// A tree of `And` and `Or` nodes over leaves. The written tree is the
-/// execution plan: nodes are evaluated depth-first, children left to right,
-/// so a condition shared by several branches is written, and read, once:
-/// `(a ∨ b) ∧ c` reads `c` a single time. How deep the tree nests is capped
-/// by the `max_query_depth` of the [`Queries`](crate::Queries) it runs on: a
-/// node more `And` / `Or` levels deep fails as `LimitExceeded` at admission.
+/// A tree of `And`, `Or` and `Not` nodes over leaves. The written tree is
+/// the execution plan: nodes are evaluated depth-first, children left to
+/// right, so a condition shared by several branches is written, and read,
+/// once: `(a ∨ b) ∧ c` reads `c` a single time. How deep the tree nests is
+/// capped by the `max_query_depth` of the [`Queries`](crate::Queries) it
+/// runs on: a node more `And` / `Or` / `Not` levels deep fails as
+/// `LimitExceeded` at admission.
 ///
 /// Leaves are typed by their values, the same `CellValue`s records are
 /// written with: a cell of another type under the same name is treated as
@@ -45,13 +46,20 @@ pub enum Filter {
         field: CellName,
         ty: Option<ExistsType>,
     },
-    /// Every child matches: the intersection of the children's match sets.
-    /// Children are evaluated in the written order, and once no record is
-    /// left, the remaining children are skipped and not read. At least one
-    /// child.
+    /// Every child matches: the intersection of the children's match sets,
+    /// less the match set under each `Not` child. Children are evaluated in
+    /// the written order, and once no record is left, the remaining children
+    /// are skipped and not read. At least one child.
     And(Vec<Filter>),
     /// Some child matches: the union of the children's match sets. Every
     /// child is evaluated, in the written order. At least one child.
     Or(Vec<Filter>),
-    // Not(Box<Filter>),
+    /// The child does not match. A record with no cell of the leaf's name,
+    /// or one of another type, matches a `Not` of that leaf: `Not` of
+    /// `color = "red"` keeps the records with no `color` attribute. For now
+    /// a `Not` is a child of an `And`, after a positive child: it subtracts
+    /// its child's match set from the running set. Anywhere else, standalone
+    /// it needs the set of all live records, and fails as `NotImplemented`
+    /// at admission.
+    Not(Box<Filter>),
 }

@@ -5,7 +5,11 @@ use std::iter;
 
 use golemdb_index::Bitmap;
 
-use crate::{QueryError, Result, plan::Plan, posting_source::PostingSource};
+use crate::{
+    QueryError, Result,
+    plan::{AndChild, Plan},
+    posting_source::PostingSource,
+};
 
 /// The match set of an admitted filter: the IDs of every matching record,
 /// ascending. Consumes the plan. Fails only when the source does.
@@ -15,11 +19,7 @@ pub(crate) fn match_set(source: &impl PostingSource, plan: Plan) -> Result<Bitma
         Plan::TermReads(terms) => union(terms.iter().map(|term| source.postings(term))),
         Plan::Scan(range) => union(source.scan(range)?),
         Plan::Empty => Ok(Bitmap::default()),
-        Plan::And { first, rest } => intersection(
-            iter::once(*first)
-                .chain(rest)
-                .map(|child| match_set(source, child)),
-        ),
+        Plan::And { first, rest } => and(source, *first, rest),
         Plan::Or { first, rest } => union(
             iter::once(*first)
                 .chain(rest)
@@ -28,18 +28,20 @@ pub(crate) fn match_set(source: &impl PostingSource, plan: Plan) -> Result<Bitma
     }
 }
 
-/// The intersection of `sets`, taken one after another in the order given:
-/// an `And`'s children as they are evaluated. Once the running set is
-/// empty, the remaining sets are not pulled: nothing of theirs is read. No
-/// sets at all intersect to the empty set; an `And` always has one.
-fn intersection<E>(mut sets: impl Iterator<Item = std::result::Result<Bitmap, E>>) -> Result<Bitmap>
-where
-    QueryError: From<E>,
-{
-    let mut running = sets.next().transpose()?.unwrap_or_default();
-    while !running.treemap().is_empty() {
-        let Some(set) = sets.next() else { break };
-        running &= set?;
+/// The match set of an `And`: the running set starts as `first`'s, then
+/// each of `rest`, in the order given, is intersected with it, or, a `Not`
+/// child, subtracted from it. Once the running set is empty, the remaining
+/// children are not evaluated: nothing of theirs is read.
+fn and(source: &impl PostingSource, first: Plan, rest: Vec<AndChild>) -> Result<Bitmap> {
+    let mut running = match_set(source, first)?;
+    for child in rest {
+        if running.treemap().is_empty() {
+            break;
+        }
+        match child {
+            AndChild::Positive(child) => running &= match_set(source, child)?,
+            AndChild::Not(child) => running -= match_set(source, child)?,
+        }
     }
     Ok(running)
 }
@@ -836,6 +838,117 @@ mod tests {
         );
     }
 
+    fn not(filter: Filter) -> Filter {
+        Filter::Not(Box::new(filter))
+    }
+
+    #[test]
+    fn a_not_child_drops_its_matches_from_the_running_set() {
+        let source = source_of([
+            ("a", &[1, 2, 3, 1 << 40][..]),
+            ("b", &[2, 1 << 40]),
+            ("c", &[3, 4]),
+        ]);
+        assert_eq!(
+            matches(&source, &and([is("a", 1), not(is("b", 1))])),
+            [1, 3]
+        );
+        // In the written order, among positive children.
+        assert_eq!(
+            matches(&source, &and([is("a", 1), not(is("b", 1)), is("c", 1)])),
+            [3]
+        );
+        assert!(matches(&source, &and([is("a", 1), is("c", 1), not(is("c", 1))])).is_empty());
+        // The `Not` of a child that matches nothing keeps the running set.
+        assert_eq!(
+            matches(&source, &and([is("a", 1), not(is("d", 1))])),
+            [1, 2, 3, 1 << 40]
+        );
+    }
+
+    #[test]
+    fn a_not_matches_absent_and_other_typed_cells() {
+        // Record 4 has no `b`; records 2 and 3 have one of another type.
+        let source = FakeSource::default()
+            .with("a", CellValue::from_u32(1), [1, 2, 3, 4])
+            .with("b", CellValue::from_u32(1), [1])
+            .with("b", CellValue::from_i32(1), [2])
+            .with("b", str("1"), [3]);
+        assert_eq!(ids(&source, and([is("a", 1), not(is("b", 1))])), [2, 3, 4]);
+    }
+
+    #[test]
+    fn a_not_subtracts_the_match_set_of_any_child() {
+        let source = source_of([("a", &[1, 2, 3, 4][..]), ("b", &[1, 2]), ("c", &[2, 3])]);
+        // a ∧ ¬(b ∨ c), a ∧ ¬(b ∧ c), and a ∧ ¬(b ∧ ¬c).
+        let b_or_c = or([is("b", 1), is("c", 1)]);
+        assert_eq!(matches(&source, &and([is("a", 1), not(b_or_c)])), [4]);
+        let b_and_c = and([is("b", 1), is("c", 1)]);
+        assert_eq!(
+            matches(&source, &and([is("a", 1), not(b_and_c)])),
+            [1, 3, 4]
+        );
+        let b_and_not_c = and([is("b", 1), not(is("c", 1))]);
+        assert_eq!(
+            matches(&source, &and([is("a", 1), not(b_and_not_c)])),
+            [2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn a_not_child_is_read_in_its_turn_while_records_are_left() {
+        let source = source_of([("a", &[1, 2][..]), ("b", &[1]), ("c", &[2]), ("d", &[2])]);
+        // a ∧ ¬b ∧ ¬(c ∨ d): ¬b leaves record 2, so c and d are read.
+        let filter = and([
+            is("a", 1),
+            not(is("b", 1)),
+            not(or([is("c", 1), is("d", 1)])),
+        ]);
+        assert!(matches(&source, &filter).is_empty());
+        assert_eq!(
+            *source.reads.borrow(),
+            [
+                term_of("a", 1),
+                term_of("b", 1),
+                term_of("c", 1),
+                term_of("d", 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn and_stops_reading_once_a_not_leaves_no_record() {
+        let source = source_of([("a", &[1][..]), ("b", &[1, 2]), ("c", &[1])]);
+        // a − b is empty: c and the `Not` after it are skipped.
+        let filter = and([is("a", 1), not(is("b", 1)), is("c", 1), not(is("c", 1))]);
+        assert!(matches(&source, &filter).is_empty());
+        assert_eq!(*source.reads.borrow(), [term_of("a", 1), term_of("b", 1)]);
+
+        // A `Not` after the running set is empty is not read.
+        source.reads.borrow_mut().clear();
+        assert!(matches(&source, &and([is("a", 1), is("c", 9), not(is("b", 1))])).is_empty());
+        assert_eq!(*source.reads.borrow(), [term_of("a", 1), term_of("c", 9)]);
+    }
+
+    #[test]
+    fn a_standalone_not_is_not_implemented_before_reading() {
+        // FailingSource would surface as QueryError::Internal if it were consulted.
+        for filter in [
+            not(is("a", 1)),
+            or([is("a", 1), not(is("b", 1))]),
+            and([not(is("a", 1)), is("b", 1)]),
+            and([is("a", 1), not(not(is("b", 1)))]),
+        ] {
+            assert!(
+                matches!(
+                    evaluate(&FailingSource, &filter),
+                    Err(QueryError::NotImplemented { .. })
+                ),
+                "{filter:?}"
+            );
+        }
+    }
+
     #[test]
     fn invalid_trees_are_rejected_before_reading() {
         // FailingSource would surface as QueryError::Internal if it were consulted.
@@ -867,11 +980,19 @@ mod tests {
             good: 0,
         };
         let scan = i32s(Bound::Unbounded, Bound::Included(i32::MAX));
-        for filter in [and([is("a", 1), scan.clone()]), or([is("a", 1), scan])] {
+        for filter in [
+            and([is("a", 1), scan.clone()]),
+            and([is("a", 1), not(scan.clone())]),
+            or([is("a", 1), scan]),
+        ] {
             let result = evaluate(&source, &filter);
             assert!(is_injected_failure(&result), "{filter:?}: {result:?}");
         }
-        for filter in [and([is("a", 1)]), or([is("a", 1)])] {
+        for filter in [
+            and([is("a", 1)]),
+            and([is("a", 1), not(is("b", 1))]),
+            or([is("a", 1)]),
+        ] {
             let result = evaluate(&FailingSource, &filter);
             assert!(is_injected_failure(&result), "{filter:?}: {result:?}");
         }

@@ -596,10 +596,12 @@ Retention/pruning, key expiry and digests remain deferred.
 
 Typed cells, record CRUD, branch lifecycle, atomic opening/genesis, and typed
 immutable data are implemented behind a cloneable `Database` with shared state.
-Queries support `Eq`, `In`, `Range`, `Prefix` and `Exists` filters, combined by `And` and `Or`
-trees, with full or projected records, and `count`. A filter nests at most 64 `And` / `Or`
-levels, a hardcoded cap until it is read from genesis; a deeper one returns
-`ApiError::LimitExceeded`. A query returns at most 100 records, the first matches in record ID
+Queries support `Eq`, `In`, `Range`, `Prefix` and `Exists` filters, combined by `And`, `Or` and
+`Not` trees, with full or projected records, and `count`. A `Not` child of an `And`, after its
+first child, removes its own child's matches from the `And`'s; a record whose cell is absent, or
+of another type, matches it. A standalone `Not`, anywhere else, needs the set of all live records
+and returns `ApiError::NotImplemented`. A filter nests at most 64 `And` / `Or` / `Not` levels, a
+hardcoded cap until it is read from genesis; a deeper one returns `ApiError::LimitExceeded`. A query returns at most 100 records, the first matches in record ID
 order, a hardcoded page size until it is read from genesis; `total_matched` and `count` still
 count every match. `limit(n)` returns at most `n` records: a `limit` of 0 returns
 `ApiError::InvalidQuery`, and one above the page size `ApiError::LimitExceeded`, whose `max` is

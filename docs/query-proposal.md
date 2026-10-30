@@ -343,7 +343,7 @@ Gaps against this proposal:
 | Step | Contents | Status |
 | --- | --- | --- |
 | Tree | `Filter`, `QueryOp`, `CountOp`, admission validation, caps | done except caps and the tree nodes |
-| Boolean | `And`, `Or`, `Not` inside `And`, `In` | `In` done |
+| Boolean | `And`, `Or`, `Not` inside `And`, `In` | done; standalone `Not` waits for P08 |
 | Scans | `Range`, `Prefix`, `Exists` over a typed run | `Range` done |
 | API | `query`, `count`, snapshot selection, record IDs → records, projection | done for the head |
 | Sort | multi-key, typed, absent below every value, record ID tie-break | done (fetch-and-sort); index walk open |
