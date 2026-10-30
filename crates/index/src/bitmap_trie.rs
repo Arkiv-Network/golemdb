@@ -30,13 +30,6 @@ impl<'a, H: HashProvider> BitmapTrie<'a, H> {
         }
     }
 
-    fn decode(&self, hash: Hash, bytes: &[u8]) -> Result<BitmapContainer> {
-        if self.hasher.hash_parts(&[&[BITMAP_LEAF_DOMAIN], bytes]) != hash {
-            return Err(IndexError::Corruption("container hash mismatch"));
-        }
-        Ok(BitmapContainer::decode(bytes)?)
-    }
-
     fn load(
         &self,
         tx: &impl ReadTransaction,
@@ -44,7 +37,7 @@ impl<'a, H: HashProvider> BitmapTrie<'a, H> {
     ) -> Result<BitmapContainer> {
         let bytes =
             (self.trie.payload(tx, leaf)?).ok_or(IndexError::Corruption("missing container"))?;
-        let container = self.decode(leaf.hash, &bytes)?;
+        let container = BitmapContainer::decode_leaf(&bytes, leaf.hash, self.hasher)?;
         if path::path_bytes(container.path())? != leaf.path {
             return Err(IndexError::Corruption(
                 "container path disagrees with leaf reference",
