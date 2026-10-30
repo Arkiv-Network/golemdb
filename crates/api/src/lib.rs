@@ -7,8 +7,8 @@
 //! [`Database`] implements Api on a cloneable handle with a shared branch registry.
 //! Its constructors initialize or validate genesis and select the configured hash.
 //! CRUD, query and count return [`Metered`] results on success and failure.
-//! CUD enforces budgets using committed prices and returns charged work on failure.
-//! Public reads remain unmetered and their budgets are not yet enforced.
+//! CRUD enforces budgets using committed prices and returns charged work on failure.
+//! Query and count remain unmetered and their budgets are not yet enforced.
 //! Current record storage supports branch reads and committed-head reads only.
 //! Immutable rows are staged on branches and read from committed storage, with
 //! named column projections and native typed access.

@@ -56,6 +56,19 @@ impl<R: ReadTransaction> ReadTransaction for Buffered<'_, R> {
             position: Position::Start(key.to_vec()),
         })
     }
+
+    fn with_value<T>(
+        &self,
+        table: Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> T,
+    ) -> Result<T> {
+        validate(table)?;
+        match self.writes.get(&table).and_then(|rows| rows.get(key)) {
+            Some(value) => Ok(inspect(value.as_deref())),
+            None => self.origin.with_value(table, key, inspect),
+        }
+    }
 }
 
 impl<R: ReadTransaction> WriteTransaction for Buffered<'_, R> {
@@ -172,5 +185,13 @@ impl<R: ReadTransaction> ReadCursor for BufferedCursor<'_, R> {
     }
     fn prev(&mut self) -> Result<Option<Entry>> {
         self.step(false)
+    }
+
+    fn with_next<T>(&mut self, _inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> T) -> Result<T> {
+        // Seal buffers are write-side adapters, not metered read snapshots.
+        // Refuse instead of silently copying before a caller's byte approval.
+        Err(StorageError::Backend(
+            "borrowed scans are unavailable on a seal buffer".into(),
+        ))
     }
 }

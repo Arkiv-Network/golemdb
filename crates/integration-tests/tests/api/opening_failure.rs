@@ -125,6 +125,18 @@ impl<W: ReadTransaction> ReadTransaction for ControlledWrite<W> {
         }
         self.inner.cursor(table, key)
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if matches!(self.fault, Fault::Read) {
+            return Err(injected());
+        }
+        self.inner.with_value(table, key, inspect)
+    }
 }
 
 impl<W> ControlledWrite<W> {

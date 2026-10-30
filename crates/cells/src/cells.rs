@@ -187,6 +187,16 @@ impl<'tx, R: ReadTransaction> CellReader<'tx, R> {
         read_value(self.tx, &key.encode())
     }
 
+    /// Borrow the encoded value before validation or allocation. The caller can
+    /// inspect its length and refuse further work without copying its payload.
+    pub fn with_encoded_value<T>(
+        &self,
+        key: &CellKey,
+        inspect: impl FnOnce(Option<&[u8]>) -> T,
+    ) -> Result<T> {
+        Ok(self.tx.with_value(tables::CELL, &key.encode(), inspect)?)
+    }
+
     /// Scan one record in name-byte order. Rows are owned; the iterator borrows
     /// the snapshot and preserves raw reserved-record names.
     pub fn scan_record(&self, record_id: u64) -> Result<CellScan<R::Cursor<'tx>>> {

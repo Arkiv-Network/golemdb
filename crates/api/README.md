@@ -111,12 +111,31 @@ CRUD, query and count return `Metered<T> { result, receipt }` on both success an
 failure. Read the receipt before propagating an error; `.into_result()?` explicitly
 discards it. `map` and `map_err` preserve the receipt.
 
-`receipt.cost` contains charged planning work and, on success, approved mutations.
-Public reads still cost zero. `receipt.priced_at` is the branch origin or
+`receipt.cost` contains charged read work, or write planning and approved mutations.
+`get` is metered; query and count still cost zero. `receipt.priced_at` is the branch origin or
 committed snapshot's head, including for rejected historical reads. Invalid handles
 and failures before selecting a snapshot have no pricing commit. `receipt.details`
 counts actual user-cell changes and encoded bytes; it excludes system cells,
 no-ops, failed writes and reads. Rollback does not revoke earlier receipts.
+
+`get` charges `read.admission.base`, then each supplied projection entry and its
+name bytes (duplicates included), `read.base`, and `read.key`. Distinct projected
+names cost `read.cell` each, including absent cells; found cells also pay `read.byte`
+on encoded key + tagged value size, before decoding/copying. An empty projection
+only resolves the binding. `#key` consistency is checked when that cell is returned.
+A full user record reads `#key` and `#meta` (two `read.cell`), then atomically charges
+`meta.cells * read.cell_scan + (meta.cell_bytes + 91) * read.byte` before scanning.
+Its metadata must be valid. A full reserved record has no `#meta`: it charges scan
+attempts and returned bytes incrementally. Attempts include the terminating probe,
+overlay-only entries (including tombstones), and origin rows even when shadowed.
+An overlay replacement shares the origin row's attempt. Reserved scan charges can
+therefore differ from a scan of the committed result; user scans skip hidden runs.
+Every failed read retains spent accounting and returns no partial record.
+
+Target selection still precedes admission: invalid handles and unavailable commits
+cost zero. The selected snapshot supplies both data and committed prices; staged
+weights are never used. Admission-before-snapshot ordering and `evaluated_at` remain
+deferred. No new public CRUD arguments or receipt fields are added.
 
 `receipt.ledger` contains charged units per weight name, in name order. It is
 separate from `details`: admission, reads and system mutations can be charged
@@ -136,9 +155,10 @@ Every request constructor requires `Budget::Limited(n)` or `Budget::Unlimited`:
 `RecordOp::create(key, budget)`, `patch(key, budget)`, `get(key, budget)`,
 `delete(key, budget)`, `QueryOp::from_filter(filter, budget)` and
 `CountOp::filter(filter, budget)`. Write budgets are checked before each planning
-step and against the full total before any mutation is applied. Read budgets remain unenforced
-and read ledgers empty. `OutOfBudget { required }` is used by the write meter for
-unfunded work; zero prices do not exhaust a budget. Unlimited use is an explicit host decision.
+step and against the full total before any mutation is applied. Get budgets are checked
+before each read step and before copying returned values; query/count budgets remain
+unenforced and their ledgers empty. `OutOfBudget { required }` reports unfunded work;
+zero prices do not exhaust a budget. Unlimited use is an explicit host decision.
 
 Early budget refusal, missing weights and arithmetic overflow report `required: None`.
 After complete planning, an insufficient budget reports `required: Some(total)`.
@@ -444,10 +464,10 @@ Each user record stores `#meta` as four big-endian `u64` counters in a `bytes32`
 field: `cells`, `cell_bytes`, `indexed_cells`, `index_bytes`. Metadata and receipt
 details use the same user effects and exclude system cells. Patches rewrite
 `#meta` only when a counter changes. Full reads and `.only(["#meta"])` include it.
-Reads return the stored cells without validating metadata. `Record::meta()` returns
-its decoded `RecordMeta`, or `None` if the cell is absent or malformed. Patch and
-delete validate metadata before using its counters: missing or malformed metadata,
-or counter underflow, returns `Internal` without repair.
+Projections return stored metadata. `Record::meta()` returns its decoded `RecordMeta`,
+or `None` if the cell is absent or malformed. Full `get`, patch and delete validate
+metadata before using its counters: missing or malformed metadata, or counter
+underflow, returns `Internal` without repair.
 
 Segment names match `[a-z][a-z0-9_]{0,63}` and are rejected rather than normalized
 when invalid. Column names use the cell user-name grammar, independently of the

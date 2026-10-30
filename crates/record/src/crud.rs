@@ -1,17 +1,17 @@
 use std::sync::Arc;
 
 use golemdb_branch::{BranchId, Branches, CellRead};
-use golemdb_cells::{CellKey, CellName, CellReader};
+use golemdb_cells::CellName;
 use golemdb_merkle::HashProvider;
-use golemdb_metering::{Accounting, Budget, WriteMeter};
-use golemdb_storage::{ReadTransaction, Store};
+use golemdb_metering::{Accounting, Budget, ReadMeter, WriteMeter};
+use golemdb_storage::Store;
 
 use crate::{
-    CreateEntry, Effects, Outcome, PatchEntry, ReadTarget, Record, RecordCells, RecordError,
-    RecordKey, Result, WritePricing, admission,
-    committed::{committed_snapshot, read_committed_by_key},
+    CreateEntry, Effects, Outcome, PatchEntry, ReadTarget, Record, RecordError, RecordKey, Result,
+    WritePricing, admission,
+    committed::committed_snapshot,
     plan::{self, WritePlan},
-    state,
+    read,
 };
 
 /// Record semantics over guarded branch views. Every operation requires an
@@ -20,14 +20,14 @@ use crate::{
 /// explicit zero weights preserve full accounting while keeping calls free.
 pub struct Records<S, H> {
     branches: Branches<S, H>,
-    write_pricing: Arc<WritePricing>,
+    pricing: Arc<WritePricing>,
 }
 
 impl<S, H> Clone for Records<S, H> {
     fn clone(&self) -> Self {
         Self {
             branches: self.branches.clone(),
-            write_pricing: self.write_pricing.clone(),
+            pricing: self.pricing.clone(),
         }
     }
 }
@@ -36,7 +36,7 @@ impl<S: Store, H: HashProvider> Records<S, H> {
     pub fn new(branches: Branches<S, H>, pricing: WritePricing) -> Self {
         Self {
             branches,
-            write_pricing: Arc::new(pricing),
+            pricing: Arc::new(pricing),
         }
     }
 
@@ -46,17 +46,22 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         target: ReadTarget,
         key: RecordKey,
         projection: Option<&[CellName]>,
-        _budget: Budget,
+        budget: Budget,
     ) -> Outcome<Record, RecordError> {
         let mut priced_at = None;
+        let mut accounting = Accounting::default();
+        let mut read = |origin: golemdb_branch::CommitId, reader: &CellRead<'_, S::Read<'_>>| {
+            let snapshot = self.pricing.provider.snapshot(origin.get())?;
+            priced_at = Some(origin);
+            let mut meter = ReadMeter::new(&snapshot.model.schedule, budget);
+            let result = read::get(reader, key, projection, &mut meter);
+            accounting = meter.into_accounting();
+            result
+        };
         let result = match target {
             ReadTarget::Branch(branch) => self
                 .branches
-                .read_with_origin(branch, |origin, reader| {
-                    priced_at = Some(origin);
-                    let projection = admission::projection(projection);
-                    read_branch_record(reader, key, projection.as_deref())
-                })
+                .read_with_origin(branch, &mut read)
                 .map_err(Into::into),
             target => {
                 let commit = match target {
@@ -64,11 +69,7 @@ impl<S: Store, H: HashProvider> Records<S, H> {
                     _ => None,
                 };
                 match committed_snapshot(self.branches.store(), commit) {
-                    Ok((tx, head)) => {
-                        priced_at = Some(head);
-                        let projection = admission::projection(projection);
-                        read_committed_by_key(&CellReader::new(&tx), key, projection.as_deref())
-                    }
+                    Ok((tx, head)) => read(head, &CellRead::committed(&tx)),
                     Err(error) => {
                         if let RecordError::CommitUnavailable { head, .. } = &error {
                             priced_at = Some(*head);
@@ -78,7 +79,7 @@ impl<S: Store, H: HashProvider> Records<S, H> {
                 }
             }
         };
-        Outcome::new(result, priced_at, Effects::default())
+        Outcome::new(result, priced_at, Effects::default()).with_accounting(accounting)
     }
 
     /// Admit and plan without writes, approve the complete cost, then apply.
@@ -148,7 +149,7 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         let result = self
             .branches
             .write_with_origin(branch, |origin, writer| {
-                let pricing = &self.write_pricing;
+                let pricing = &self.pricing;
                 // The branch guard has validated the origin against its storage snapshot.
                 // Record now captures cached pricing for that commit, before admission.
                 let snapshot = pricing.provider.snapshot(origin.get())?;
@@ -177,29 +178,4 @@ impl<S: Store, H: HashProvider> Records<S, H> {
             .map_err(Into::into);
         Outcome::new(result, priced_at, effects).with_accounting(accounting)
     }
-}
-
-fn read_branch_record<R: ReadTransaction>(
-    cell_reader: &CellRead<'_, R>,
-    key: RecordKey,
-    projection: Option<&[CellName]>,
-) -> Result<Record> {
-    let id = state::resolve(cell_reader, key)?.ok_or(RecordError::NotFound)?;
-    let mut values = RecordCells::new();
-    match projection {
-        Some(names) => {
-            for name in names {
-                if let Some(value) = cell_reader.get(&CellKey::new(id, name.clone()))? {
-                    values.insert(name.clone(), value);
-                }
-            }
-        }
-        None => {
-            for row in cell_reader.scan_prefix(&id.to_be_bytes())? {
-                let (address, value) = row?;
-                values.insert(address.name().into(), value);
-            }
-        }
-    }
-    Ok(Record { key, cells: values })
 }

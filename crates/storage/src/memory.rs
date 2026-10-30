@@ -93,6 +93,17 @@ impl ReadTransaction for MemoryReadTransaction {
         Ok(rows.and_then(|rows| rows.get(key)).cloned())
     }
 
+    fn with_value<T>(
+        &self,
+        table: Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> T,
+    ) -> Result<T> {
+        Ok(inspect(
+            rows(&self.state, table)?.and_then(|rows| rows.get(key).map(Vec::as_slice)),
+        ))
+    }
+
     fn cursor(&self, table: Table, key: &[u8]) -> Result<Self::Cursor<'_>> {
         Ok(MemoryCursor::new(rows(&self.state, table)?, key))
     }
@@ -107,6 +118,17 @@ impl ReadTransaction for MemoryWriteTransaction<'_> {
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let rows = rows(&self.state, table)?;
         Ok(rows.and_then(|rows| rows.get(key)).cloned())
+    }
+
+    fn with_value<T>(
+        &self,
+        table: Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> T,
+    ) -> Result<T> {
+        Ok(inspect(
+            rows(&self.state, table)?.and_then(|rows| rows.get(key).map(Vec::as_slice)),
+        ))
     }
 
     fn cursor(&self, table: Table, key: &[u8]) -> Result<Self::Cursor<'_>> {
@@ -207,8 +229,12 @@ impl<'tx> MemoryCursor<'tx> {
 
 impl ReadCursor for MemoryCursor<'_> {
     fn next(&mut self) -> Result<Option<Entry>> {
+        self.with_next(|row| row.map(|(key, value)| (key.to_vec(), value.to_vec())))
+    }
+
+    fn with_next<T>(&mut self, inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> T) -> Result<T> {
         let Some(rows) = self.rows else {
-            return Ok(None);
+            return Ok(inspect(None));
         };
         let row = match &self.position {
             Position::Before => rows.first_key_value(),
@@ -220,7 +246,10 @@ impl ReadCursor for MemoryCursor<'_> {
                 .next(),
             Position::After => None,
         };
-        Ok(self.position(row, Position::After))
+        self.position = row.map_or(Position::After, |(key, _)| Position::At(key.clone()));
+        Ok(inspect(
+            row.map(|(key, value)| (key.as_slice(), value.as_slice())),
+        ))
     }
 
     fn prev(&mut self) -> Result<Option<Entry>> {

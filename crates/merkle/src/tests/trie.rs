@@ -551,6 +551,19 @@ impl<T: ReadTransaction> ReadTransaction for Counted<T> {
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
         self.tx.cursor(table, key)
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        self.reads.set(self.reads.get() + 1);
+        if self.fail_reads {
+            return Err(injected_error());
+        }
+        self.tx.with_value(table, key, inspect)
+    }
 }
 impl<T: WriteTransaction> WriteTransaction for Counted<T> {
     fn insert(&mut self, t: Table, k: &[u8], v: &[u8]) -> golemdb_storage::Result<()> {

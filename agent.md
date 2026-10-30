@@ -305,9 +305,9 @@ There is no create `.insert()`. Patch also has `.remove()`. Operations implement
 `golemdb-query`. Query/count builders remain in the query crate; moving them into
 the API crate is deferred.
 
-`Metered<T>` holds a result and a receipt on every outcome. CUD costs use the
-committed pricing snapshot captured at the validated branch origin; read budgets remain
-unenforced. User effects exclude system cells, failed writes and
+`Metered<T>` holds a result and a receipt on every outcome. CRUD costs use the
+committed pricing snapshot captured at the selected origin/head; query/count budgets
+remain unenforced. User effects exclude system cells, failed writes and
 no-ops. `priced_at` comes from the same validated branch origin or committed snapshot
 as execution; unavailable history uses the captured head. Unknown/stale handles and
 sealed writes have no pricing snapshot. `.into_result()` explicitly drops a receipt;
@@ -326,7 +326,10 @@ always have a ledger keyed by `WeightName`, re-exported by API; failed effects s
 zero while charged work survives. Database writes use the same `Arc<PricingProvider>`
 as API inspection. Record captures a snapshot inside the branch guard before admission,
 with no extra head read or model scan. Missing-weight failures log the weight name.
-Read costs remain zero and their ledgers empty.
+`get` uses `ReadStep`/`ReadMeter`; query and count remain unmetered.
+Projected values are inspected through borrowed storage/cell callbacks before copying.
+Full user scans are prepaid from #meta; reserved scans charge per traversal attempt,
+including terminal probes and tombstones. Target selection remains before admission.
 Read `evaluated_at` changes are deferred.
 
 CUD executes one read-only `WritePlan` followed by approval and application under
@@ -435,7 +438,7 @@ activation commit from metering's metadata into `CommitId`. No diagnostics list 
 Weight maps and models are shared through Arc. Ordinary commits change the call's commit
 context but do not reread schedules. Runtime admin writes and activation refresh remain
 iteration 8; low-level price changes and any rewind require reopening/reloading. Public
-CUD enforces persisted prices and budgets; public read metering is deferred.
+CRUD enforces persisted prices and budgets; query metering remains deferred.
 
 ### Generated record keys and typed input conversion
 

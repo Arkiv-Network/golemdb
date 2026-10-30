@@ -5,9 +5,9 @@ use golemdb_metering::{INITIAL_DEPTHS, ModeledDepths, PricingProvider};
 
 use crate::RecordLimits;
 
-/// Immutable write configuration supplied by the owning connection layer.
-/// Limits and provider must match the initialized deployment. Each write captures
-/// the provider's snapshot at its validated branch origin before admission.
+/// Shared record pricing supplied by the owning connection layer.
+/// Limits and provider must match the initialized deployment. Each call captures
+/// the provider's snapshot at its selected commit before admission; depths apply only to writes.
 #[derive(Debug, Clone)]
 pub struct WritePricing {
     pub provider: Arc<PricingProvider>,

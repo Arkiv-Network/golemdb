@@ -21,6 +21,12 @@ fn pricing() -> WritePricing {
             Schedule::new(
                 WRITE_CODE_VERSION,
                 [
+                    (W::READ_ADMISSION_BASE, 0),
+                    (W::READ_ADMISSION_ENTRY, 0),
+                    (W::READ_ADMISSION_BYTE, 0),
+                    (W::READ_BASE, 0),
+                    (W::READ_CELL_SCAN, 0),
+                    (W::READ_BYTE, 0),
                     (W::WRITE_ADMISSION_BASE, 2),
                     (W::WRITE_ADMISSION_ENTRY, 1),
                     (W::WRITE_ADMISSION_BYTE, 1),
@@ -361,6 +367,7 @@ fn invalid_and_sealed_handles_have_no_accounting() {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Access {
     Get(Table, Vec<u8>),
+    Inspect(Table, Vec<u8>),
     Cursor(Table, Vec<u8>),
     Next(Table),
 }
@@ -414,6 +421,19 @@ impl<R: ReadTransaction> ReadTransaction for ObservedRead<R> {
             accesses: self.accesses.clone(),
         })
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        self.accesses
+            .lock()
+            .unwrap()
+            .push(Access::Inspect(table, key.to_vec()));
+        self.inner.with_value(table, key, inspect)
+    }
 }
 impl<C: ReadCursor> ReadCursor for ObservedCursor<C> {
     fn next(&mut self) -> golemdb_storage::Result<Option<Entry>> {
@@ -422,6 +442,14 @@ impl<C: ReadCursor> ReadCursor for ObservedCursor<C> {
     }
     fn prev(&mut self) -> golemdb_storage::Result<Option<Entry>> {
         self.inner.prev()
+    }
+
+    fn with_next<Output>(
+        &mut self,
+        inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        self.accesses.lock().unwrap().push(Access::Next(self.table));
+        self.inner.with_next(inspect)
     }
 }
 
@@ -702,4 +730,114 @@ fn empty_records_missing_records_and_zero_weights_have_defined_charges() {
         .delete(branch, KEY, Budget::Limited(0))
         .result
         .unwrap();
+}
+
+#[test]
+fn get_stops_before_unpaid_storage_work_and_skips_user_tombstone_runs() {
+    let (store, _, _) = crud_tests::setup();
+    let accesses = Arc::new(Mutex::new(Vec::new()));
+    let branches = Branches::new(
+        ObservedStore {
+            inner: store,
+            accesses: accesses.clone(),
+        },
+        Keccak256Hasher,
+        None,
+        None,
+    )
+    .unwrap();
+    let setup = Records::new(branches.clone(), crud_tests::zero_pricing());
+    let b = branches.begin().unwrap();
+    setup
+        .create(
+            b,
+            KEY,
+            (0..40)
+                .map(|i| {
+                    entry(
+                        format!("x{i:02}").as_bytes(),
+                        CellValue::from_u32(i),
+                        CellKind::Field,
+                    )
+                })
+                .collect(),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
+    branches.commit(b).unwrap();
+    let b = branches.begin().unwrap();
+    setup
+        .patch(
+            b,
+            KEY,
+            (0..39)
+                .map(|i| PatchEntry {
+                    name: CellNameRef::raw(format!("x{i:02}").as_bytes()).into(),
+                    change: PatchChange::Remove,
+                })
+                .collect(),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
+    let mut config = crud_tests::zero_pricing();
+    let mut weights = golemdb_metering::PricingConfig::zero().weights;
+    for name in ["read.key", "read.cell", "read.cell_scan", "read.byte"] {
+        weights.insert(name.into(), 1);
+    }
+    config.provider = crud_tests::pricing_provider(
+        Schedule::new(
+            WRITE_CODE_VERSION,
+            weights
+                .into_iter()
+                .map(|(name, price)| (name.into(), price)),
+        )
+        .unwrap(),
+    );
+    let records = Records::new(branches.clone(), config);
+    // The surviving x39 is committed; projections must use borrowed access.
+    let projection = [CellNameRef::raw(b"x39").into()];
+    for (budget, inspected) in [(1, false), (2, true)] {
+        accesses.lock().unwrap().clear();
+        let call = records.get(
+            ReadTarget::Branch(b),
+            KEY,
+            Some(&projection),
+            Budget::Limited(budget),
+        );
+        assert!(matches!(call.result, Err(RecordError::Metering(_))));
+        assert_eq!(call.accounting.cost, budget);
+        let access = accesses.lock().unwrap();
+        let cell = CellKey::new(64, CellNameRef::raw(b"x39")).encode();
+        assert_eq!(
+            access.contains(&Access::Inspect(golemdb_cells::tables::CELL, cell.clone())),
+            inspected
+        );
+        assert!(!access.contains(&Access::Get(golemdb_cells::tables::CELL, cell)));
+        assert_eq!(call.accounting.ledger.count("read.byte"), 0);
+    }
+    accesses.lock().unwrap().clear();
+    let refused = records.get(ReadTarget::Branch(b), KEY, None, Budget::Limited(3));
+    assert!(matches!(refused.result, Err(RecordError::Metering(_))));
+    assert!(
+        !accesses
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|a| matches!(a, Access::Cursor(_, _)))
+    );
+    accesses.lock().unwrap().clear();
+    let full = records.get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited);
+    assert_eq!(full.result.unwrap().cells.len(), 3);
+    assert_eq!(full.accounting.ledger.count("read.cell_scan"), 1);
+    assert!(
+        accesses
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| matches!(a, Access::Next(_)))
+            .count()
+            <= 2
+    );
 }
