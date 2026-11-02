@@ -52,7 +52,17 @@ fn canonical_bytes_masks_and_domain_preimages() {
     let mut payload = vec![3, 0xab, 0xc0, 0x60, 0, 0, 0];
     payload.extend([0x11; 32]);
     payload.extend([0x22; 32]);
-    assert_eq!(node.hash_payload(), payload);
+    assert_eq!(node.encode()[..payload.len()], payload);
+    let preimage = [&[TEST_BRANCH_DOMAIN][..], &payload];
+    assert_eq!(
+        node.hash(TEST_BRANCH_DOMAIN, &HASH),
+        HASH.hash_parts(&preimage)
+    );
+    let blake3 = crate::Blake3Hasher;
+    assert_eq!(
+        node.hash(TEST_BRANCH_DOMAIN, &blake3),
+        blake3.hash_parts(&preimage)
+    );
     assert_eq!(
         node.hash(TEST_BRANCH_DOMAIN, &HASH),
         [
@@ -275,7 +285,10 @@ fn child_commits_round_trip_unhashed_and_counts_are_strict() {
             node
         );
         // Commits locate rows; they are stored but never hashed.
-        assert_eq!(node.hash_payload(), branch_commits.hash_payload());
+        assert_eq!(
+            node.hash(TEST_BRANCH_DOMAIN, &HASH),
+            branch_commits.hash(TEST_BRANCH_DOMAIN, &HASH)
+        );
         assert_eq!(
             node.child(0),
             Some(RootRef::Branch(BranchRef {
