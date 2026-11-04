@@ -1143,8 +1143,8 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reth-fs-util"
-version = "2.1.0"
-source = "git+https://github.com/paradigmxyz/reth?rev=d58c6e3d0723a28f655e89da83c3738e47dcc364#d58c6e3d0723a28f655e89da83c3738e47dcc364"
+version = "2.7.0"
+source = "git+https://github.com/Arkiv-Network/reth?tag=custom-golemdb-v2.7.0-v1.0.1#d32fbafbfd425c582ede65f32fd5bf05b6c323b7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1153,8 +1153,8 @@ dependencies = [
 
 [[package]]
 name = "reth-nippy-jar"
-version = "2.1.0"
-source = "git+https://github.com/paradigmxyz/reth?rev=d58c6e3d0723a28f655e89da83c3738e47dcc364#d58c6e3d0723a28f655e89da83c3738e47dcc364"
+version = "2.7.0"
+source = "git+https://github.com/Arkiv-Network/reth?tag=custom-golemdb-v2.7.0-v1.0.1#d32fbafbfd425c582ede65f32fd5bf05b6c323b7"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1163,6 +1163,7 @@ dependencies = [
  "memmap2",
  "reth-fs-util",
  "serde",
+ "smallvec",
  "thiserror",
  "tracing",
  "zstd",
