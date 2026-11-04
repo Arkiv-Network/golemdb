@@ -1,7 +1,8 @@
-use crate::INDEX_LEAF_DOMAIN;
 use golemdb_cells::{CellNameRef, CellType, CellValueParseError, CellValueRef, FloatWidth};
 use golemdb_merkle::{Hash, HashProvider};
 use std::{error::Error, fmt};
+
+use crate::{HI48_BYTES, IndexError, PATH_BYTE_OFFSET, path};
 
 /// Canonical ordered index key: `name || 0x00 || attribute_tag || ordered_value`.
 ///
@@ -47,6 +48,7 @@ impl IndexTerm {
             _ => {} // Supported by prefix(): unsigned, bool, string, fixed bytes.
         }
         ty.validate(&ordered).map_err(TermError::Value)?;
+        check_str(ty, &ordered)?;
         bytes.extend_from_slice(&ordered);
         Ok(Self(bytes))
     }
@@ -66,6 +68,7 @@ impl IndexTerm {
     /// queries look a value up by name, type and value. The payload is already
     /// valid and order-encoded, so it is copied verbatim, as for `from_cell`.
     pub fn from_str_name(name: &str, value: CellValueRef<'_>) -> Result<Self, TermError> {
+        check_str(value.cell_type(), value.value())?;
         let mut bytes = Self::prefix(name, value.cell_type())?;
         bytes.extend_from_slice(value.value());
         Ok(Self(bytes))
@@ -116,6 +119,7 @@ impl IndexTerm {
         // Stored terms and cells share the same canonical ordered payload.
         // Validate it directly, without decoding/re-encoding native numbers.
         ty.validate(value).map_err(TermError::Value)?;
+        check_str(ty, value)?;
         Ok(Self(bytes.to_vec()))
     }
 
@@ -126,19 +130,104 @@ impl IndexTerm {
         self.0
     }
 
-    /// Full 32-byte IndexTrie routing path (the term itself has no hash domain).
+    /// The term's hash, which starts the index trie path of each of its
+    /// containers (the term itself has no hash domain).
     pub fn routing_path(&self, hasher: &impl HashProvider) -> Hash {
         hasher.hash(&self.0)
     }
 
-    /// `H(0x02 || complete_term_path || bitmap_root)`.
-    pub fn leaf_hash(&self, bitmap_root: &Hash, hasher: &impl HashProvider) -> Hash {
-        hasher.hash_parts(&[
-            &[INDEX_LEAF_DOMAIN],
-            &self.routing_path(hasher),
-            bitmap_root,
-        ])
+    /// The start of every container key of this term: the term, with a
+    /// variable-width value ended by `0x00`, which no such value holds. No other
+    /// term's key starts with it, and key order is term order.
+    pub fn key(&self) -> Vec<u8> {
+        key_bytes(&self.0)
     }
+
+    /// The longest container key of a term whose name has `name_len` bytes
+    /// and whose value has at most `value_len` bytes, or 32 if fixed-width:
+    /// a string's terminator, then `hi48`, follow the value.
+    pub const fn max_key_len(name_len: u64, value_len: u64) -> u64 {
+        let string = value_len + 1;
+        let value = if string > 32 { string } else { 32 };
+        name_len + 2 + value + crate::HI48_BYTES as u64
+    }
+
+    /// Split a container key into its term and the bytes after the term's
+    /// key, rejecting malformed and noncanonical terms.
+    pub fn split_key(key: &[u8]) -> Result<(Self, &[u8]), TermError> {
+        let bad = || TermError::InvalidEncoding;
+        let split = key.iter().position(|&b| b == 0).ok_or_else(bad)?;
+        let tag = *key.get(split + 1).ok_or_else(bad)?;
+        let start = split + 2;
+        let (raw, rest) = match value_width(tag) {
+            Some(width) => {
+                let end = start.checked_add(width).filter(|&end| end <= key.len());
+                let end = end.ok_or_else(bad)?;
+                (&key[..end], &key[end..])
+            }
+            None => {
+                let end = key.get(start..).ok_or_else(bad)?;
+                let end = start + end.iter().position(|&b| b == 0).ok_or_else(bad)?;
+                (&key[..end], &key[end + 1..])
+            }
+        };
+        Ok((Self::decode(raw)?, rest))
+    }
+}
+
+/// A container's `Index` key: its term's key ([`IndexTerm::key`]), then its
+/// `hi48`.
+pub(crate) struct IndexKey(Vec<u8>);
+
+impl IndexKey {
+    pub(crate) fn new(term_key: &[u8], container: u64) -> crate::Result<Self> {
+        Ok(Self([term_key, &path::path_bytes(container)?].concat()))
+    }
+
+    /// Split a stored key into its term and its container, rejecting a
+    /// malformed term or a suffix that is not a `hi48`.
+    pub(crate) fn split(key: &[u8]) -> crate::Result<(IndexTerm, u64)> {
+        let (term, suffix) = IndexTerm::split_key(key)?;
+        Ok((term, Self::container(suffix)?))
+    }
+
+    /// The container whose `hi48` is `suffix`, the bytes after a term's key.
+    pub(crate) fn container(suffix: &[u8]) -> crate::Result<u64> {
+        let suffix: [u8; HI48_BYTES] =
+            (suffix.try_into()).map_err(|_| IndexError::Corruption("malformed container key"))?;
+        let mut be = [0; 8];
+        be[PATH_BYTE_OFFSET..].copy_from_slice(&suffix);
+        Ok(u64::from_be_bytes(be))
+    }
+}
+
+impl AsRef<[u8]> for IndexKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// The width of the value after a type tag, or `None` for a variable width
+/// or an unknown tag.
+fn value_width(tag: u8) -> Option<usize> {
+    let ty = CellType::from_id(tag & 0x7f)
+        .ok()
+        .filter(|_| tag & 0x80 != 0)?;
+    ty.width()
+}
+
+/// Key bytes for a complete term: a variable-width value is followed by
+/// `0x00`. A string holds no `0x00`, so the key ends where its value does;
+/// order is unchanged.
+pub(crate) fn key_bytes(term: &[u8]) -> Vec<u8> {
+    let tag = term
+        .iter()
+        .position(|&b| b == 0)
+        .and_then(|split| term.get(split + 1));
+    if tag.and_then(|&tag| value_width(tag)).is_some() {
+        return term.to_vec();
+    }
+    [term, &[0]].concat()
 }
 
 /// A stored cell name as a term name: one that is not UTF-8 is
@@ -171,6 +260,14 @@ fn validate_name(name: &str) -> Result<(), TermError> {
             .all(|b| b.is_ascii_alphanumeric() || b"_-.:".contains(b))
     {
         return Err(TermError::InvalidName);
+    }
+    Ok(())
+}
+
+/// A `str` value holding `0x00`, which ends a string in a key, has no term.
+fn check_str(ty: CellType, value: &[u8]) -> Result<(), TermError> {
+    if ty == CellType::Str && value.contains(&0) {
+        return Err(TermError::Value(CellValueParseError::NulInAttribute));
     }
     Ok(())
 }

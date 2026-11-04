@@ -38,7 +38,8 @@ impl Plan {
     /// [`QueryError::LimitExceeded`] on a node more than `max_depth` `And` /
     /// `Or` levels deep (a leaf adds no level; `None` sets no cap), with
     /// [`QueryError::InvalidQuery`] on an `And` or `Or` with no child, and
-    /// with [`QueryError::InvalidArgument`] on a leaf with a bad field name.
+    /// with [`QueryError::InvalidArgument`] on a leaf with a bad field name or
+    /// a value no attribute can hold, such as a `str` with `0x00`.
     /// A leaf that admits no value is [`Plan::Empty`]. `Eq` values, `In`
     /// values, `Range` bounds and `Exists` types are of one indexable type
     /// by construction.
@@ -116,11 +117,11 @@ impl Admission {
 }
 
 /// The terms of `field` between the bounds, in the run of their type, as
-/// [`TermRange::between`] builds them: a bad field name fails as an `Eq`
-/// leaf's would. Two unbounded sides are the whole run. `None` when the
-/// bounds admit no value. The bounds are of one indexable type by
-/// construction, so a type with no term cannot occur here, and a type
-/// mismatch is a broken invariant, not the caller's error.
+/// [`TermRange::between`] builds them: a bad field name, or a bound no
+/// attribute can hold, fails as an `Eq` leaf's would. Two unbounded sides
+/// are the whole run. `None` when the bounds admit no value. The bounds are
+/// of one indexable type by construction, so a type with no term cannot occur
+/// here, and a type mismatch is a broken invariant, not the caller's error.
 fn range(field: &CellName, bounds: &Bounds) -> Result<Option<TermRange>> {
     TermRange::between(
         field.as_view(),

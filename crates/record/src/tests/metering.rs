@@ -492,15 +492,16 @@ fn admission_and_unfunded_reads_do_not_access_record_or_index_state() {
             vec![]
         };
         assert_eq!(cell_gets, expected, "budget {budget}");
-        let index_gets = calls
+        let index_seeks = calls
             .iter()
-            .filter(|call| matches!(call, Access::Get(Table("Index"), _)))
+            .filter(|call| matches!(call, Access::Cursor(Table("Index"), _)))
             .count();
-        assert_eq!(index_gets, usize::from(budget >= 24), "budget {budget}");
-        assert!(!calls.iter().any(|call| matches!(
-            call,
-            Access::Get(Table("BitmapContainer" | "BitmapTrie"), _)
-        )));
+        assert_eq!(index_seeks, usize::from(budget >= 24), "budget {budget}");
+        assert!(
+            !calls
+                .iter()
+                .any(|call| matches!(call, Access::Get(Table("Index" | "IndexTrie"), _)))
+        );
         // Success and final refusal perform exactly the same planning reads;
         // application itself adds no physical reads.
     }

@@ -10,7 +10,7 @@ use golemdb_api::{
     Api, ApiError, CellNameRef, EqValue, Filter, RecordOp,
     marker::{Date32, Dec32, I32},
 };
-use golemdb_cells::CellValue;
+use golemdb_cells::{CellValue, CellValueParseError};
 use golemdb_index::TermError;
 use proptest::prelude::*;
 use support::{TestDb, eq, key, record, small_value};
@@ -254,6 +254,19 @@ fn invalid_arguments_are_errors_not_empty_results() {
     assert_eq!(
         source.downcast_ref::<TermError>(),
         Some(&TermError::InvalidName)
+    );
+    // No attribute holds a str with 0x00.
+    let nul = test.keys(eq("f", CellValue::from_str("a\0")));
+    let Err(ApiError::InvalidArgument {
+        source: Some(source),
+        ..
+    }) = &nul
+    else {
+        panic!("expected InvalidArgument, got {nul:?}");
+    };
+    assert_eq!(
+        source.downcast_ref::<TermError>().copied(),
+        Some(TermError::Value(CellValueParseError::NulInAttribute))
     );
 }
 
