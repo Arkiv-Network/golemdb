@@ -25,6 +25,9 @@ pub struct Genesis {
     pub record_limits: RecordLimits,
     /// Initial model 1 and explicit weights; missing weights remain unpriced.
     pub metering: PricingConfig,
+    /// Commits every database of the deployment retains before the head,
+    /// `#minRetention`; a pruning window below it is refused.
+    pub min_retention: u64,
     /// None disables immutable storage. Some requires at least one segment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub immutable_data: Option<ImmutableDataConfig>,
@@ -37,6 +40,7 @@ impl Genesis {
         record_limits: RecordLimits,
         immutable_data: Option<ImmutableDataConfig>,
         metering: PricingConfig,
+        min_retention: u64,
     ) -> Self {
         Self {
             hash_function,
@@ -44,6 +48,7 @@ impl Genesis {
             record_limits,
             immutable_data,
             metering,
+            min_retention,
         }
     }
 
@@ -135,8 +140,21 @@ pub struct OpenConfig {
     /// `Database::open` defaults to `<database>/immutable-data`. `from_store`
     /// requires an explicit directory when genesis declares immutable segments.
     pub immutable_data_directory: Option<PathBuf>,
-    /// Prune inside every commit with these settings; `None` turns pruning off.
-    pub pruning: Option<PruningConfig>,
+    /// Local pruning behaviour.
+    pub pruning: Pruning,
+}
+
+/// Pruning behaviour.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Pruning {
+    /// Keep the genesis minimum, `#minRetention` commits.
+    #[default]
+    MinRetention,
+    /// Keep these settings' window, at least `#minRetention` commits.
+    Custom(PruningConfig),
+    /// Keep every commit.
+    Off,
 }
 
 impl OpenConfig {
@@ -146,7 +164,7 @@ impl OpenConfig {
             mode: OpenMode::CreateIfMissing,
             host_schemas: Vec::new(),
             immutable_data_directory: None,
-            pruning: None,
+            pruning: Pruning::MinRetention,
         }
     }
 
@@ -165,9 +183,16 @@ impl OpenConfig {
         self
     }
 
-    /// Prune inside every commit with `pruning`.
+    /// Keep `pruning`'s window of commits before the head. Opening fails with
+    /// [`OpenError::InvalidConfig`] if it is below `#minRetention`.
     pub const fn with_pruning(mut self, pruning: PruningConfig) -> Self {
-        self.pruning = Some(pruning);
+        self.pruning = Pruning::Custom(pruning);
+        self
+    }
+
+    /// Keep every commit; see [`Pruning::Off`].
+    pub const fn without_pruning(mut self) -> Self {
+        self.pruning = Pruning::Off;
         self
     }
 }

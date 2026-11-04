@@ -555,6 +555,7 @@ fn paused_database() -> (Database, PausingStore) {
         },
         None,
         golemdb_api::PricingConfig::zero(),
+        100,
     ));
     let db = Database::from_store(store.clone(), &config).unwrap();
     (db, store)

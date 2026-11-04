@@ -25,6 +25,7 @@ fn config(hash: HashAlgorithm) -> OpenConfig {
         },
         None,
         pricing,
+        100,
     ))
     .with_host_schemas(vec![HostMeteringSchema {
         code_version: 7,

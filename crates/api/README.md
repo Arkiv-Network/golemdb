@@ -34,6 +34,8 @@ let config = OpenConfig::new(Genesis::new(
     },
     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
     None,
+    golemdb_api::PricingConfig::zero(),
+    100,
 ));
 let db = Database::open("./golemdb-quickstart", &config)?;
 let branch = db.begin()?;
@@ -223,6 +225,8 @@ let config = OpenConfig::new(Genesis::new(
     },
     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
     None,
+    golemdb_api::PricingConfig::zero(),
+    100,
 ))
 .with_mode(OpenMode::CreateNew);
 let db = Database::open("./golemdb-empty-records", &config)?;
@@ -283,6 +287,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
         None,
+        golemdb_api::PricingConfig::zero(),
+        100,
     ))
     .with_mode(OpenMode::CreateNew);
     let db = Database::open("./golemdb-catalogue", &config)?;
@@ -439,6 +445,7 @@ cell_limits:
 record_limits:
   max_cells: 100
   max_indexed_cells: 100
+min_retention: 1000
 immutable_data:
   shard_span: 500000
   segments:
@@ -456,9 +463,9 @@ defaults to `bytes`. Duplicate and unknown fields are rejected.
 Use `Genesis::load(path)` or `Genesis::from_yaml(text)`; the loader
 does not search for files or read environment overrides.
 
-Typed construction uses `Genesis::new(hash, cell_limits, record_limits, None)` to disable
-immutable data, or `Genesis::new(hash, cell_limits, record_limits,
-Some(ImmutableDataConfig::new(shard_span, segments)))` to enable it. These
+Typed construction uses `Genesis::new(hash, cell_limits, record_limits, None, metering,
+min_retention)` to disable immutable data, or `Genesis::new(hash, cell_limits, record_limits,
+Some(ImmutableDataConfig::new(shard_span, segments)), metering, min_retention)` to enable it. These
 configuration types own their declarations and implement `Clone`, not `Copy`.
 
 `RecordLimits { max_cells, max_indexed_cells }` contains explicit `u64` caps,
@@ -534,6 +541,11 @@ Pristine means no tables or rows. A pre-existing empty directory is allowed for
 creation. Tables without a head, including empty or foreign tables, are rejected
 as incomplete state. `ExistingOnly` never writes genesis or creates a missing
 directory; opening an existing empty directory can create MDBX environment files.
+
+Pruning is a local setting outside genesis identity. By default a database prunes to
+`#minRetention` commits before the head. `OpenConfig::with_pruning(PruningConfig::new(window))`
+keeps a larger window, and opening fails with `InvalidConfig` if it is below `#minRetention`.
+`OpenConfig::without_pruning()` keeps every commit from then on.
 
 All detection, validation, and initialization occurs under one storage writer.
 Creation writes the fixed reserved-record catalogue from cells, identities and
@@ -618,7 +630,8 @@ identity. `Genesis::immutable_data: None` disables immutable storage and creates
 Close all database clones before reopening the same immutable directory.
 Startup recovers unpublished tails against durable commit metadata.
 
-Retention/pruning, key expiry and digests remain deferred.
+Pruning of history and immutable data, retention reporting, key expiry and digests
+remain deferred.
 
 ## Current scope
 
