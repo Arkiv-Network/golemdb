@@ -302,8 +302,11 @@ There is no create `.insert()`. Patch also has `.remove()`. Operations implement
 `Clone`, `PartialEq`, and `Eq`.
 
 `Budget` is defined in `golemdb-metering` and re-exported by both `golemdb-api` and
-`golemdb-query`. Query/count builders remain in the query crate; moving them into
-the API crate is deferred.
+`golemdb-query`. API owns `QueryOp` and `CountOp`, as it owns `RecordOp`.
+`QueryOp` wraps a query-owned `QueryRequest` and a separate budget; `CountOp`
+holds a filter and budget. API unwraps these into query execution arguments.
+Query owns the filter and typed operands, sort keys, result pages, admission
+and execution. Query projections keep their existing builder normalization.
 
 `Metered<T>` holds a result and a receipt on every outcome. CRUD costs use the
 committed pricing snapshot captured at the selected origin/head; query/count budgets

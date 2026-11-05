@@ -151,6 +151,14 @@ failure. Write admission enforces genesis-configured cell lengths;
 planning enforces the resulting per-record cell caps. There are no additional
 request-entry or total-input-byte caps.
 
+API owns the `RecordOp`, `QueryOp` and `CountOp` builders. Query execution accepts
+a `golemdb_query::QueryRequest` and a separate budget; count execution accepts a
+filter and budget. Filters, typed operands, sort keys and result pages remain in
+the query crate and are re-exported by API. `QueryOp::request()` and
+`CountOp::predicate()` expose the inputs for inspection; `requested_budget()`
+exposes either query/count operation's budget. Their fields are private, so use
+the fluent methods instead of struct literals or direct field mutation.
+
 Every request constructor requires `Budget::Limited(n)` or `Budget::Unlimited`:
 `RecordOp::create(key, budget)`, `patch(key, budget)`, `get(key, budget)`,
 `delete(key, budget)`, `QueryOp::from_filter(filter, budget)` and

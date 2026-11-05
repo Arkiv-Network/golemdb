@@ -11,7 +11,7 @@ use golemdb_branch::{BranchError, Branches};
 use golemdb_cells::system::FIRST_USER_RECORD_ID;
 use golemdb_cells::{CellKey, CellValue, reserved};
 use golemdb_merkle::Keccak256Hasher;
-use golemdb_query::{FetchAndSort, Queries, QueryError};
+use golemdb_query::{FetchAndSort, Queries, QueryError, QueryRequest};
 use golemdb_record::RecordError;
 use golemdb_storage::MemoryStore;
 use support::{TestDb, eq, key, range, record};
@@ -407,7 +407,10 @@ fn offsets_page_through_every_match() {
     let page = |offset, limit: Option<u64>| {
         let op =
             QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX)).offset(offset);
-        let op = QueryOp { limit, ..op };
+        let op = match limit {
+            Some(limit) => op.limit(limit),
+            None => op,
+        };
         keys_and_total(test.db.query(None, op).into_result().unwrap()).0
     };
     for (limit, size) in [
@@ -455,7 +458,7 @@ fn five_blue_records() -> (MemoryStore, Vec<RecordKey>) {
 fn blue_page(
     store: &MemoryStore,
     max_query_limit: Option<u32>,
-    paging: impl FnOnce(QueryOp) -> QueryOp,
+    paging: impl FnOnce(QueryRequest) -> QueryRequest,
 ) -> golemdb_query::Result<(Vec<RecordKey>, Option<u64>)> {
     let queries = Queries::new(
         store.clone(),
@@ -465,8 +468,17 @@ fn blue_page(
         None,
         FetchAndSort,
     );
-    let op = QueryOp::from_filter(eq("color", blue()), Budget::Limited(u64::MAX)).with_total();
-    queries.query(None, paging(op)).map(keys_and_total)
+    let request = QueryRequest {
+        filter: eq("color", blue()),
+        sort: vec![],
+        projection: None,
+        limit: None,
+        offset: None,
+        with_total: true,
+    };
+    queries
+        .query(None, paging(request), Budget::Limited(u64::MAX))
+        .map(keys_and_total)
 }
 
 #[test]
@@ -481,14 +493,23 @@ fn the_page_size_is_set_when_queries_are_built() {
 
     // A count returns no records: the page size plays no part.
     let queries = Queries::new(store, Keccak256Hasher, None, Some(1), None, FetchAndSort);
-    let count = CountOp::filter(eq("color", blue()), Budget::Limited(u64::MAX));
-    assert_eq!(queries.count(None, count).unwrap(), 5);
+    assert_eq!(
+        queries
+            .count(None, eq("color", blue()), Budget::Limited(u64::MAX))
+            .unwrap(),
+        5
+    );
 }
 
 #[test]
 fn a_limit_holds_up_to_the_page_size_of_its_queries() {
     let (store, keys) = five_blue_records();
-    let page = |max_query_limit, limit| blue_page(&store, max_query_limit, |op| op.limit(limit));
+    let page = |max_query_limit, limit| {
+        blue_page(&store, max_query_limit, |request| QueryRequest {
+            limit: Some(limit),
+            ..request
+        })
+    };
     assert_eq!(page(Some(3), 2).unwrap(), (keys[..2].to_vec(), Some(5)));
     assert_eq!(page(Some(3), 3).unwrap(), (keys[..3].to_vec(), Some(5)));
     assert_eq!(page(Some(10), 8).unwrap(), (keys.clone(), Some(5)));
@@ -523,28 +544,52 @@ fn a_limit_holds_up_to_the_page_size_of_its_queries() {
 #[test]
 fn an_offset_starts_the_page_of_its_queries() {
     let (store, keys) = five_blue_records();
-    let page = |max_query_limit, paging: fn(QueryOp) -> QueryOp| {
+    let page = |max_query_limit, paging: fn(QueryRequest) -> QueryRequest| {
         blue_page(&store, max_query_limit, paging)
     };
     // With no page size, the page holds every match past the offset.
     assert_eq!(
-        page(None, |op| op.offset(2)).unwrap(),
+        page(None, |request| QueryRequest {
+            offset: Some(2),
+            ..request
+        })
+        .unwrap(),
         (keys[2..].to_vec(), Some(5))
     );
     // With one, it holds up to the page size, or up to the limit.
     assert_eq!(
-        page(Some(3), |op| op.offset(1)).unwrap(),
+        page(Some(3), |request| QueryRequest {
+            offset: Some(1),
+            ..request
+        })
+        .unwrap(),
         (keys[1..4].to_vec(), Some(5))
     );
     assert_eq!(
-        page(Some(3), |op| op.offset(4)).unwrap(),
+        page(Some(3), |request| QueryRequest {
+            offset: Some(4),
+            ..request
+        })
+        .unwrap(),
         (keys[4..].to_vec(), Some(5))
     );
     assert_eq!(
-        page(Some(3), |op| op.offset(1).limit(2)).unwrap(),
+        page(Some(3), |request| QueryRequest {
+            offset: Some(1),
+            limit: Some(2),
+            ..request
+        })
+        .unwrap(),
         (keys[1..3].to_vec(), Some(5))
     );
-    assert_eq!(page(Some(3), |op| op.offset(5)).unwrap(), (vec![], Some(5)));
+    assert_eq!(
+        page(Some(3), |request| QueryRequest {
+            offset: Some(5),
+            ..request
+        })
+        .unwrap(),
+        (vec![], Some(5))
+    );
 }
 
 #[test]
