@@ -24,8 +24,8 @@ use golemdb_record::{Effects, Outcome, RecordError, committed_snapshot, read_com
 use golemdb_storage::Store;
 
 use crate::{
-    CountOp, FetchAndSort, QueryError, QueryOp, QueryPage, Result, SortPlan, SortingStrategy,
-    Window, eval::match_set, plan::Plan, posting_source::IndexSource,
+    Budget, FetchAndSort, Filter, QueryError, QueryPage, QueryRequest, Result, SortPlan,
+    SortingStrategy, Window, eval::match_set, plan::Plan, posting_source::IndexSource,
 };
 
 /// Query facade over the committed state of a store. Pending branch work is
@@ -79,7 +79,7 @@ impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
         }
     }
 
-    /// The records matching `op`'s filter at `commit` (`None` for the head),
+    /// The records matching `request`'s filter at `commit` (`None` for the head),
     /// in query order, projected as `get` projects: past the first `offset`
     /// of them, the first `limit`, or with no limit the first
     /// `max_query_limit`, while `total_matched` counts every match. Query
@@ -91,25 +91,31 @@ impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
     /// above `max_query_limit`, or more sort keys than `max_sort_keys`, as
     /// [`QueryError::LimitExceeded`]. The budget is not enforced yet. Use
     /// [`Self::query_report`] to retain the execution context on failure.
-    pub fn query(&self, commit: Option<CommitId>, op: QueryOp) -> Result<QueryPage> {
-        self.query_report(commit, op).result
+    pub fn query(
+        &self,
+        commit: Option<CommitId>,
+        request: QueryRequest,
+        budget: Budget,
+    ) -> Result<QueryPage> {
+        self.query_report(commit, request, budget).result
     }
 
     /// Execute [`Self::query`] while retaining its pricing commit for receipts.
     pub fn query_report(
         &self,
         commit: Option<CommitId>,
-        op: QueryOp,
+        request: QueryRequest,
+        _budget: Budget,
     ) -> Outcome<QueryPage, QueryError> {
         self.read_report(commit, |snapshot, head| {
-            let page_size = page_size(op.limit, self.max_query_limit)?;
-            let plan = Plan::admit(&op.filter, self.max_query_depth)?;
-            let sort = SortPlan::admit(&op.sort, self.max_sort_keys)?;
+            let page_size = page_size(request.limit, self.max_query_limit)?;
+            let plan = Plan::admit(&request.filter, self.max_query_depth)?;
+            let sort = SortPlan::admit(&request.sort, self.max_sort_keys)?;
             let index = Index::new(&self.hasher);
             let postings = IndexSource::new(&index, snapshot);
             let matches = match_set(&postings, plan)?;
             let cells = CellReader::new(snapshot);
-            let offset = op.offset.unwrap_or(0);
+            let offset = request.offset.unwrap_or(0);
             let ids = match &sort {
                 None => matches.iter_skipping(offset).take(page_size).collect(),
                 Some(sort) => {
@@ -120,11 +126,11 @@ impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
             };
             let records = ids
                 .into_iter()
-                .map(|id| read_committed_by_id(&cells, id, op.projection.as_deref()))
+                .map(|id| read_committed_by_id(&cells, id, request.projection.as_deref()))
                 .collect::<golemdb_record::Result<_>>()?;
             Ok(QueryPage {
                 records,
-                total_matched: op.with_total.then(|| matches.treemap().len()),
+                total_matched: request.with_total.then(|| matches.treemap().len()),
                 evaluated_at: head,
             })
         })
@@ -133,14 +139,19 @@ impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
     /// The size of the filter's match set at `commit` (`None` for the head),
     /// which `max_query_limit` does not cap. The budget is not enforced yet.
     /// Use [`Self::count_report`] to retain the execution context on failure.
-    pub fn count(&self, commit: Option<CommitId>, op: CountOp) -> Result<u64> {
-        self.count_report(commit, op).result
+    pub fn count(&self, commit: Option<CommitId>, filter: Filter, budget: Budget) -> Result<u64> {
+        self.count_report(commit, filter, budget).result
     }
 
     /// Execute [`Self::count`] while retaining its pricing commit for receipts.
-    pub fn count_report(&self, commit: Option<CommitId>, op: CountOp) -> Outcome<u64, QueryError> {
+    pub fn count_report(
+        &self,
+        commit: Option<CommitId>,
+        filter: Filter,
+        _budget: Budget,
+    ) -> Outcome<u64, QueryError> {
         self.read_report(commit, |snapshot, _| {
-            let plan = Plan::admit(&op.filter, self.max_query_depth)?;
+            let plan = Plan::admit(&filter, self.max_query_depth)?;
             let index = Index::new(&self.hasher);
             Ok(match_set(&IndexSource::new(&index, snapshot), plan)?
                 .treemap()

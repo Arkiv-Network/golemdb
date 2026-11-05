@@ -29,7 +29,7 @@ So sorting becomes a strategy. `SortingStrategy` is an abstract interface, and t
 
 ## 1. Typed `SortKey`
 
-File: [crates/query/src/query_op/sort.rs](../crates/query/src/query_op/sort.rs). Follow the pattern of [exists_type.rs](../crates/query/src/query_op/exists_type.rs).
+File: [crates/query/src/model/sort.rs](../crates/query/src/model/sort.rs). Follow the pattern of [exists_type.rs](../crates/query/src/model/exists_type.rs).
 
 - Fields become private: `field: CellName`, `ty: CellType`, `direction: Direction`.
 - Constructors:
@@ -49,7 +49,7 @@ File: [crates/query/src/query_op/sort.rs](../crates/query/src/query_op/sort.rs).
   - the runtime path rejects `bytes`.
 - Add `SortKey::try_new` to the list of runtime constructors in the `on_unimplemented` notes of [marker.rs](../crates/cells/src/marker.rs) (the `CellMarker` and `Indexable` notes).
 - Update the callers, which use `CellType`:
-  - the tests in [op.rs](../crates/query/src/query_op/op.rs) (`U64`, `Date32`);
+  - the tests in [query_op.rs](../crates/api/src/query_op.rs) (`U64`, `Date32`);
   - `by_size()` in [tests/query.rs](../crates/query/tests/query.rs) (`U32`);
   - [integration-tests/tests/api/receipts.rs:411](../crates/integration-tests/tests/api/receipts.rs#L411) (`I32`).
 
@@ -63,7 +63,7 @@ New file: `crates/query/src/cell_source.rs`, mirroring [posting_source.rs](../cr
 
 ## 3. The `sorting` module: the interface and `FetchAndSort`
 
-New module: `crates/query/src/sorting/`. It is named `sorting`, after the trait, so it isn't confused with `query_op::sort`. Unit tests go inline.
+New module: `crates/query/src/sorting/`. It is named `sorting`, after the trait, so it isn't confused with `model::sort`. Unit tests go inline.
 
 ### `sorting/mod.rs`: what every strategy shares
 

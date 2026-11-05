@@ -46,6 +46,7 @@ mod metered;
 mod open;
 mod open_error;
 mod pricing;
+mod query_op;
 mod record_op;
 mod types;
 
@@ -67,6 +68,7 @@ pub use metered::{Details, Metered, Receipt};
 pub use open::OpenInfo;
 pub use open_error::{OpenError, OpenResult};
 pub use pricing::{MeteringModelInfo, MeteringModelMetadata, ModelWeights};
+pub use query_op::{CountOp, QueryOp};
 pub use record_op::{RecordOp, op};
 pub use types::SealInfo;
 
@@ -76,8 +78,7 @@ pub use golemdb_cells::{
     marker,
 };
 pub use golemdb_query::{
-    Bounds, CountOp, Direction, EqValue, ExistsType, Filter, InValues, QueryOp, QueryPage, SortKey,
-    ValuesError,
+    Bounds, Direction, EqValue, ExistsType, Filter, InValues, QueryPage, SortKey, ValuesError,
 };
 pub use golemdb_record::{
     CreateEntry, PatchChange, PatchEntry, ReadTarget, Record, RecordKey, RecordLimits, RecordMeta,

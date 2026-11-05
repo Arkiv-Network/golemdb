@@ -341,10 +341,12 @@ impl<S: Store, H: HashProvider> Api for Inner<S, H> {
             .into()
     }
     fn query(&self, commit: Option<CommitId>, operation: QueryOp) -> Metered<QueryPage> {
-        self.queries.query_report(commit, operation).into()
+        let (request, budget) = operation.into_parts();
+        self.queries.query_report(commit, request, budget).into()
     }
     fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Metered<u64> {
-        self.queries.count_report(commit, operation).into()
+        let (filter, budget) = operation.into_parts();
+        self.queries.count_report(commit, filter, budget).into()
     }
     fn metering_model(&self, commit_id: Option<CommitId>) -> Result<MeteringModelInfo> {
         let snapshot = self.pricing_snapshot(commit_id)?;
