@@ -7,6 +7,7 @@ hash_function: keccak-256
 cell_limits: {max_cell_name_len: 1, max_str_len: 0, max_bytes_len: 0}
 record_limits: {max_cells: 100, max_indexed_cells: 100}
 metering: {golemdb_code_version: 1, host_code_version: 0, weights: {}}
+min_retention: 100
 immutable_data:
   shard_span: 4294967297
   segments:

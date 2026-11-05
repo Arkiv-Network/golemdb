@@ -1,6 +1,6 @@
 use crate::*;
 
-const PREFIX: &str = "hash_function: keccak-256\ncell_limits: {max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 128}\nrecord_limits: {max_cells: 100, max_indexed_cells: 100}\nmetering: {golemdb_code_version: 1, host_code_version: 0, weights: {}}\n";
+const PREFIX: &str = "hash_function: keccak-256\ncell_limits: {max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 128}\nrecord_limits: {max_cells: 100, max_indexed_cells: 100}\nmetering: {golemdb_code_version: 1, host_code_version: 0, weights: {}}\nmin_retention: 100\n";
 
 fn yaml(section: &str) -> String {
     format!("{PREFIX}immutable_data:\n{section}\n")
@@ -21,6 +21,7 @@ fn omitted_and_null_immutable_data_match_explicit_none() {
         },
         None,
         crate::PricingConfig::zero(),
+        100,
     );
     expected.metering.weights.clear();
     for yaml in [PREFIX.to_owned(), format!("{PREFIX}immutable_data: null\n")] {

@@ -91,6 +91,7 @@ fn config(hash: HashAlgorithm, mode: OpenMode) -> OpenConfig {
         },
         None,
         golemdb_api::PricingConfig::zero(),
+        100,
     ))
     .with_mode(mode)
 }

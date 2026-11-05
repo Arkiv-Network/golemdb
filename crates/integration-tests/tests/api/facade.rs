@@ -21,6 +21,7 @@ fn config(hash_function: HashAlgorithm) -> OpenConfig {
         },
         None,
         golemdb_api::PricingConfig::zero(),
+        100,
     ))
 }
 

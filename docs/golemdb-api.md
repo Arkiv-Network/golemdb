@@ -287,7 +287,8 @@ Initialization writes, in one store transaction:
    - for each reserved record (see [Reserved records](#reserved-records)): its `#key` cell
      (`bytes32`, the record's key) and its binding in `#recordKeys` (cell name = the raw
      32-byte record key, value `u64` = the record ID);
-   - `#params`: `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen` (`u32` each), `#keyMode`
+   - `#params`: `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen` (`u32` each), `#minRetention`
+     (`u64`), `#keyMode`
      (`u32`: 0 caller-assigned, 1 generated), and `#keySeed` (`bytes32`, generated mode only);
    - `#alloc`: `#nextRecordID` = 64 (`u64`).
 3. **The cell trie** over those cells. `head = (0, StateRoot, IndexRoot)` with
@@ -453,7 +454,7 @@ ASCII, zero-padded to 32 bytes. The implemented catalogue:
 
 | ID | Record | Holds today |
 | --- | --- | --- |
-| 0 | `#params` | `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`, `#keyMode`, `#keySeed` |
+| 0 | `#params` | `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`, `#minRetention`, `#keyMode`, `#keySeed` |
 | 1 | `#alloc` | `#nextRecordID` |
 | 2 | `#roots` | one cell per earlier commit: name = `commitNr` (`u64` BE), value = `StateRoot ‖ IndexRoot` (64-byte `bytes` field), written lag-one by each commit |
 | 3 | `#recordKeys` | bindings: name = raw record key, value = record ID (`u64`) |
@@ -939,7 +940,7 @@ carry over the previous spec's contracts for them; their Rust signatures are not
 - Immutable-data storage, including the row-key index.
 - Per-record caps (`#maxRecordCells`, `#maxRecordIndexedCells`) and the global counters
   `#liveCells` / `#indexTerms` in `#alloc` (design §4, metering D3 and D5).
-- The remaining `#params` cells of design §4: `#minActivationDelay`, `#minRetention`,
+- The remaining `#params` cells of design §4: `#minActivationDelay`,
   `#shardSpan`, `#immutableDataSegments`.
 - Transport serialization: adapters own it.
 

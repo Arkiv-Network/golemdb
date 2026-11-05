@@ -30,6 +30,7 @@ fn config(directory: &std::path::Path) -> OpenConfig {
             }],
         )),
         golemdb_api::PricingConfig::zero(),
+        100,
     ))
     .with_immutable_data_directory(directory)
 }

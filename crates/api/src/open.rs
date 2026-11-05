@@ -7,7 +7,7 @@ use golemdb_metering::PricingProvider;
 use golemdb_pruning::PruningConfig;
 use golemdb_storage::{Store, WriteTransaction};
 
-use crate::{CommitId, Genesis, OpenConfig, OpenResult};
+use crate::{CommitId, Genesis, OpenConfig, OpenError, OpenResult, Pruning};
 
 /// Snapshot of opening, not a live head monitor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +100,7 @@ pub(crate) fn open_store<S: Store>(store: S, config: &OpenConfig) -> OpenResult<
             resume_unwind(panic)
         }
     };
+    let pruning = pruning(config)?;
     if info.created {
         tx.commit()?;
     } else {
@@ -109,7 +110,7 @@ pub(crate) fn open_store<S: Store>(store: S, config: &OpenConfig) -> OpenResult<
         store,
         genesis: config.genesis.clone(),
         info,
-        pruning: config.pruning,
+        pruning,
         pricing,
     })
 }
@@ -130,4 +131,21 @@ pub(crate) fn open_mdbx(
     }
     let store = golemdb_storage_mdbx::MdbxStore::open_with_options(path, options)?;
     open_store(store, config)
+}
+
+/// The pruning settings `config` selects, refusing a window below the genesis
+/// minimum.
+fn pruning(config: &OpenConfig) -> OpenResult<Option<PruningConfig>> {
+    let min = config.genesis.min_retention;
+    match config.pruning {
+        Pruning::MinRetention => Ok(Some(PruningConfig::new(min))),
+        Pruning::Custom(pruning) if pruning.window() < min => {
+            Err(OpenError::InvalidConfig(format!(
+                "pruning window {} is less than #minRetention {min}",
+                pruning.window()
+            )))
+        }
+        Pruning::Custom(pruning) => Ok(Some(pruning)),
+        Pruning::Off => Ok(None),
+    }
 }

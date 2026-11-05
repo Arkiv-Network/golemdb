@@ -23,6 +23,7 @@
 //!     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
 //!     None,
 //!     golemdb_api::PricingConfig::zero(),
+//!     100,
 //! ));
 //! let db = Database::open_memory(&config.genesis)?;
 //! let branch = db.begin()?;
@@ -50,7 +51,7 @@ mod query_op;
 mod record_op;
 mod types;
 
-pub use config::{Genesis, OpenConfig, OpenMode};
+pub use config::{Genesis, OpenConfig, OpenMode, Pruning};
 pub use database::Database;
 pub use error::{ApiError, Result};
 pub use golemdb_cells::CellLimits;

@@ -33,6 +33,7 @@ impl Default for TestDb {
             },
             None,
             golemdb_api::PricingConfig::zero(),
+            100,
         );
         Self {
             db: Database::open_memory(&genesis).expect("genesis"),
