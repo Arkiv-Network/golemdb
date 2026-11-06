@@ -3,9 +3,9 @@ use golemdb_storage::{Table, WriteTransaction};
 
 use super::Index;
 use crate::{
-    BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexTerm, Result,
+    BitmapContainer, Hi48, INDEX_TRIE_PATH_BYTES, IndexTerm, Result,
     index_trie::{ContainerEdit, IndexTriePath},
-    path, tables,
+    tables,
     term::IndexKey,
 };
 
@@ -17,18 +17,18 @@ pub enum PostingChange {
     Remove { term: IndexTerm, record_id: u64 },
 }
 
-/// A [`PostingChange`] with its record ID split into container and offset.
+/// A [`PostingChange`] with its record ID split into its [`Hi48`] and offset.
 struct Posting {
     term: IndexTerm,
-    container: u64,
+    hi48: Hi48,
     offset: u16,
     present: bool,
 }
 
 impl Posting {
     /// What identifies a posting, without whether it is present.
-    fn key(&self) -> (&IndexTerm, u64, u16) {
-        (&self.term, self.container, self.offset)
+    fn key(&self) -> (&IndexTerm, Hi48, u16) {
+        (&self.term, self.hi48, self.offset)
     }
 }
 
@@ -38,10 +38,10 @@ impl From<PostingChange> for Posting {
             PostingChange::Add { term, record_id } => (term, record_id, true),
             PostingChange::Remove { term, record_id } => (term, record_id, false),
         };
-        let (container, offset) = path::split(record_id);
+        let (hi48, offset) = Hi48::split(record_id);
         Self {
             term,
-            container,
+            hi48,
             offset,
             present,
         }
@@ -95,17 +95,17 @@ impl<H: HashProvider> Index<'_, H> {
             let term_key = term.key();
             let term_path = term.routing_path(self.hasher);
             let mut changed = false;
-            for postings in group.chunk_by(|a, b| a.container == b.container) {
-                let container = postings[0].container;
-                let key = IndexKey::new(&term_key, container)?;
-                let path = IndexTriePath::new(&term_path, container)?;
+            for postings in group.chunk_by(|a, b| a.hi48 == b.hi48) {
+                let hi48 = postings[0].hi48;
+                let key = IndexKey::new(&term_key, hi48);
+                let path = IndexTriePath::new(&term_path, hi48);
                 let stored = tx.get(tables::INDEX, key.as_ref())?;
                 let before = stored
                     .as_ref()
                     .map(|bytes| self.trie.leaf_hash(&path, bytes));
                 let mut bitmap = match &stored {
-                    Some(bytes) => BitmapContainer::decode(container, bytes)?,
-                    None => BitmapContainer::empty(container)?,
+                    Some(bytes) => BitmapContainer::decode(hi48, bytes)?,
+                    None => BitmapContainer::empty(hi48),
                 };
                 let mut dirty = false;
                 for posting in postings {

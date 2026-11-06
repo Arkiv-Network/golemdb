@@ -576,7 +576,7 @@ fn mdbx_modes_limits_and_shared_environment_concurrent_opening() {
     cfg.genesis.cell_limits.max_str_len = db.max_key_size() as u32
         - cfg.genesis.cell_limits.max_cell_name_len
         - 3
-        - golemdb_index::HI48_BYTES as u32;
+        - golemdb_index::Hi48::BYTES as u32;
     Database::from_store(db.clone(), &cfg).unwrap();
     let branches = Branches::new(db, Keccak256Hasher, None, None).unwrap();
     let records = Records::new(branches.clone(), pricing(branches.store(), &cfg.genesis));

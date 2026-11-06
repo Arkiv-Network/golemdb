@@ -4,8 +4,8 @@ use golemdb_merkle::{
 use golemdb_storage::{ReadCursor, ReadTransaction, WriteTransaction};
 
 use crate::{
-    BitmapContainer, CONTAINER_LEAF_DOMAIN, INDEX_BRANCH_DOMAIN, INDEX_TRIE_PATH_BYTES, IndexError,
-    Result, path, tables, term::IndexKey,
+    BitmapContainer, CONTAINER_LEAF_DOMAIN, Hi48, INDEX_BRANCH_DOMAIN, INDEX_TRIE_PATH_BYTES,
+    IndexError, Result, tables, term::IndexKey,
 };
 
 /// The index trie over every term's containers. Leaves are virtual: each
@@ -15,18 +15,18 @@ pub(crate) struct IndexTrie<'h, H: HashProvider> {
     hasher: &'h H,
 }
 
-/// A container's index trie path: its term's routing path, then its `hi48`.
+/// A container's index trie path: its term's routing path, then its [`Hi48`].
 /// Only [`IndexTriePath::new`] builds one, so every trie access is routed from a
 /// term and a container.
 #[derive(Clone, Copy)]
 pub(crate) struct IndexTriePath([u8; INDEX_TRIE_PATH_BYTES]);
 
 impl IndexTriePath {
-    pub(crate) fn new(term_path: &Hash, container: u64) -> Result<Self> {
+    pub(crate) fn new(term_path: &Hash, hi48: Hi48) -> Self {
         let mut out = [0; INDEX_TRIE_PATH_BYTES];
         out[..term_path.len()].copy_from_slice(term_path);
-        out[term_path.len()..].copy_from_slice(&path::path_bytes(container)?);
-        Ok(Self(out))
+        out[term_path.len()..].copy_from_slice(&hi48.to_bytes());
+        Self(out)
     }
 }
 
@@ -102,9 +102,9 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
                 if cursor.next()?.is_some() {
                     return Err(IndexError::RootMismatch);
                 }
-                let (term, container) = IndexKey::split(&key)?;
-                let path = IndexTriePath::new(&term.routing_path(self.hasher), container)?;
-                BitmapContainer::decode(container, &value)?;
+                let (term, hi48) = IndexKey::split(&key)?;
+                let path = IndexTriePath::new(&term.routing_path(self.hasher), hi48);
+                BitmapContainer::decode(hi48, &value)?;
                 if LeafRef::new(path.0, self.leaf_hash(&path, &value)) != leaf {
                     return Err(IndexError::RootMismatch);
                 }

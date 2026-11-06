@@ -3,8 +3,8 @@ use std::hint::black_box;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use golemdb_cells::{CellNameRef, CellType};
 use golemdb_index::{
-    BitmapContainer, CONTAINER_LEAF_DOMAIN, INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange,
-    TermRange,
+    BitmapContainer, CONTAINER_LEAF_DOMAIN, Hi48, INDEX_TRIE_PATH_BYTES, Index, IndexTerm,
+    PostingChange, TermRange,
 };
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher, RootRef};
 use golemdb_storage::{MemoryStore, Store, WriteTransaction};
@@ -17,14 +17,15 @@ fn codecs(c: &mut Criterion) {
         ("run", (1000..21000).collect()),
         ("full", (0..=u16::MAX).collect()),
     ] {
-        let container = BitmapContainer::from_values(42, values).unwrap();
+        let hi48 = Hi48::new(42).unwrap();
+        let container = BitmapContainer::from_values(hi48, values);
         let bytes = container.encode().unwrap();
-        assert_eq!(BitmapContainer::decode(42, &bytes).unwrap(), container);
+        assert_eq!(BitmapContainer::decode(hi48, &bytes).unwrap(), container);
         group.bench_function(BenchmarkId::new("canonical_encode", name), |b| {
             b.iter(|| black_box(&container).encode().unwrap())
         });
         group.bench_function(BenchmarkId::new("strict_decode", name), |b| {
-            b.iter(|| BitmapContainer::decode(42, black_box(&bytes)).unwrap())
+            b.iter(|| BitmapContainer::decode(hi48, black_box(&bytes)).unwrap())
         });
         // A leaf hash from a container: its canonical encoding, then the hash.
         fn hash_container<H: HashProvider>(
@@ -86,18 +87,18 @@ fn term(i: u8) -> IndexTerm {
 fn add(t: u8, hi: u64, lo: u16) -> PostingChange {
     PostingChange::Add {
         term: term(t),
-        record_id: (hi << 16) | u64::from(lo),
+        record_id: Hi48::new(hi).unwrap().record_id(lo),
     }
 }
 
 fn seed(
     db: &impl Store,
-    chunks: u64,
+    containers: u64,
     hasher: &impl HashProvider,
 ) -> RootRef<INDEX_TRIE_PATH_BYTES> {
     let mut tx = db.begin_write().unwrap();
-    let changes =
-        (0..4).flat_map(|t| (0..chunks).flat_map(move |hi| (0..32).map(move |lo| add(t, hi, lo))));
+    let changes = (0..4)
+        .flat_map(|t| (0..containers).flat_map(move |hi| (0..32).map(move |lo| add(t, hi, lo))));
     let root = Index::new(hasher)
         .apply(&mut tx, 0, RootRef::Empty, changes)
         .unwrap()
@@ -106,7 +107,7 @@ fn seed(
     root
 }
 
-fn workloads(chunks: u64) -> Vec<(&'static str, Vec<PostingChange>)> {
+fn workloads(containers: u64) -> Vec<(&'static str, Vec<PostingChange>)> {
     vec![
         ("one_posting", vec![add(0, 0, 128)]),
         (
@@ -115,12 +116,12 @@ fn workloads(chunks: u64) -> Vec<(&'static str, Vec<PostingChange>)> {
         ),
         (
             "across_chunks_64",
-            (0..64).map(|hi| add(0, hi % chunks, 128)).collect(),
+            (0..64).map(|hi| add(0, hi % containers, 128)).collect(),
         ),
         (
             "across_terms_64",
             (0..4)
-                .flat_map(|t| (0..16).map(move |hi| add(t, hi % chunks, 128)))
+                .flat_map(|t| (0..16).map(move |hi| add(t, hi % containers, 128)))
                 .collect(),
         ),
         (
@@ -131,7 +132,7 @@ fn workloads(chunks: u64) -> Vec<(&'static str, Vec<PostingChange>)> {
                     let key = (i * 2053) % 4096;
                     add(
                         (key / 1024) as u8,
-                        (key / 16) % chunks,
+                        (key / 16) % containers,
                         128 + (key % 16) as u16,
                     )
                 })
@@ -159,19 +160,19 @@ fn backend(
     c: &mut Criterion,
     name: &str,
     db: &impl Store,
-    chunks: u64,
+    containers: u64,
     algorithm: &str,
     hasher: &impl HashProvider,
 ) {
     let index = Index::new(hasher);
-    let root = seed(db, chunks, hasher);
+    let root = seed(db, containers, hasher);
     let read = db.begin_read().unwrap();
     let selected = term(0);
     let bitmap = index.bitmap(&read, &selected).unwrap().unwrap();
     assert!(bitmap.treemap().contains(0));
     assert!(!bitmap.treemap().contains(128));
-    assert_eq!(bitmap.treemap().len(), chunks * 32);
-    let mut group = c.benchmark_group(format!("index/{algorithm}/{name}/chunks={chunks}"));
+    assert_eq!(bitmap.treemap().len(), containers * 32);
+    let mut group = c.benchmark_group(format!("index/{algorithm}/{name}/chunks={containers}"));
     group.bench_function("materialize", |b| {
         b.iter(|| index.bitmap(&read, black_box(&selected)).unwrap())
     });
@@ -187,7 +188,7 @@ fn backend(
     drop(read);
     // Timed writes belong to the next commit, as seal's do: new keys after the
     // seeded rows, never overwriting them in place.
-    for (label, changes) in workloads(chunks) {
+    for (label, changes) in workloads(containers) {
         let mut check = db.begin_write().unwrap();
         let updated = index.apply(&mut check, 1, root, changes.clone()).unwrap();
         assert_ne!(updated.root, root);
@@ -241,12 +242,19 @@ fn durable_commit(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider
 }
 
 fn algorithm(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider) {
-    for chunks in [64, 256] {
-        backend(c, "memory", &MemoryStore::new(), chunks, algorithm, hasher);
+    for containers in [64, 256] {
+        backend(
+            c,
+            "memory",
+            &MemoryStore::new(),
+            containers,
+            algorithm,
+            hasher,
+        );
         {
             let dir = tempfile::tempdir().unwrap();
             let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
-            backend(c, "mdbx", &db, chunks, algorithm, hasher);
+            backend(c, "mdbx", &db, containers, algorithm, hasher);
         }
     }
     durable_commit(c, algorithm, hasher);

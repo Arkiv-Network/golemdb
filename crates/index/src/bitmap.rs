@@ -4,9 +4,9 @@ use roaring::RoaringTreemap;
 
 use crate::{BitmapContainer, BitmapError};
 
-/// A materialized query bitmap assembled from storage chunks.
+/// A materialized query bitmap assembled from stored containers.
 ///
-/// Owns the chunk-to-record-ID conversion, not storage or Merkle hashing.
+/// Owns the container-to-record-ID conversion, not storage or Merkle hashing.
 /// Set operations are operators on `Bitmap` (`|=` is union, `&=` is
 /// intersection), so callers need not name Roaring; [`Self::treemap`] reads
 /// the record IDs, and [`Self::iter_skipping`] reads them past a rank. The
@@ -17,31 +17,28 @@ pub struct Bitmap {
 }
 
 impl Bitmap {
-    /// Assemble chunks in strictly increasing path order, as produced by trie
-    /// traversal. Empty working chunks are omitted, but their paths must still
-    /// be unique and ordered. No sorting or duplicate overwrites are hidden here.
+    /// Assemble containers in strictly increasing [`Hi48`](crate::Hi48) order, as a term's
+    /// rows hold them. Empty containers are omitted, but must still be unique
+    /// and ordered. No sorting or duplicate overwrites are hidden here.
     pub fn from_containers(
         containers: impl IntoIterator<Item = BitmapContainer>,
     ) -> Result<Self, BitmapError> {
         let mut values = RoaringTreemap::new();
         let mut previous = None;
         for container in containers {
-            let path = container.path();
-            if let Some(prev) = previous {
-                if path == prev {
-                    return Err(BitmapError::DuplicatePath { path });
+            let hi48 = container.hi48();
+            if let Some(previous) = previous {
+                if hi48 == previous {
+                    return Err(BitmapError::DuplicateContainer { hi48 });
                 }
-                if path < prev {
-                    return Err(BitmapError::UnsortedPaths {
-                        previous: prev,
-                        path,
-                    });
+                if hi48 < previous {
+                    return Err(BitmapError::UnsortedContainers { previous, hi48 });
                 }
             }
-            previous = Some(path);
+            previous = Some(hi48);
             values
                 .append(container.iter())
-                .expect("validated paths and offsets are strictly ordered");
+                .expect("validated containers and offsets are strictly ordered");
         }
         Ok(Self { values })
     }

@@ -8,8 +8,8 @@ use std::{
 
 use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
 use golemdb_index::{
-    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, TermRange,
-    tables,
+    BitmapContainer, Hi48, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange,
+    TermRange, tables,
 };
 use golemdb_merkle::{HASH_BYTES, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
@@ -52,12 +52,12 @@ fn rows(tx: &impl ReadTransaction, table: golemdb_storage::Table) -> Vec<golemdb
         .collect::<golemdb_storage::Result<_>>()
         .unwrap()
 }
-/// The `Index` row key of a term's container at `hi`.
+/// The `Index` row key of a term's container `hi`.
 fn container_key(t: &IndexTerm, hi: u64) -> Vec<u8> {
-    [&t.key()[..], &golemdb_index::path::path_bytes(hi).unwrap()].concat()
+    [&t.key()[..], &Hi48::new(hi).unwrap().to_bytes()].concat()
 }
 
-/// A term's containers, each as its path and value, `None` for a term absent
+/// A term's containers, each as its `Hi48` bytes and value, `None` for a term absent
 /// from the index.
 fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
     let key = t.key();
@@ -247,7 +247,7 @@ fn duplicate_changes_cancel_and_equal_terms_keep_separate_rows() {
 }
 
 #[test]
-fn singleton_cache_survives_inserting_an_earlier_chunk() {
+fn singleton_cache_survives_inserting_an_earlier_container() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
     let mut tx = db.begin_write().unwrap();
@@ -603,8 +603,7 @@ fn writes_check_the_containers_they_touch_and_no_others() {
         .unwrap()
         .root;
     tx.commit().unwrap();
-    let other = BitmapContainer::from_values(0, [7])
-        .unwrap()
+    let other = BitmapContainer::from_values(Hi48::new(0).unwrap(), [7])
         .encode()
         .unwrap();
     // (container rewritten, its new value, record ID the write adds, detected)
@@ -642,7 +641,7 @@ proptest! {
         for batch in batches {
             let before = expected.keys().map(|t| (t.clone(), root_for(&tx, t))).collect::<BTreeMap<_, _>>();
             let changes = batch.into_iter().map(|(t, id, present)| {
-                let t = term(t); let id = ((id as u64 / 3) << 16) | (id as u64 % 3);
+                let t = term(t); let id = Hi48::new(id as u64 / 3).unwrap().record_id(id as u16 % 3);
                 if present { expected.entry(t.clone()).or_default().insert(id); add(&t, id) }
                 else { if let Some(ids) = expected.get_mut(&t) { ids.remove(&id); if ids.is_empty() { expected.remove(&t); } } remove(&t, id) }
             }).collect::<Vec<_>>();

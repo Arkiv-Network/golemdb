@@ -1,5 +1,5 @@
 use crate::{
-    BitmapContainer, IndexTerm, TermError,
+    BitmapContainer, Hi48, IndexTerm, TermError,
     index_trie::{IndexTrie, IndexTriePath},
 };
 use golemdb_cells::{
@@ -252,11 +252,10 @@ fn leaf_preimages_belong_to_index_and_use_the_supplied_provider() {
     let term = IndexTerm::new("A", T::Bool, &[1]).unwrap();
     let hasher = Recorder::default();
     assert_eq!(term.routing_path(&hasher), [1; HASH_BYTES]);
-    let bytes = BitmapContainer::from_values(1, [42])
-        .unwrap()
+    let bytes = BitmapContainer::from_values(Hi48::new(1).unwrap(), [42])
         .encode()
         .unwrap();
-    let path = |term_path, hi| IndexTriePath::new(&term_path, hi).unwrap();
+    let path = |term_path, value| IndexTriePath::new(&term_path, Hi48::new(value).unwrap());
     let leaf = IndexTrie::new(&hasher).leaf_hash(&path([7; HASH_BYTES], 1), &bytes);
     assert_eq!(leaf, [2; HASH_BYTES]);
     assert_eq!(
@@ -266,7 +265,7 @@ fn leaf_preimages_belong_to_index_and_use_the_supplied_provider() {
             [
                 &[4][..],
                 &[7; HASH_BYTES],
-                &crate::path::path_bytes(1).unwrap(),
+                &Hi48::new(1).unwrap().to_bytes(),
                 &bytes
             ]
             .concat()

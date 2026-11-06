@@ -71,7 +71,9 @@ fn write<S: Store>(branches: &Branches<S, Keccak256Hasher>, ops: &[(u64, u64)]) 
     branches
         .write(branch, |cells| {
             for &(record, choice) in ops {
-                let id = golemdb_index::path::join(record % 3, 64 + record as u16).unwrap();
+                let id = golemdb_index::Hi48::new(record % 3)
+                    .unwrap()
+                    .record_id(64 + record as u16);
                 match choice {
                     0 => cells.delete(key(id, b"tag")),
                     _ => cells.put(key(id, b"tag"), value(&format!("t{choice}"), true)),

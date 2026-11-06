@@ -5,8 +5,8 @@ use golemdb_storage::{Entry, ReadCursor, ReadTransaction, Scan, scan, scan_prefi
 
 use super::Index;
 use crate::{
-    Bitmap, BitmapContainer, HI48_BYTES, INDEX_TRIE_PATH_BYTES, IndexTerm, Result, TermRange,
-    tables, term::IndexKey,
+    Bitmap, BitmapContainer, Hi48, INDEX_TRIE_PATH_BYTES, IndexTerm, Result, TermRange, tables,
+    term::IndexKey,
 };
 
 /// Whether `term` has postings: one seek to its first container row, without
@@ -18,7 +18,7 @@ pub fn term_exists(tx: &impl ReadTransaction, term: &IndexTerm) -> Result<bool> 
     match scan_prefix(tx, tables::INDEX, key)?.next().transpose()? {
         None => Ok(false),
         Some((row, _)) => {
-            IndexKey::container(&row[len..])?;
+            IndexKey::hi48(&row[len..])?;
             Ok(true)
         }
     }
@@ -82,9 +82,9 @@ impl<C: ReadCursor> TermScan<C> {
             return Ok(None);
         };
         let (key, value) = row?;
-        let (term, container) = IndexKey::split(&key)?;
-        let term_key = &key[..key.len() - HI48_BYTES];
-        let mut containers = vec![BitmapContainer::decode(container, &value)?];
+        let (term, hi48) = IndexKey::split(&key)?;
+        let term_key = &key[..key.len() - Hi48::BYTES];
+        let mut containers = vec![BitmapContainer::decode(hi48, &value)?];
         // The term key ends unambiguously, so its rows are those it prefixes.
         // An error may hide one of the term's rows, so it fails the term.
         let same_term = |row: &golemdb_storage::Result<Entry>| {
@@ -93,8 +93,8 @@ impl<C: ReadCursor> TermScan<C> {
         };
         while let Some(row) = self.rows.next_if(same_term) {
             let (next, value) = row?;
-            let container = IndexKey::container(&next[term_key.len()..])?;
-            containers.push(BitmapContainer::decode(container, &value)?);
+            let hi48 = IndexKey::hi48(&next[term_key.len()..])?;
+            containers.push(BitmapContainer::decode(hi48, &value)?);
         }
         Ok(Some((term, Bitmap::from_containers(containers)?)))
     }
