@@ -5,22 +5,22 @@ use golemdb_merkle::HASH_BYTES;
 use proptest::prelude::*;
 
 use crate::index_trie::IndexTriePath;
-use crate::{HI48_BYTES, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, TermRange};
+use crate::{ContainerId, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, TermRange};
 
 #[test]
-fn container_trie_paths_are_the_term_path_then_the_container_path() {
-    let trie = IndexTriePath::new(&[7; HASH_BYTES], 0x0102_0304).unwrap();
+fn container_trie_paths_are_the_term_path_then_its_hi48() {
+    let container_id = ContainerId::new(0x0102_0304).unwrap();
+    let trie = IndexTriePath::new(&[7; HASH_BYTES], container_id);
     let trie = trie.as_ref();
     assert_eq!(trie.len(), INDEX_TRIE_PATH_BYTES);
     assert_eq!(trie[..HASH_BYTES], [7; HASH_BYTES]);
-    assert_eq!(trie[HASH_BYTES..].len(), HI48_BYTES);
-    assert!(IndexTriePath::new(&[0; HASH_BYTES], u64::MAX).is_err());
+    assert_eq!(trie[HASH_BYTES..], container_id.to_bytes());
     let term = IndexTerm::new("n", CellType::Bool, &[1]).unwrap();
     let index_key = IndexKey {
         term: term.clone(),
-        container_id: 0x0102_0304,
+        container_id,
     };
-    let key = index_key.encode().unwrap();
+    let key = index_key.encode();
     assert_eq!(key[term.as_bytes().len()..], trie[HASH_BYTES..]);
     assert_eq!(IndexKey::decode(&key).unwrap(), index_key);
     assert!(IndexKey::decode(&key[..key.len() - 1]).is_err());
@@ -44,7 +44,7 @@ fn string_terms_end_with_a_terminator_and_reject_zeros() {
     let fixed_prefix = IndexTerm::prefix("n", ty).unwrap();
     assert_eq!(fixed.into_bytes(), [&fixed_prefix[..], &[0; 8]].concat());
     // No zero byte in the ID, so none can stand in for the terminator.
-    let id = crate::path::path_bytes(0x0102_0304_0506).unwrap();
+    let id = ContainerId::new(0x0102_0304_0506).unwrap().to_bytes();
     for tail in [&b""[..], b"a"] {
         let bad = [&prefix[..], tail, &id].concat();
         assert!(IndexKey::decode(&bad).is_err(), "{bad:?}");
@@ -61,9 +61,10 @@ proptest! {
         ha in 0u64..4, hb in 0u64..4,
     ) {
         let (ta, tb) = (str_term(&a), str_term(&b));
-        let ka = IndexKey { term: ta.clone(), container_id: ha }.encode().unwrap();
-        let kb = IndexKey { term: tb.clone(), container_id: hb }.encode().unwrap();
-        // Containers of a term are contiguous, ordered by term, then path.
+        let (ha, hb) = (ContainerId::new(ha).unwrap(), ContainerId::new(hb).unwrap());
+        let ka = IndexKey { term: ta.clone(), container_id: ha }.encode();
+        let kb = IndexKey { term: tb.clone(), container_id: hb }.encode();
+        // Containers of a term are contiguous, ordered by term, then container.
         prop_assert_eq!(ka.cmp(&kb), (&ta, ha).cmp(&(&tb, hb)));
         let key = IndexKey::decode(&ka).unwrap();
         prop_assert_eq!(key, IndexKey { term: ta.clone(), container_id: ha });

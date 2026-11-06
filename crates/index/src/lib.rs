@@ -1,10 +1,10 @@
-//! Transactional flat index, ordered terms, and canonical bitmap chunks.
+//! Transactional flat index, ordered terms, and canonical bitmap containers.
 //!
-//! A record ID splits into its top 48 bits, `hi48`, naming its container,
+//! A record ID splits into its top 48 bits, a [`ContainerId`] naming its container,
 //! and a 16-bit offset. Each term's containers are leaves of the one index
 //! trie at `H(term) ‖ hi48`, so a term's postings are the subtree under its
 //! hash. Containers are live rows of `Index`, keyed in term order and
-//! overwritten in place like cells. [`Bitmap`] assembles chunks for queries, without
+//! overwritten in place like cells. [`Bitmap`] assembles containers for queries, without
 //! owning storage or hashing. All hashing receives the same configured
 //! [`golemdb_merkle::HashProvider`] from the caller.
 //!
@@ -32,33 +32,27 @@
 
 mod bitmap;
 pub mod container;
+mod container_id;
 pub mod error;
 mod index;
 mod index_trie;
 mod key;
-pub mod path;
 pub mod tables;
 mod term;
 mod term_range;
 
 pub use bitmap::Bitmap;
 pub use container::BitmapContainer;
+pub use container_id::ContainerId;
 pub use error::{BitmapError, IndexError, Result};
 pub use index::{Index, IndexUpdate, PostingChange, TermScan, term_exists};
 pub use key::IndexKey;
 pub use term::{IndexTerm, TermError};
 pub use term_range::{RangeError, TermRange};
 
-/// Bits of a record ID held by one container, as offsets below its path.
-pub(crate) const CHUNK_BITS: u8 = 16;
-
-/// Bytes of `hi48`, the record ID's bits above its 16-bit offset, big-endian:
-/// a container's path.
-pub const HI48_BYTES: usize = PATH_BITS.div_ceil(8) as usize;
-
 /// The index trie routes a container by its term's digest, then its `hi48`.
 /// This is a byte width, not the compressed trie's depth.
-pub const INDEX_TRIE_PATH_BYTES: usize = size_of::<golemdb_merkle::Hash>() + HI48_BYTES;
+pub const INDEX_TRIE_PATH_BYTES: usize = size_of::<golemdb_merkle::Hash>() + ContainerId::BYTES;
 
 /// Domain byte for index trie branch hashes.
 ///
@@ -71,11 +65,6 @@ pub const INDEX_BRANCH_DOMAIN: u8 = 0x03;
 /// `H(CONTAINER_LEAF_DOMAIN || H(term) || hi48 || roaring)`, binding the
 /// leaf's complete trie path.
 pub const CONTAINER_LEAF_DOMAIN: u8 = 0x04;
-
-pub(crate) const PATH_BITS: u8 = 64 - CHUNK_BITS;
-pub(crate) const PATH_BYTE_OFFSET: usize = 8 - HI48_BYTES;
-pub(crate) const MAX_PATH: u64 = (1 << PATH_BITS) - 1;
-pub(crate) const MAX_OFFSET: u32 = (1 << CHUNK_BITS) - 1;
 
 #[cfg(test)]
 mod tests;

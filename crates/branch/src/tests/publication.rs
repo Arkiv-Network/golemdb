@@ -336,7 +336,9 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
                 for i in 64..104u64 {
                     // Spread the records over three bitmap containers, so one
                     // tag term changes several containers in one commit.
-                    let id = golemdb_index::path::join(i % 3, i as u16).unwrap();
+                    let id = golemdb_index::ContainerId::new(i % 3)
+                        .unwrap()
+                        .record_id(i as u16);
                     if round == 1 && i % 3 == 0 {
                         cells.delete(key(id, b"tag"));
                         continue;
@@ -435,7 +437,9 @@ fn every_row_a_commit_writes_is_keyed_by_its_commit_number() {
             .write(branch, |cells| {
                 for i in 64..80u64 {
                     // Three bitmap containers per term, so every table gets rows.
-                    let id = golemdb_index::path::join(i % 3, i as u16).unwrap();
+                    let id = golemdb_index::ContainerId::new(i % 3)
+                        .unwrap()
+                        .record_id(i as u16);
                     cells.put(
                         key(id, b"tag"),
                         value(&format!("t{}", (i + commit) % 2), true),

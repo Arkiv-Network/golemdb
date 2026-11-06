@@ -8,8 +8,8 @@ use std::{
 
 use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
 use golemdb_index::{
-    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexKey, IndexTerm, PostingChange,
-    TermRange, tables,
+    BitmapContainer, ContainerId, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexKey, IndexTerm,
+    PostingChange, TermRange, tables,
 };
 use golemdb_merkle::{HASH_BYTES, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
@@ -52,24 +52,29 @@ fn rows(tx: &impl ReadTransaction, table: golemdb_storage::Table) -> Vec<golemdb
         .collect::<golemdb_storage::Result<_>>()
         .unwrap()
 }
-/// The `Index` row key of a term's container at `hi`.
-fn container_key(t: &IndexTerm, hi: u64) -> Vec<u8> {
+/// The `Index` row key of a term's container `container_id`.
+fn index_key(t: &IndexTerm, container_id: u64) -> Vec<u8> {
     let key = IndexKey {
         term: t.clone(),
-        container_id: hi,
+        container_id: ContainerId::new(container_id).unwrap(),
     };
-    key.encode().unwrap()
+    key.encode()
 }
 
-/// A term's containers, each as its path and value, `None` for a term absent
+/// The record ID at `offset` in container `container_id`.
+fn record_id(container_id: u64, offset: u16) -> u64 {
+    ContainerId::new(container_id).unwrap().record_id(offset)
+}
+
+/// A term's containers, each as its `hi48` bytes and value, `None` for a term absent
 /// from the index.
 fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
     let containers: Vec<_> = rows(tx, tables::INDEX)
         .into_iter()
         .filter_map(|(key, value)| {
             let IndexKey { term, container_id } = IndexKey::decode(&key).unwrap();
-            let path = golemdb_index::path::path_bytes(container_id).unwrap();
-            (&term == t).then(|| (path.to_vec(), value))
+            let hi48 = container_id.to_bytes();
+            (&term == t).then(|| (hi48.to_vec(), value))
         })
         .collect();
     (!containers.is_empty()).then_some(containers)
@@ -115,7 +120,7 @@ fn assert_state(
         .into_iter()
         .map(|(key, value)| {
             let IndexKey { term, container_id } = IndexKey::decode(&key).unwrap();
-            let hi48 = golemdb_index::path::path_bytes(container_id).unwrap();
+            let hi48 = container_id.to_bytes();
             let path = [&term.routing_path(&HASH)[..], &hi48].concat();
             let hash = HASH.hash_parts(&[&[CONTAINER_LEAF_DOMAIN], &path, &value]);
             LeafRef::new(path.try_into().unwrap(), hash)
@@ -252,13 +257,13 @@ fn duplicate_changes_cancel_and_equal_terms_keep_separate_rows() {
 }
 
 #[test]
-fn singleton_cache_survives_inserting_an_earlier_chunk() {
+fn singleton_cache_survives_inserting_an_earlier_container() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     let t = term(0);
     let root = index
-        .apply(&mut tx, 0, RootRef::Empty, [add(&t, 9 << 16)])
+        .apply(&mut tx, 0, RootRef::Empty, [add(&t, record_id(9, 0))])
         .unwrap()
         .root;
     let root = index
@@ -266,14 +271,21 @@ fn singleton_cache_survives_inserting_an_earlier_chunk() {
             &mut tx,
             0,
             root,
-            [add(&t, 1), add(&t, (9 << 16) + 1), add(&t, 12 << 16)],
+            [
+                add(&t, 1),
+                add(&t, record_id(9, 1)),
+                add(&t, record_id(12, 0)),
+            ],
         )
         .unwrap()
         .root;
     assert_state(
         &tx,
         root,
-        &BTreeMap::from([(t, BTreeSet::from([1, 9 << 16, (9 << 16) + 1, 12 << 16]))]),
+        &BTreeMap::from([(
+            t,
+            BTreeSet::from([1, record_id(9, 0), record_id(9, 1), record_id(12, 0)]),
+        )]),
     );
 }
 
@@ -558,7 +570,7 @@ fn corrupt_missing_and_mismatched_state_fails_checks() {
             .is_err()
     );
     assert!(index.validate_root(&tx, RootRef::Empty).is_err());
-    let (table, container) = (tables::INDEX, container_key(&t, 0));
+    let (table, container) = (tables::INDEX, index_key(&t, 0));
     let original = tx.get(table, &container).unwrap().unwrap();
     tx.delete(table, &container).unwrap();
     // Reads trust `Index`: without its container the term reads as absent,
@@ -604,23 +616,27 @@ fn writes_check_the_containers_they_touch_and_no_others() {
     let t = term(0);
     let mut tx = db.begin_write().unwrap();
     let root = index
-        .apply(&mut tx, 1, RootRef::Empty, [add(&t, 1), add(&t, 1 << 16)])
+        .apply(
+            &mut tx,
+            1,
+            RootRef::Empty,
+            [add(&t, 1), add(&t, record_id(1, 0))],
+        )
         .unwrap()
         .root;
     tx.commit().unwrap();
-    let other = BitmapContainer::from_values(0, [7])
-        .unwrap()
+    let other = BitmapContainer::from_values(ContainerId::new(0).unwrap(), [7])
         .encode()
         .unwrap();
     // (container rewritten, its new value, record ID the write adds, detected)
     for (hi, value, id, detected) in [
         (0, Some(&other), 2, true),
         (0, None, 2, true),
-        (2, Some(&other), (2 << 16) | 1, true),
+        (2, Some(&other), record_id(2, 1), true),
         (1, Some(&other), 2, false),
     ] {
         let mut tx = db.begin_write().unwrap();
-        let key = container_key(&t, hi);
+        let key = index_key(&t, hi);
         match value {
             Some(value) => tx.put(tables::INDEX, &key, value).unwrap(),
             None => assert!(tx.delete(tables::INDEX, &key).unwrap()),
@@ -647,7 +663,7 @@ proptest! {
         for batch in batches {
             let before = expected.keys().map(|t| (t.clone(), root_for(&tx, t))).collect::<BTreeMap<_, _>>();
             let changes = batch.into_iter().map(|(t, id, present)| {
-                let t = term(t); let id = ((id as u64 / 3) << 16) | (id as u64 % 3);
+                let t = term(t); let id = ContainerId::new(id as u64 / 3).unwrap().record_id(id as u16 % 3);
                 if present { expected.entry(t.clone()).or_default().insert(id); add(&t, id) }
                 else { if let Some(ids) = expected.get_mut(&t) { ids.remove(&id); if ids.is_empty() { expected.remove(&t); } } remove(&t, id) }
             }).collect::<Vec<_>>();
