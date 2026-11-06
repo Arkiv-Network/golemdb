@@ -2,7 +2,7 @@ use golemdb_cells::{CellNameRef, CellType, CellValueParseError, CellValueRef, Fl
 use golemdb_merkle::{Hash, HashProvider};
 use std::{error::Error, fmt};
 
-use crate::{HI48_BYTES, IndexError, PATH_BYTE_OFFSET, path};
+use crate::{Hi48, IndexError};
 
 /// Canonical ordered index key: `name || 0x00 || attribute_tag || ordered_value`.
 ///
@@ -149,7 +149,7 @@ impl IndexTerm {
     pub const fn max_key_len(name_len: u64, value_len: u64) -> u64 {
         let string = value_len + 1;
         let value = if string > 32 { string } else { 32 };
-        name_len + 2 + value + crate::HI48_BYTES as u64
+        name_len + 2 + value + Hi48::BYTES as u64
     }
 
     /// Split a container key into its term and the bytes after the term's
@@ -176,28 +176,25 @@ impl IndexTerm {
 }
 
 /// A container's `Index` key: its term's key ([`IndexTerm::key`]), then its
-/// `hi48`.
+/// [`Hi48`].
 pub(crate) struct IndexKey(Vec<u8>);
 
 impl IndexKey {
-    pub(crate) fn new(term_key: &[u8], container: u64) -> crate::Result<Self> {
-        Ok(Self([term_key, &path::path_bytes(container)?].concat()))
+    pub(crate) fn new(term_key: &[u8], hi48: Hi48) -> Self {
+        Self([term_key, &hi48.to_bytes()].concat())
     }
 
-    /// Split a stored key into its term and its container, rejecting a
-    /// malformed term or a suffix that is not a `hi48`.
-    pub(crate) fn split(key: &[u8]) -> crate::Result<(IndexTerm, u64)> {
+    /// Split a stored key into its term and its [`Hi48`], rejecting a
+    /// malformed term or a suffix that is not a [`Hi48`].
+    pub(crate) fn split(key: &[u8]) -> crate::Result<(IndexTerm, Hi48)> {
         let (term, suffix) = IndexTerm::split_key(key)?;
-        Ok((term, Self::container(suffix)?))
+        Ok((term, Self::hi48(suffix)?))
     }
 
-    /// The container whose `hi48` is `suffix`, the bytes after a term's key.
-    pub(crate) fn container(suffix: &[u8]) -> crate::Result<u64> {
-        let suffix: [u8; HI48_BYTES] =
-            (suffix.try_into()).map_err(|_| IndexError::Corruption("malformed container key"))?;
-        let mut be = [0; 8];
-        be[PATH_BYTE_OFFSET..].copy_from_slice(&suffix);
-        Ok(u64::from_be_bytes(be))
+    /// The [`Hi48`] in `suffix`, the bytes after a term's key; any other
+    /// length is a corrupt key.
+    pub(crate) fn hi48(suffix: &[u8]) -> crate::Result<Hi48> {
+        Hi48::from_slice(suffix).ok_or(IndexError::Corruption("malformed container key"))
     }
 }
 

@@ -6,23 +6,26 @@ use proptest::prelude::*;
 
 use crate::index_trie::IndexTriePath;
 use crate::term::IndexKey;
-use crate::{HI48_BYTES, INDEX_TRIE_PATH_BYTES, IndexTerm, TermRange};
+use crate::{Hi48, INDEX_TRIE_PATH_BYTES, IndexTerm, TermRange};
 
 #[test]
-fn container_trie_paths_are_the_term_path_then_the_container_path() {
-    let trie = IndexTriePath::new(&[7; HASH_BYTES], 0x0102_0304).unwrap();
+fn container_trie_paths_are_the_term_path_then_its_hi48() {
+    let hi48 = Hi48::new(0x0102_0304).unwrap();
+    let trie = IndexTriePath::new(&[7; HASH_BYTES], hi48);
     let trie = trie.as_ref();
     assert_eq!(trie.len(), INDEX_TRIE_PATH_BYTES);
     assert_eq!(trie[..HASH_BYTES], [7; HASH_BYTES]);
-    assert_eq!(trie[HASH_BYTES..].len(), HI48_BYTES);
-    assert!(IndexTriePath::new(&[0; HASH_BYTES], u64::MAX).is_err());
-    let key = IndexKey::new(b"term", 0x0102_0304).unwrap();
+    assert_eq!(trie[HASH_BYTES..], hi48.to_bytes());
+    let key = IndexKey::new(b"term", hi48);
     assert_eq!(key.as_ref()[4..], trie[HASH_BYTES..]);
-    assert_eq!(
-        IndexKey::container(&key.as_ref()[4..]).unwrap(),
-        0x0102_0304
-    );
-    assert!(IndexKey::container(&[0; 2]).is_err());
+    assert_eq!(Hi48::from_slice(&key.as_ref()[4..]), Some(hi48));
+    assert_eq!(Hi48::from_slice(&[0; 2]), None);
+    // A real term's key, so a bad suffix is what fails the split.
+    let term = str_term(b"x");
+    let key = IndexKey::new(&term.key(), hi48);
+    assert_eq!(IndexKey::split(key.as_ref()).unwrap(), (term, hi48));
+    assert!(IndexKey::split(&[key.as_ref(), &[0]].concat()).is_err());
+    assert!(IndexKey::split(&key.as_ref()[..key.as_ref().len() - 1]).is_err());
 }
 
 fn str_term(value: &[u8]) -> IndexTerm {
@@ -54,13 +57,14 @@ proptest! {
         ha in 0u64..4, hb in 0u64..4,
     ) {
         let (ta, tb) = (str_term(&a), str_term(&b));
-        let ka = IndexKey::new(&ta.key(), ha).unwrap().as_ref().to_vec();
-        let kb = IndexKey::new(&tb.key(), hb).unwrap().as_ref().to_vec();
-        // Containers of a term are contiguous, ordered by term, then path.
+        let (ha, hb) = (Hi48::new(ha).unwrap(), Hi48::new(hb).unwrap());
+        let ka = IndexKey::new(&ta.key(), ha).as_ref().to_vec();
+        let kb = IndexKey::new(&tb.key(), hb).as_ref().to_vec();
+        // Containers of a term are contiguous, ordered by term, then container.
         prop_assert_eq!(ka.cmp(&kb), (&ta, ha).cmp(&(&tb, hb)));
-        let (term, container) = IndexKey::split(&ka).unwrap();
+        let (term, hi48) = IndexKey::split(&ka).unwrap();
         prop_assert_eq!(term, ta.clone());
-        prop_assert_eq!(container, ha);
+        prop_assert_eq!(hi48, ha);
         // Every key-space range holds exactly the containers of its terms.
         let prefix = String::from_utf8_lossy(&b).into_owned();
         if prefix.as_bytes() == b.as_slice() {
