@@ -2,7 +2,7 @@ use crate::BITMAP_LEAF_DOMAIN;
 use golemdb_merkle::{Hash, HashProvider};
 use roaring::RoaringBitmap;
 
-use crate::{error::BitmapError, path};
+use crate::{IndexError, error::BitmapError, path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitmapContainer {
@@ -91,15 +91,32 @@ impl BitmapContainer {
     /// Reject alternate representations and trailing bytes rather than silently
     /// normalizing data whose content hash may already be stored.
     pub fn decode(bytes: &[u8]) -> Result<Self, BitmapError> {
-        let hi = bytes.get(..6).ok_or(BitmapError::TruncatedPath)?;
-        let mut path_bytes = [0u8; 8];
-        path_bytes[2..].copy_from_slice(hi);
-        let values = RoaringBitmap::deserialize_from(&bytes[6..]).map_err(BitmapError::Decode)?;
-        let container = Self::new(u64::from_be_bytes(path_bytes), values)?;
+        let container = Self::parse(bytes)?;
         if container.canonical_bytes()? != bytes {
             return Err(BitmapError::NonCanonicalEncoding);
         }
         Ok(container)
+    }
+
+    /// Decode bytes after verifying them against the committed leaf `hash`. Only
+    /// canonical bytes are hashed, so a match also proves them canonical.
+    pub(crate) fn decode_leaf(
+        bytes: &[u8],
+        hash: Hash,
+        hasher: &impl HashProvider,
+    ) -> crate::Result<Self> {
+        if hasher.hash_parts(&[&[BITMAP_LEAF_DOMAIN], bytes]) != hash {
+            return Err(IndexError::Corruption("container hash mismatch"));
+        }
+        Ok(Self::parse(bytes)?)
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, BitmapError> {
+        let hi = bytes.get(..6).ok_or(BitmapError::TruncatedPath)?;
+        let mut path_bytes = [0u8; 8];
+        path_bytes[2..].copy_from_slice(hi);
+        let values = RoaringBitmap::deserialize_from(&bytes[6..]).map_err(BitmapError::Decode)?;
+        Self::new(u64::from_be_bytes(path_bytes), values)
     }
 
     pub const fn path(&self) -> u64 {
