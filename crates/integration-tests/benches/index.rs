@@ -1,8 +1,11 @@
 use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use golemdb_cells::CellType;
-use golemdb_index::{BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange};
+use golemdb_cells::{CellNameRef, CellType};
+use golemdb_index::{
+    BitmapContainer, CONTAINER_LEAF_DOMAIN, INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange,
+    TermRange,
+};
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher, RootRef};
 use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 
@@ -15,15 +18,15 @@ fn codecs(c: &mut Criterion) {
         ("full", (0..=u16::MAX).collect()),
     ] {
         let container = BitmapContainer::from_values(42, values).unwrap();
-        let bytes = container.canonical_bytes().unwrap();
-        assert_eq!(BitmapContainer::decode(&bytes).unwrap(), container);
+        let bytes = container.encode().unwrap();
+        assert_eq!(BitmapContainer::decode(42, &bytes).unwrap(), container);
         group.bench_function(BenchmarkId::new("canonical_encode", name), |b| {
-            b.iter(|| black_box(&container).canonical_bytes().unwrap())
+            b.iter(|| black_box(&container).encode().unwrap())
         });
         group.bench_function(BenchmarkId::new("strict_decode", name), |b| {
-            b.iter(|| BitmapContainer::decode(black_box(&bytes)).unwrap())
+            b.iter(|| BitmapContainer::decode(42, black_box(&bytes)).unwrap())
         });
-        // Includes canonical encoding, as required by the public leaf_hash API.
+        // A leaf hash from a container: its canonical encoding, then the hash.
         fn hash_container<H: HashProvider>(
             group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
             name: &str,
@@ -33,7 +36,16 @@ fn codecs(c: &mut Criterion) {
         ) {
             group.bench_function(
                 BenchmarkId::new(format!("leaf_hash_with_encoding/{algorithm}"), name),
-                |b| b.iter(|| black_box(container).leaf_hash(hasher).unwrap()),
+                |b| {
+                    b.iter(|| {
+                        let roaring = black_box(container).encode().unwrap();
+                        hasher.hash_parts(&[
+                            &[CONTAINER_LEAF_DOMAIN],
+                            &[0; INDEX_TRIE_PATH_BYTES],
+                            &roaring,
+                        ])
+                    })
+                },
             );
         }
         hash_container(&mut group, name, "keccak-256", &container, &Keccak256Hasher);
@@ -163,13 +175,10 @@ fn backend(
     group.bench_function("materialize", |b| {
         b.iter(|| index.bitmap(&read, black_box(&selected)).unwrap())
     });
-    let prefix = IndexTerm::prefix("tag", CellType::Str).unwrap();
+    let run = TermRange::of_name(CellNameRef::raw(b"tag"), Some(CellType::Str)).unwrap();
     group.bench_function("scan_four_terms", |b| {
         b.iter(|| {
-            for entry in index
-                .terms_with_prefix(&read, black_box(prefix.clone()))
-                .unwrap()
-            {
+            for entry in index.terms(&read, black_box(run.clone())).unwrap() {
                 black_box(entry.unwrap());
             }
         })

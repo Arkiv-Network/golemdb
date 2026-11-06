@@ -63,10 +63,11 @@ impl CellValue {
     }
 
     /// Change only the kind, retaining the type and encoded payload. Variable-
-    /// length bytes cannot become an attribute. Deployment limits are unchanged.
+    /// length bytes, and a `str` holding `0x00`, cannot become an attribute.
+    /// Deployment limits are unchanged.
     pub fn with_kind(mut self, kind: CellKind) -> Result<Self, CellValueParseError> {
-        if kind == CellKind::Attribute && !self.ty.can_be_attribute() {
-            return Err(CellValueParseError::NotIndexable);
+        if kind == CellKind::Attribute {
+            check_attribute(self.ty, self.value())?;
         }
         self.bytes[0] = self.ty.id()
             | match kind {
@@ -375,8 +376,8 @@ impl<'a> CellValueRef<'a> {
         value: &'a [u8],
         indexable: bool,
     ) -> Result<Self, CellValueParseError> {
-        if indexable && !ty.can_be_attribute() {
-            return Err(CellValueParseError::NotIndexable);
+        if indexable {
+            check_attribute(ty, value)?;
         }
         ty.validate(value)?;
         Ok(Self {
@@ -568,4 +569,17 @@ impl<'a> CellValueRef<'a> {
         self.exact(CellType::Timestamp64)
             .map(|b| i64::from_be_bytes(flip_sign(b)))
     }
+}
+
+/// Whether a `ty` value of `value` bytes can be an attribute: not variable-
+/// length `bytes`, which has no order, nor a `str` holding `0x00`, which the
+/// index uses to end a string.
+fn check_attribute(ty: CellType, value: &[u8]) -> Result<(), CellValueParseError> {
+    if !ty.can_be_attribute() {
+        return Err(CellValueParseError::NotIndexable);
+    }
+    if ty == CellType::Str && value.contains(&0) {
+        return Err(CellValueParseError::NulInAttribute);
+    }
+    Ok(())
 }

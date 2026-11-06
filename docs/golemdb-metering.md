@@ -177,7 +177,7 @@ retrieval:
 - A **posting** is one record ID filed under a term.
 - A term's **posting list** is all record IDs under it. It is stored as a bitmap split into
   **bitmap containers**, each holding the 16-bit offsets of up to 2¹⁶ record IDs that share their
-  upper 48 bits, kept together by a bitmap trie ([design glossary](golemdb-design.md#glossary)).
+  upper 48 bits, each an `Index` row next to the term's others ([design glossary](golemdb-design.md#glossary)).
 
 Writes join and leave terms (D2); queries look terms up, step through ranges of terms, and load and
 combine posting lists (D6).
@@ -633,9 +633,9 @@ reference execution: the execution rules of the
     start with it. The empty prefix scans the whole `str` run.
 
   So scans over attributes with many distinct values pay for their width.
-- **Containers are charged one at a time, as they are loaded.** A posting root does not record
-  how many containers it holds, so the charge-before-step rule requires loading them one at a
-  time, walking the posting-list trie. Today's `bitmap_at` loads all of a term's containers at
+- **Containers are charged one at a time, as they are loaded.** Nothing records how many
+  containers a term holds, so the charge-before-step rule requires loading them one at a time,
+  one `Index` row per cursor step. Today's `Index::postings` loads all of a term's containers at
   once and needs a container-by-container variant.
 - **The containers of a set.** Every set a query holds, a posting list or the result of a
   combination, is a set of record IDs. Its **container count** `C(s)` is the number of distinct

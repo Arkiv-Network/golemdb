@@ -4,13 +4,14 @@ use golemdb_cells::{CellNameRef, CellType, CellValue, CellValueRef};
 
 use crate::{
     IndexTerm, TermError,
-    term::{name_prefix, name_str},
+    term::{key_bytes, name_prefix, name_str},
 };
 
-/// A range of index keys inside one name/type run, or over every run of one
-/// name, for an ordered scan with [`crate::Index::terms`].
+/// A range of index keys for an ordered scan with [`crate::Index::terms`]:
+/// inside one name/type run, over every run of one name, or over the whole
+/// index ([`TermRange::all`]).
 ///
-/// Every key in the range starts with the run's prefix, so a scan never
+/// In a run's range, every key starts with the run's prefix, so a scan never
 /// leaks into another type under the same name, nor into a longer name
 /// (`ab` when scanning `a`). Within the run, key order is value order. In a
 /// range over every run of a name ([`TermRange::of_name`] with no type),
@@ -118,6 +119,14 @@ impl TermRange {
         Ok(Self::starting_with(start))
     }
 
+    /// Every term in the index, in key order.
+    pub fn all() -> Self {
+        Self {
+            lower: Bound::Unbounded,
+            upper: Bound::Unbounded,
+        }
+    }
+
     /// The keys that start with `start`.
     fn starting_with(start: Vec<u8>) -> Self {
         Self {
@@ -126,7 +135,8 @@ impl TermRange {
         }
     }
 
-    /// The key bounds, usable as a `RangeBounds<[u8]>`.
+    /// The bounds on terms ([`IndexTerm::as_bytes`]), usable as a
+    /// `RangeBounds<[u8]>`. They are not bounds on `Index` keys.
     pub fn bounds(&self) -> (Bound<&[u8]>, Bound<&[u8]>) {
         (
             self.lower.as_ref().map(Vec::as_slice),
@@ -134,9 +144,33 @@ impl TermRange {
         )
     }
 
-    /// The key bounds, owned, as a storage scan takes them.
-    pub fn into_bounds(self) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
-        (self.lower, self.upper)
+    /// Bounds on container keys holding exactly the containers of the
+    /// range's terms. An included lower or excluded upper bound is a prefix
+    /// of the keys at or past it; the others bound every container of their
+    /// term.
+    pub(crate) fn into_key_bounds(self) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+        let lower = match self.lower {
+            Bound::Included(term) => Bound::Included(term),
+            Bound::Excluded(term) => after(&key_bytes(&term)),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        let upper = match self.upper {
+            Bound::Included(term) => past(key_bytes(&term)),
+            Bound::Excluded(term) => Bound::Excluded(term),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        (lower, upper)
+    }
+}
+
+/// The lower bound just past every key that starts with `prefix`, a term
+/// key.
+pub(crate) fn after(prefix: &[u8]) -> Bound<Vec<u8>> {
+    match past(prefix.to_vec()) {
+        Bound::Excluded(next) => Bound::Included(next),
+        // Only an all-0xff prefix has no key after it, and every term key
+        // holds the 0x00 after its name, so this is never reached.
+        _ => Bound::Excluded(prefix.to_vec()),
     }
 }
 
@@ -150,7 +184,7 @@ fn bound_value<T>(bound: Bound<T>) -> Option<T> {
 /// The upper bound just past every key that starts with `prefix`: excluding
 /// the least key greater than all of them, or unbounded when `prefix` is all
 /// `0xff`.
-fn past(mut prefix: Vec<u8>) -> Bound<Vec<u8>> {
+pub(crate) fn past(mut prefix: Vec<u8>) -> Bound<Vec<u8>> {
     while let Some(last) = prefix.pop() {
         if let Some(next) = last.checked_add(1) {
             prefix.push(next);

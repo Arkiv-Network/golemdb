@@ -1,8 +1,13 @@
-use golemdb_merkle::{Hash, HashProvider, RootRef};
+use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::{Table, WriteTransaction};
 
 use super::Index;
-use crate::{INDEX_TRIE_PATH_BYTES, IndexTerm, Result, bitmap_trie::BitmapTrie, path, tables};
+use crate::{
+    BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexTerm, Result,
+    index_trie::{ContainerEdit, IndexTriePath},
+    path, tables,
+    term::IndexKey,
+};
 
 /// Adds a record ID to a term's bitmap or removes it from that bitmap.
 /// If a batch changes the same term and record ID more than once, the last change wins.
@@ -12,35 +17,57 @@ pub enum PostingChange {
     Remove { term: IndexTerm, record_id: u64 },
 }
 
-/// A term's bitmap root before and after a batch of changes.
-/// `None` means the term had no records at that point and was absent from the index.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TermRootChange {
-    pub term: IndexTerm,
-    pub before: Option<Hash>,
-    pub after: Option<Hash>,
+/// A [`PostingChange`] with its record ID split into container and offset.
+struct Posting {
+    term: IndexTerm,
+    container: u64,
+    offset: u16,
+    present: bool,
 }
 
-/// The result of applying a batch: the new index root and the terms whose bitmaps changed.
+impl Posting {
+    /// What identifies a posting, without whether it is present.
+    fn key(&self) -> (&IndexTerm, u64, u16) {
+        (&self.term, self.container, self.offset)
+    }
+}
+
+impl From<PostingChange> for Posting {
+    fn from(change: PostingChange) -> Self {
+        let (term, record_id, present) = match change {
+            PostingChange::Add { term, record_id } => (term, record_id, true),
+            PostingChange::Remove { term, record_id } => (term, record_id, false),
+        };
+        let (container, offset) = path::split(record_id);
+        Self {
+            term,
+            container,
+            offset,
+            present,
+        }
+    }
+}
+
+/// The result of applying a batch: the new index root and the terms whose postings changed.
 /// These changes become permanent only when the caller commits the transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexUpdate {
     pub root: RootRef<INDEX_TRIE_PATH_BYTES>,
-    /// Actual changes only, in term order. Roots span the complete input batch.
-    pub changed_terms: Vec<TermRootChange>,
-    /// Stored trie and container rows this batch replaced, which only older
-    /// roots reach.
+    /// The terms whose postings changed, in term order.
+    pub changed_terms: Vec<IndexTerm>,
+    /// Stored trie rows this batch replaced, which only older roots reach.
     pub superseded: Vec<(Table, Vec<u8>)>,
 }
 
 impl<H: HashProvider> Index<'_, H> {
     /// Apply postings with last-operation-wins semantics for each (term, ID).
-    /// Coalesces containers and updates each affected term leaf once. The caller
-    /// must supply the root matching this transaction's flat state; affected
-    /// term commitments are checked, but this is not a whole-index audit. New
-    /// trie rows and containers are stored under `commit`, the commit this
-    /// batch publishes; a second batch at the same commit replaces rows, so
-    /// only its root stays valid.
+    /// Coalesces containers, rewrites each changed container's row in place,
+    /// and updates the trie once. The caller must supply the root matching this
+    /// transaction's tables; each touched container is checked against it in
+    /// that same trie update, but this is not a whole-index audit. New trie
+    /// rows are stored under `commit`, the commit this batch publishes; a
+    /// second batch at the same commit replaces rows, so only its root stays
+    /// valid.
     pub fn apply(
         &self,
         tx: &mut impl WriteTransaction,
@@ -48,78 +75,76 @@ impl<H: HashProvider> Index<'_, H> {
         root: RootRef<INDEX_TRIE_PATH_BYTES>,
         changes: impl IntoIterator<Item = PostingChange>,
     ) -> Result<IndexUpdate> {
-        let mut changes: Vec<_> = changes
-            .into_iter()
-            .map(|change| {
-                let (term, id, present) = match change {
-                    PostingChange::Add { term, record_id } => (term, record_id, true),
-                    PostingChange::Remove { term, record_id } => (term, record_id, false),
-                };
-                let (hi, lo) = path::split(id);
-                (term, hi, lo, present)
-            })
-            .collect();
+        let mut batch: Vec<_> = changes.into_iter().map(Posting::from).collect();
         // Stable sorting preserves input order for each posting. Do not include
         // `present` in the key: the final input operation determines membership.
-        changes.sort_by(|a, b| (&a.0, a.1, a.2).cmp(&(&b.0, b.1, b.2)));
-        changes.dedup_by(|later, earlier| {
-            if (&later.0, later.1, later.2) == (&earlier.0, earlier.1, earlier.2) {
+        batch.sort_by(|a, b| a.key().cmp(&b.key()));
+        batch.dedup_by(|later, earlier| {
+            if later.key() == earlier.key() {
                 // dedup_by keeps the earlier entry; copy the last operation into it.
-                earlier.3 = later.3;
+                earlier.present = later.present;
                 true
             } else {
                 false
             }
         });
-        let (mut changed_terms, mut superseded) = (Vec::new(), Vec::new());
-        for group in changes.chunk_by(|a, b| a.0 == b.0) {
-            let term = &group[0].0;
-            let before_root = self.bitmap_root(tx, term)?;
-            let before = before_root.map(|root| root.hash(self.hasher));
-            self.trie.check(tx, root, term, before)?;
+        let mut edits = Vec::new();
+        let mut changed_terms = Vec::new();
+        for group in batch.chunk_by(|a, b| a.term == b.term) {
+            let term = &group[0].term;
+            let term_key = term.key();
             let term_path = term.routing_path(self.hasher);
-            let update = BitmapTrie::new(self.hasher, &term_path).apply(
-                tx,
-                commit,
-                before_root,
-                group.iter().map(|&(_, hi, lo, present)| (hi, lo, present)),
-            )?;
-            superseded.extend(update.superseded);
-            let after_root = (update.root != RootRef::Empty).then_some(update.root);
-            let after = after_root.map(|root| root.hash(self.hasher));
-            // Containers count as changed only when their contents change, so an
-            // unchanged root superseded no rows.
-            if before == after {
-                continue;
-            }
-            match after_root {
-                Some(root) => tx.put(tables::INDEX, term.as_bytes(), &root.encode())?,
-                None => {
-                    tx.delete(tables::INDEX, term.as_bytes())?;
+            let mut changed = false;
+            for postings in group.chunk_by(|a, b| a.container == b.container) {
+                let container = postings[0].container;
+                let key = IndexKey::new(&term_key, container)?;
+                let path = IndexTriePath::new(&term_path, container)?;
+                let stored = tx.get(tables::INDEX, key.as_ref())?;
+                let before = stored
+                    .as_ref()
+                    .map(|bytes| self.trie.leaf_hash(&path, bytes));
+                let mut bitmap = match &stored {
+                    Some(bytes) => BitmapContainer::decode(container, bytes)?,
+                    None => BitmapContainer::empty(container)?,
+                };
+                let mut dirty = false;
+                for posting in postings {
+                    dirty |= if posting.present {
+                        bitmap.insert(posting.offset)
+                    } else {
+                        bitmap.remove(posting.offset)
+                    };
                 }
+                // Unchanged containers are still checked against the root.
+                let mut after = before;
+                if dirty {
+                    changed = true;
+                    let bytes = (!bitmap.is_empty()).then(|| bitmap.encode()).transpose()?;
+                    after = bytes
+                        .as_ref()
+                        .map(|bytes| self.trie.leaf_hash(&path, bytes));
+                    match bytes {
+                        Some(bytes) => tx.put(tables::INDEX, key.as_ref(), &bytes)?,
+                        None => {
+                            tx.delete(tables::INDEX, key.as_ref())?;
+                        }
+                    }
+                }
+                edits.push(ContainerEdit {
+                    path,
+                    before,
+                    after,
+                });
             }
-            changed_terms.push(TermRootChange {
-                term: term.clone(),
-                before,
-                after,
-            });
+            if changed {
+                changed_terms.push(term.clone());
+            }
         }
-        // Terms are unique, so each check above saw the original root and each
-        // term's row is written once; one trie update for the whole batch writes
-        // each touched branch once.
-        let update = self.trie.set(
-            tx,
-            commit,
-            root,
-            changed_terms
-                .iter()
-                .map(|change| (&change.term, change.after)),
-        )?;
-        superseded.extend(update.superseded);
+        let update = self.trie.set(tx, commit, root, edits)?;
         Ok(IndexUpdate {
             root: update.root,
             changed_terms,
-            superseded,
+            superseded: update.superseded,
         })
     }
 }

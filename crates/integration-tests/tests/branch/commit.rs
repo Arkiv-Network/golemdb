@@ -14,13 +14,11 @@ use std::{
 };
 
 const SUPERBLOCK: Table = Table("Superblock");
-const TABLES: [Table; 8] = [
+const TABLES: [Table; 6] = [
     tables::CELL,
     tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX,
     golemdb_index::tables::INDEX_TRIE.table(),
-    golemdb_index::tables::BITMAP_TRIE.table(),
-    golemdb_index::tables::BITMAP_CONTAINER.table(),
     SUPERBLOCK,
     Table("Roots"),
 ];

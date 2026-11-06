@@ -8,11 +8,9 @@ pub const STALE: Table = Table("Stale");
 
 /// The versioned tables, by their code in `Stale` keys. The codes are
 /// persisted: append only, never reorder.
-const TABLES: [Table; 4] = [
+const TABLES: [Table; 2] = [
     golemdb_cells::tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX_TRIE.table(),
-    golemdb_index::tables::BITMAP_TRIE.table(),
-    golemdb_index::tables::BITMAP_CONTAINER.table(),
 ];
 
 /// List the rows `commit` superseded.
@@ -265,15 +263,9 @@ mod tests {
 
     #[test]
     fn table_codes_are_pinned_and_unversioned_tables_are_rejected() {
-        use golemdb_index::tables::{BITMAP_CONTAINER, BITMAP_TRIE, INDEX, INDEX_TRIE};
-        let codes = [
-            CELL_TRIE,
-            INDEX_TRIE.table(),
-            BITMAP_TRIE.table(),
-            BITMAP_CONTAINER.table(),
-        ]
-        .map(|t| code(t).unwrap());
-        assert_eq!(codes, [0, 1, 2, 3]);
+        use golemdb_index::tables::{INDEX, INDEX_TRIE};
+        let codes = [CELL_TRIE, INDEX_TRIE.table()].map(|t| code(t).unwrap());
+        assert_eq!(codes, [0, 1]);
         assert!(matches!(
             code(INDEX),
             Err(crate::PruningError::UnversionedTable("Index"))

@@ -6,8 +6,7 @@ use crate::{
     CellValueChange, CellValueParseError, CellValueRef, Cells, tables,
 };
 use golemdb_merkle::{
-    BRANCH_SLOTS, BranchNodeCompact, HashProvider, Keccak256Hasher, LeafRef, LeafStorage, RootRef,
-    Trie,
+    BRANCH_SLOTS, BranchNodeCompact, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie,
 };
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 use proptest::prelude::*;
@@ -518,11 +517,8 @@ fn routes_written_at(
             continue;
         }
         let row = tx.get(tables::CELL_TRIE.table(), &trie.node_key(commit, &route));
-        let node = BranchNodeCompact::<CELL_TRIE_PATH_BYTES>::decode(
-            &row.unwrap().unwrap(),
-            LeafStorage::InNode,
-        )
-        .unwrap();
+        let node =
+            BranchNodeCompact::<CELL_TRIE_PATH_BYTES>::decode(&row.unwrap().unwrap()).unwrap();
         let below = [&route[..], &node.unpack_prefix()].concat();
         for slot in 0..BRANCH_SLOTS as u8 {
             if let Some(child) = node.child(slot) {
