@@ -406,7 +406,7 @@ Modeled depths approximate typical path work, not maximum depth. Calibration mus
 verify sufficient pricing margins for path-depth variation, growth within a branch,
 and posting-list updates. The depth cap limits charged depth, not supported database
 size or actual trie depth. The [design's depth bounds](golemdb-design.md#depth-bounds-and-future-optimization-paths)
-are 64 for cell/index tries and 12 for posting-list tries; these bounds and measured
+are 80 for the cell trie, 64 for the index trie and 12 for posting-list tries; these bounds and measured
 workloads inform verification rather than implying that current weights already cover
 every case.
 
