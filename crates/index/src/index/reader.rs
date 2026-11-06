@@ -11,7 +11,7 @@ use crate::{
 
 /// Whether `term` has postings: one seek to its first container row, decoding
 /// only its key without copying the container, and without traversing the
-/// trie. A row under `term` whose key is not a container key is an error.
+/// trie. A row under `term` whose key is not an `Index` key is an error.
 pub fn term_exists(tx: &impl ReadTransaction, term: &IndexTerm) -> Result<bool> {
     let term = term.as_bytes();
     tx.cursor(tables::INDEX, term)?.with_next(|row| match row {

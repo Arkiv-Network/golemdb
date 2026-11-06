@@ -4,8 +4,8 @@ use golemdb_merkle::{
 use golemdb_storage::{ReadCursor, ReadTransaction, WriteTransaction};
 
 use crate::{
-    BitmapContainer, CONTAINER_LEAF_DOMAIN, INDEX_BRANCH_DOMAIN, INDEX_TRIE_PATH_BYTES, IndexError,
-    IndexKey, Result, path, tables,
+    BitmapContainer, CONTAINER_LEAF_DOMAIN, ContainerId, INDEX_BRANCH_DOMAIN,
+    INDEX_TRIE_PATH_BYTES, IndexError, IndexKey, Result, tables,
 };
 
 /// The index trie over every term's containers. Leaves are virtual: each
@@ -15,18 +15,18 @@ pub(crate) struct IndexTrie<'h, H: HashProvider> {
     hasher: &'h H,
 }
 
-/// A container's index trie path: its term's routing path, then its `hi48`.
+/// A container's index trie path: its term's routing path, then its [`ContainerId`].
 /// Only [`IndexTriePath::new`] builds one, so every trie access is routed from a
 /// term and a container.
 #[derive(Clone, Copy)]
 pub(crate) struct IndexTriePath([u8; INDEX_TRIE_PATH_BYTES]);
 
 impl IndexTriePath {
-    pub(crate) fn new(term_path: &Hash, container_id: u64) -> Result<Self> {
+    pub(crate) fn new(term_path: &Hash, container_id: ContainerId) -> Self {
         let mut out = [0; INDEX_TRIE_PATH_BYTES];
         out[..term_path.len()].copy_from_slice(term_path);
-        out[term_path.len()..].copy_from_slice(&path::path_bytes(container_id)?);
-        Ok(Self(out))
+        out[term_path.len()..].copy_from_slice(&container_id.to_bytes());
+        Self(out)
     }
 }
 
@@ -103,7 +103,7 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
                     return Err(IndexError::RootMismatch);
                 }
                 let IndexKey { term, container_id } = IndexKey::decode(&key)?;
-                let path = IndexTriePath::new(&term.routing_path(self.hasher), container_id)?;
+                let path = IndexTriePath::new(&term.routing_path(self.hasher), container_id);
                 BitmapContainer::decode(container_id, &value)?;
                 if LeafRef::new(path.0, self.leaf_hash(&path, &value)) != leaf {
                     return Err(IndexError::RootMismatch);
