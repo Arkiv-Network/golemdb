@@ -551,6 +551,7 @@ dependencies = [
  "proptest",
  "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
