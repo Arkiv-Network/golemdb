@@ -14,10 +14,11 @@ use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{
     BranchError, BranchId, BranchInfo, CellRead, CellWrite, CommitId, OperationError, Result,
-    SealedCommit,
+    Retention, SealedCommit,
     head::read_head,
     immutable::{ImmutableSegments, ImmutableStaging},
     overlay::CellOverlay,
+    roots::earliest_commit,
 };
 
 // A process-wide counter prevents handle aliasing between independent managers,
@@ -173,6 +174,14 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
 
     pub fn head(&self) -> Result<CommitId> {
         read_head(&self.inner.store.begin_read()?)
+    }
+
+    /// The commits whose state this store retains, from one snapshot.
+    pub fn retention(&self) -> Result<Retention> {
+        let tx = self.inner.store.begin_read()?;
+        let head = read_head(&tx)?;
+        let earliest = earliest_commit(&tx)?.unwrap_or(head);
+        Ok(Retention { earliest, head })
     }
 
     /// The store shared by this manager. Committed readers can open a

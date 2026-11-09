@@ -73,7 +73,7 @@ pub use query_op::{CountOp, QueryOp};
 pub use record_op::{RecordOp, op};
 pub use types::SealInfo;
 
-pub use golemdb_branch::{BranchId, BranchInfo, CommitId};
+pub use golemdb_branch::{BranchId, BranchInfo, CommitId, Retention};
 pub use golemdb_cells::{
     CellKind, CellName, CellNameRef, CellType, CellValue, FloatWidth, NotNan32, NotNan64, Width,
     marker,
@@ -151,6 +151,8 @@ pub trait Api {
     /// unknown, consumed, or previously invalidated IDs return HandleInvalid.
     fn commit(&self, branch: BranchId) -> Result<CommitId>;
     fn discard(&self, branch: BranchId) -> Result<()>;
+    /// The commits whose state this node retains, from one snapshot.
+    fn retention(&self) -> Result<Retention>;
 
     /// Discover a segment's ordered column names and logical types from genesis.
     /// Unknown segments return NotFound, including when no segments are configured.

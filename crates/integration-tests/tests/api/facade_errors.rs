@@ -131,6 +131,7 @@ fn failure_contract(database: impl Store + Clone + Send + Sync + 'static) {
         .unwrap_err(),
     );
     diagnostic(db.head().unwrap_err());
+    diagnostic(db.retention().unwrap_err());
     fail_reads.store(false, Ordering::SeqCst);
     assert_eq!(db.branch_info(branch).unwrap(), info);
     assert_eq!(

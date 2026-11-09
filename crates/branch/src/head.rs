@@ -5,7 +5,7 @@ use golemdb_storage::{ReadCursor, ReadTransaction, Table, WriteTransaction};
 
 use crate::{
     BranchError, CommitId, Result,
-    roots::{ROOTS, Roots, put_roots},
+    roots::{ROOTS, Roots, put_roots, roots_commit},
 };
 
 const SUPERBLOCK: Table = Table("Superblock");
@@ -88,10 +88,7 @@ pub fn write_head(
 ) -> Result<Head> {
     // `Roots` is appended in commit order, so its last key is the latest commit.
     if let Some((key, _)) = tx.cursor(ROOTS, &u64::MAX.to_be_bytes())?.prev()? {
-        let Ok(latest) = <[u8; COMMIT_BYTES]>::try_from(key.as_slice()) else {
-            return Err(BranchError::InvalidRootsKey(key));
-        };
-        let latest = u64::from_be_bytes(latest);
+        let latest = roots_commit(&key)?;
         if commit_id.get() <= latest {
             return Err(BranchError::CommitNotNewer {
                 commit: commit_id.get(),

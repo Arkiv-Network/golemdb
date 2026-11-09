@@ -15,7 +15,8 @@ use crate::{
     Api, ApiError, BranchId, BranchInfo, CommitId, CountOp, Genesis, HashAlgorithm,
     ImmutableDataAddress, ImmutableDataKey, ImmutableDataOrdinal, ImmutableDataReadOptions,
     ImmutableDataRow, ImmutableDataSchema, MeteringModelInfo, ModelWeights, OpenConfig, OpenInfo,
-    OpenResult, QueryOp, QueryPage, ReadTarget, Record, RecordKey, RecordOp, Result, SealInfo, op,
+    OpenResult, QueryOp, QueryPage, ReadTarget, Record, RecordKey, RecordOp, Result, Retention,
+    SealInfo, op,
 };
 
 /// Cloneable public database handle. Clones share one engine and branch registry;
@@ -193,6 +194,9 @@ impl Api for Database {
     }
     fn discard(&self, branch: BranchId) -> Result<()> {
         self.inner.discard(branch)
+    }
+    fn retention(&self) -> Result<Retention> {
+        self.inner.retention()
     }
 
     fn immutable_data_schema(&self, segment: &str) -> Result<ImmutableDataSchema> {
@@ -395,6 +399,9 @@ impl<S: Store, H: HashProvider> Api for Inner<S, H> {
     }
     fn discard(&self, branch: BranchId) -> Result<()> {
         self.branches.discard(branch).map_err(Into::into)
+    }
+    fn retention(&self) -> Result<Retention> {
+        self.branches.retention().map_err(Into::into)
     }
 
     fn immutable_data_schema(&self, segment: &str) -> Result<ImmutableDataSchema> {

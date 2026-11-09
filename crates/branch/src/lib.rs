@@ -200,7 +200,7 @@ pub use record_scan::{CellLocation, RecordScan};
 pub use roots::{ROOTS, Roots, head_roots, read_roots};
 pub use scan::CellScan;
 pub use seal::SealedCommit;
-pub use types::{BranchId, BranchInfo, CommitId};
+pub use types::{BranchId, BranchInfo, CommitId, Retention};
 
 #[cfg(test)]
 #[path = "tests/buffer.rs"]

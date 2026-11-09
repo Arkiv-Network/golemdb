@@ -84,6 +84,12 @@ fn rows(db: &MemoryStore, table: Table) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
+/// `(earliest, head)` from `retention()`.
+fn retention(api: &Database) -> (u64, u64) {
+    let retention = api.retention().unwrap();
+    (retention.earliest.get(), retention.head.get())
+}
+
 fn with_min_retention(commits: u64) -> OpenConfig {
     let mut genesis = config().genesis;
     genesis.min_retention = commits;
@@ -110,6 +116,19 @@ fn default_pruning_keeps_min_retention() {
         commit(&api, price);
     }
     assert_eq!(count(&db, Table("Roots")), 4);
+    let head = COMMITS as u64;
+    assert_eq!(retention(&api), (head - 3, head));
+}
+
+/// Without pruning a node retains, and reports, every commit.
+#[test]
+fn without_pruning_retains_every_commit() {
+    let open = with_min_retention(3).without_pruning();
+    let api = Database::from_store(MemoryStore::new(), &open).unwrap();
+    for price in 0..COMMITS {
+        commit(&api, price);
+    }
+    assert_eq!(retention(&api), (0, COMMITS as u64));
 }
 
 /// `#minRetention` is part of the genesis identity, and a mismatch is reported
@@ -142,8 +161,11 @@ fn grown_window_does_not_restore_pruned_commits() {
     let large = config().with_pruning(PruningConfig::new(10));
     let api = Database::from_store(db.clone(), &large).unwrap();
     assert_eq!(count(&db, Table("Roots")), 3);
+    let head = COMMITS as u64;
+    assert_eq!(retention(&api), (head - 2, head));
     commit(&api, COMMITS);
     assert_eq!(count(&db, Table("Roots")), 4);
+    assert_eq!(retention(&api), (head - 2, head + 1));
 }
 
 /// A reopen with the same settings prunes as an uninterrupted run does.

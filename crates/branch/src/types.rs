@@ -85,3 +85,14 @@ pub struct BranchInfo {
     /// batches remain editable and are excluded from `version`.
     pub sealed: bool,
 }
+
+/// The commits whose state this store retains: every one from `earliest` to
+/// `head`. Node-local: it depends on the store's pruning settings; opening the
+/// database refuses a window below `#minRetention`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Retention {
+    /// The oldest commit whose state is retained.
+    pub earliest: CommitId,
+    /// The current committed head.
+    pub head: CommitId,
+}
