@@ -1,10 +1,10 @@
 //! Transactional flat index, ordered terms, and canonical bitmap chunks.
 //!
 //! A record ID splits into its top 48 bits, `hi48`, naming its container,
-//! and a 16-bit offset. Each term's containers are leaves of the
-//! one index trie at `H(term) ‖ hi48`, so a term's postings are the subtree under its hash.
-//! Containers are live rows of `Index`, keyed in term order and overwritten
-//! in place like cells. [`Bitmap`] assembles chunks for queries, without
+//! and a 16-bit offset. Each term's containers are leaves of the one index
+//! trie at `H(term) ‖ hi48`, so a term's postings are the subtree under its
+//! hash. Containers are live rows of `Index`, keyed in term order and
+//! overwritten in place like cells. [`Bitmap`] assembles chunks for queries, without
 //! owning storage or hashing. All hashing receives the same configured
 //! [`golemdb_merkle::HashProvider`] from the caller.
 //!

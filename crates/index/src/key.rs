@@ -1,6 +1,10 @@
+use std::ops::Bound;
+
 use golemdb_cells::CellType;
 
-use crate::{HI48_BYTES, IndexError, IndexTerm, PATH_BYTE_OFFSET, TermError, path};
+use crate::{
+    HI48_BYTES, IndexError, IndexTerm, PATH_BYTE_OFFSET, TermError, path, term_range::past,
+};
 
 /// A container's `Index` key, decoded: its term and its `container_id`, the
 /// `hi48` its record IDs share. Encoded, it is the term's bytes, then `hi48`.
@@ -22,6 +26,8 @@ impl IndexKey {
     /// suffix that is not a `hi48`. The term ends after its fixed-width value,
     /// or after a string's `0x00`.
     pub fn decode(key: &[u8]) -> crate::Result<Self> {
+        // Finds where the term ends by the rule `IndexTerm::decode` checks;
+        // that decode is the source of truth and validates the bytes found.
         let bad = || TermError::InvalidEncoding;
         let split = key.iter().position(|&b| b == 0).ok_or_else(bad)?;
         let tag = *key.get(split + 1).ok_or_else(bad)?;
@@ -57,6 +63,37 @@ impl IndexKey {
 /// The `Index` key of `term`'s container `container_id`: `term ‖ hi48`.
 pub(crate) fn encode(term: &IndexTerm, container_id: u64) -> crate::Result<Vec<u8>> {
     Ok([term.as_bytes(), &path::path_bytes(container_id)?].concat())
+}
+
+/// Bounds on `Index` keys holding exactly the containers of the terms within
+/// `terms` ([`crate::TermRange::bounds`]). Every key of a term starts with
+/// it, so an included lower or excluded upper term bounds the keys as is; an
+/// excluded lower term starts past all its keys, and an included upper one
+/// ends past them.
+pub(crate) fn bounds(
+    (lower, upper): (Bound<&[u8]>, Bound<&[u8]>),
+) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    let lower = match lower {
+        Bound::Included(term) => Bound::Included(term.to_vec()),
+        Bound::Excluded(term) => after(term),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    let upper = match upper {
+        Bound::Included(term) => past(term.to_vec()),
+        Bound::Excluded(term) => Bound::Excluded(term.to_vec()),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    (lower, upper)
+}
+
+/// The lower bound just past every key that starts with `term`.
+fn after(term: &[u8]) -> Bound<Vec<u8>> {
+    match past(term.to_vec()) {
+        Bound::Excluded(next) => Bound::Included(next),
+        // Only an all-0xff prefix has no key after it, and every term
+        // holds the 0x00 after its name.
+        _ => unreachable!("a term holds a 0x00 byte"),
+    }
 }
 
 /// The `container_id` stored as `hi48`, the bytes after a term; any other

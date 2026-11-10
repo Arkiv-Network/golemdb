@@ -22,10 +22,10 @@ pub(crate) struct IndexTrie<'h, H: HashProvider> {
 pub(crate) struct IndexTriePath([u8; INDEX_TRIE_PATH_BYTES]);
 
 impl IndexTriePath {
-    pub(crate) fn new(term_path: &Hash, container: u64) -> Result<Self> {
+    pub(crate) fn new(term_path: &Hash, container_id: u64) -> Result<Self> {
         let mut out = [0; INDEX_TRIE_PATH_BYTES];
         out[..term_path.len()].copy_from_slice(term_path);
-        out[term_path.len()..].copy_from_slice(&path::path_bytes(container)?);
+        out[term_path.len()..].copy_from_slice(&path::path_bytes(container_id)?);
         Ok(Self(out))
     }
 }
@@ -102,12 +102,9 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
                 if cursor.next()?.is_some() {
                     return Err(IndexError::RootMismatch);
                 }
-                let IndexKey {
-                    term,
-                    container_id: container,
-                } = IndexKey::decode(&key)?;
-                let path = IndexTriePath::new(&term.routing_path(self.hasher), container)?;
-                BitmapContainer::decode(container, &value)?;
+                let IndexKey { term, container_id } = IndexKey::decode(&key)?;
+                let path = IndexTriePath::new(&term.routing_path(self.hasher), container_id)?;
+                BitmapContainer::decode(container_id, &value)?;
                 if LeafRef::new(path.0, self.leaf_hash(&path, &value)) != leaf {
                     return Err(IndexError::RootMismatch);
                 }

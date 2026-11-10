@@ -67,8 +67,8 @@ impl Genesis {
                 "max_cell_name_len must be positive".into(),
             ));
         }
-        // Complete cell keys include recordID; index keys are bounded by
-        // the index.
+        // A cell key is `recordID ‖ name`; the longest index key is
+        // `IndexKey::max_len`.
         let name = u64::from(limits.max_cell_name_len);
         let key = (name + 8)
             .max(IndexKey::max_len(name, limits.max_str_len.into()))

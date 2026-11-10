@@ -16,10 +16,10 @@ pub enum PostingChange {
     Remove { term: IndexTerm, record_id: u64 },
 }
 
-/// A [`PostingChange`] with its record ID split into container and offset.
+/// A [`PostingChange`] with its record ID split into container ID and offset.
 struct Posting {
     term: IndexTerm,
-    container: u64,
+    container_id: u64,
     offset: u16,
     present: bool,
 }
@@ -27,7 +27,7 @@ struct Posting {
 impl Posting {
     /// What identifies a posting, without whether it is present.
     fn key(&self) -> (&IndexTerm, u64, u16) {
-        (&self.term, self.container, self.offset)
+        (&self.term, self.container_id, self.offset)
     }
 }
 
@@ -37,10 +37,10 @@ impl From<PostingChange> for Posting {
             PostingChange::Add { term, record_id } => (term, record_id, true),
             PostingChange::Remove { term, record_id } => (term, record_id, false),
         };
-        let (container, offset) = path::split(record_id);
+        let (container_id, offset) = path::split(record_id);
         Self {
             term,
-            container,
+            container_id,
             offset,
             present,
         }
@@ -93,17 +93,17 @@ impl<H: HashProvider> Index<'_, H> {
             let term = &group[0].term;
             let term_path = term.routing_path(self.hasher);
             let mut changed = false;
-            for postings in group.chunk_by(|a, b| a.container == b.container) {
-                let container = postings[0].container;
-                let key = key::encode(term, container)?;
-                let path = IndexTriePath::new(&term_path, container)?;
+            for postings in group.chunk_by(|a, b| a.container_id == b.container_id) {
+                let container_id = postings[0].container_id;
+                let key = key::encode(term, container_id)?;
+                let path = IndexTriePath::new(&term_path, container_id)?;
                 let stored = tx.get(tables::INDEX, &key)?;
                 let before = stored
                     .as_ref()
                     .map(|bytes| self.trie.leaf_hash(&path, bytes));
                 let mut bitmap = match &stored {
-                    Some(bytes) => BitmapContainer::decode(container, bytes)?,
-                    None => BitmapContainer::empty(container)?,
+                    Some(bytes) => BitmapContainer::decode(container_id, bytes)?,
+                    None => BitmapContainer::empty(container_id)?,
                 };
                 let mut dirty = false;
                 for posting in postings {

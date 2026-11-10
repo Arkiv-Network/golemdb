@@ -265,7 +265,7 @@ fn physical_limits_cover_full_index_keys_fixed_values_and_size_overflow() {
     let mut cfg = config(files.path());
     for (name, string, bytes, max_key, max_value) in [
         (0, 64, 128, usize::MAX, usize::MAX),
-        // The index needs 32 + 2, a 64-byte string with its terminator,
+        // The index needs 32 + 2 bytes, a 64-byte string, its terminator
         // and hi48.
         (32, 64, 128, 104, usize::MAX),
         (32, 0, 128, 71, usize::MAX), // u256 needs 32 bytes even with zero string cap

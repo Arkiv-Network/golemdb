@@ -113,7 +113,7 @@ Ordered comparisons and scans are meaningful within a single name/type prefix.
 | `Superblock` | Metadata name | Format identifiers, genesis identity, or head. |
 | `Cell` | Encoded `CellKey` | Tagged canonical cell value. |
 | `CellTrie` | Commit and route | Compact branch bytes for 40-byte paths. |
-| `Index` | Term key followed by the container's six-byte path | Canonical portable Roaring bytes. |
+| `Index` | Term followed by the container's six-byte path | Canonical portable Roaring bytes. |
 | `IndexTrie` | Commit and route | Compact branch bytes for 38-byte paths. |
 
 `Superblock/head` is `commit_id:u64_be || state_root:[u8;32] || index_root:[u8;32]`.
@@ -580,8 +580,8 @@ Retention/pruning, key expiry and digests remain deferred.
 ### History, proofs, and storage evolution
 
 Historical record/index queries, forks, and rewind require matching historical
-flat state and root metadata. Retaining immutable branch/container rows alone does
-not reconstruct old record payloads or term tables. Changesets, reconstruction,
+flat state and root metadata. Retaining immutable trie branch rows alone does not
+reconstruct old cell values or containers, which are live rows overwritten in place. Changesets, reconstruction,
 retention, and garbage collection must preserve the roots and leaf data needed by
 readers and proofs.
 

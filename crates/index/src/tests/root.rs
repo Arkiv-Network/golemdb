@@ -71,7 +71,7 @@ proptest! {
         let prefix = String::from_utf8_lossy(&b).into_owned();
         if prefix.as_bytes() == b.as_slice() {
             let range = TermRange::with_prefix(golemdb_cells::CellNameRef::raw(b"s"), &prefix).unwrap();
-            let (lower, upper) = range.into_key_bounds();
+            let (lower, upper) = crate::key::bounds(range.bounds());
             prop_assert_eq!((lower, upper).contains(&ka), a.starts_with(&b));
         }
     }

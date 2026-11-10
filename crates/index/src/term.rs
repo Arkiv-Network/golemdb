@@ -2,11 +2,11 @@ use golemdb_cells::{CellNameRef, CellType, CellValueParseError, CellValueRef, Fl
 use golemdb_merkle::{Hash, HashProvider};
 use std::{error::Error, fmt};
 
-/// Canonical ordered index term: `name || 0x00 || attribute_tag || ordered_value`,
-/// with a `str` value then ended by `0x00`.
+/// Canonical ordered index term:
+/// `name || 0x00 || attribute_tag || ordered_value [|| 0x00]`.
 ///
-/// Strings have no length prefix; a `str` holds no `0x00`, so its terminator
-/// ends the term and no term is a prefix of another. Signed numbers flip the
+/// Strings have no length prefix: a `str` value ends with `0x00`, which it
+/// cannot hold, so no term is a prefix of another. Signed numbers flip the
 /// sign bit; floats use the sortable IEEE transform after rejecting NaNs and
 /// normalizing zero.
 /// Ordering is meaningful within one name/type prefix. Name/value size policies
@@ -133,8 +133,8 @@ impl IndexTerm {
         self.0
     }
 
-    /// The term's hash, which starts the index trie path of each of its
-    /// containers (the term itself has no hash domain).
+    /// The term's hash, with no domain byte: the start of the index trie path
+    /// of each of its containers.
     pub fn routing_path(&self, hasher: &impl HashProvider) -> Hash {
         hasher.hash(&self.0)
     }

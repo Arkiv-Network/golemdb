@@ -10,8 +10,8 @@ use crate::{
 };
 
 /// Whether `term` has postings: one seek to its first container row, decoding
-/// only its key, without traversing the trie. A row whose key is not a container key
-/// of `term` is an error.
+/// only its key, without traversing the trie. A row whose key is not a
+/// container key of `term` is an error.
 pub fn term_exists(tx: &impl ReadTransaction, term: &IndexTerm) -> Result<bool> {
     match scan_prefix(tx, tables::INDEX, term.as_bytes().to_vec())?
         .next()
@@ -57,7 +57,7 @@ impl<H: HashProvider> Index<'_, H> {
         tx: &'a T,
         range: TermRange,
     ) -> Result<TermScan<T::Cursor<'a>>> {
-        let (lower, upper) = range.into_key_bounds();
+        let (lower, upper) = key::bounds(range.bounds());
         Ok(TermScan::new(scan(tx, tables::INDEX, lower, upper)?))
     }
 }

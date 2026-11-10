@@ -169,7 +169,7 @@ adopted here is stated and the document follows it.
 | **attribute / field** | The two cell kinds: an attribute is indexed and queryable, a field is never indexed (§3) |
 | **type tag** | The one-byte prefix of every cell value: kind bit plus 7-bit type code; part of the commitment (§3) |
 | **codec** | The encoder/decoder pair fixed for one type; one valid byte form per value; order-preserving where the value reaches a key (§1, §3) |
-| **index term** | `cellKey ‖ 0x00 ‖ typeTag ‖ cellValue`, a string value then ended by `0x00` — one attribute value, and the start of its `Index` keys (§5) |
+| **index term** | `cellKey ‖ 0x00 ‖ typeTag ‖ cellValue [‖ 0x00]` — one attribute value, a string value ending with `0x00`; the start of its `Index` keys (§5) |
 | **posting list** | The set of `recordID`s holding an index term, stored as Roaring containers, one `Index` row each (§5, §6) |
 | **container** | An `Index` row: the Roaring set of one term's 16-bit offsets in one 48-bit region `hi48`, and a leaf of `IndexTrie` (§2, §6) |
 | **trie** | A Merkle Patricia Trie. **Canonical trie:** path-addressed, the object the commitment is defined over. **Physical trie:** how nodes are stored — here rows keyed `commitNr ‖ route` (§9) |
@@ -386,8 +386,8 @@ count (`u8`) then the packed nibbles._
 | `Roots`           | `commitNr: u64`                                                    | `len(state): u8` ‖ `state` ‖ `index` locators   | Uncommitted: where each commit's two roots are stored, so old tries stay walkable.                     |
 | `Stale`           | `commitNr: u64` ‖ `table: u8` ‖ `key`                              | empty                                           | Uncommitted: rows each commit superseded, in key order, awaiting deletion ([§9](#garbage-collection)). |
 
-`term` is the index term `cellKey ‖ 0x00 ‖ typeTag ‖ cellValue`, a variable-width `cellValue`
-ended by `0x00`, so that `hi48` can follow it ([§5](#structural-index-key-formulation)).
+`term` is the index term `cellKey ‖ 0x00 ‖ typeTag ‖ cellValue [‖ 0x00]`: a string value ends
+with `0x00`, so that `hi48` can follow it ([§5](#structural-index-key-formulation)).
 
 The eight data tables fall into three groups — **primary state and its commitment** (`Cell`,
 `CellTrie`), **indexing and its commitment** (`Index`, `IndexTrie`) and **history**

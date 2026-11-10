@@ -67,11 +67,8 @@ fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Vec<(Vec<u8>, Ve
     let containers: Vec<_> = rows(tx, tables::INDEX)
         .into_iter()
         .filter_map(|(key, value)| {
-            let IndexKey {
-                term,
-                container_id: container,
-            } = IndexKey::decode(&key).unwrap();
-            let path = golemdb_index::path::path_bytes(container).unwrap();
+            let IndexKey { term, container_id } = IndexKey::decode(&key).unwrap();
+            let path = golemdb_index::path::path_bytes(container_id).unwrap();
             (&term == t).then(|| (path.to_vec(), value))
         })
         .collect();
@@ -117,12 +114,9 @@ fn assert_state(
     let mut leaves = rows(tx, tables::INDEX)
         .into_iter()
         .map(|(key, value)| {
-            let IndexKey {
-                term,
-                container_id: container,
-            } = IndexKey::decode(&key).unwrap();
-            let container = golemdb_index::path::path_bytes(container).unwrap();
-            let path = [&term.routing_path(&HASH)[..], &container].concat();
+            let IndexKey { term, container_id } = IndexKey::decode(&key).unwrap();
+            let hi48 = golemdb_index::path::path_bytes(container_id).unwrap();
+            let path = [&term.routing_path(&HASH)[..], &hi48].concat();
             let hash = HASH.hash_parts(&[&[CONTAINER_LEAF_DOMAIN], &path, &value]);
             LeafRef::new(path.try_into().unwrap(), hash)
         })
