@@ -5,20 +5,22 @@ use golemdb_storage::{Entry, ReadCursor, ReadTransaction, Scan, scan, scan_prefi
 
 use super::Index;
 use crate::{
-    Bitmap, BitmapContainer, HI48_BYTES, INDEX_TRIE_PATH_BYTES, IndexTerm, Result, TermRange,
-    tables, term::IndexKey,
+    Bitmap, BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Result, TermRange,
+    key::{self, term_key},
+    tables,
 };
 
-/// Whether `term` has postings: one seek to its first container row, without
-/// decoding it or traversing the trie. A row whose key is not a container key
+/// Whether `term` has postings: one seek to its first container row, decoding
+/// only its key, without traversing the trie. A row whose key is not a container key
 /// of `term` is an error.
 pub fn term_exists(tx: &impl ReadTransaction, term: &IndexTerm) -> Result<bool> {
-    let key = term.key();
-    let len = key.len();
-    match scan_prefix(tx, tables::INDEX, key)?.next().transpose()? {
+    match scan_prefix(tx, tables::INDEX, term_key(term.as_bytes()))?
+        .next()
+        .transpose()?
+    {
         None => Ok(false),
         Some((row, _)) => {
-            IndexKey::container(&row[len..])?;
+            IndexKey::decode(&row)?;
             Ok(true)
         }
     }
@@ -40,7 +42,7 @@ impl<H: HashProvider> Index<'_, H> {
     /// return None, never an empty bitmap.
     pub fn bitmap(&self, tx: &impl ReadTransaction, term: &IndexTerm) -> Result<Option<Bitmap>> {
         // No other term's key starts with this term's, so the scan holds only its rows.
-        let mut rows = TermScan::new(scan_prefix(tx, tables::INDEX, term.key())?);
+        let mut rows = TermScan::new(scan_prefix(tx, tables::INDEX, term_key(term.as_bytes()))?);
         Ok(rows.next().transpose()?.map(|(_, bitmap)| bitmap))
     }
 
@@ -82,19 +84,19 @@ impl<C: ReadCursor> TermScan<C> {
             return Ok(None);
         };
         let (key, value) = row?;
-        let (term, container) = IndexKey::split(&key)?;
-        let term_key = &key[..key.len() - HI48_BYTES];
-        let mut containers = vec![BitmapContainer::decode(container, &value)?];
-        // The term key ends unambiguously, so its rows are those it prefixes.
+        let IndexKey { term, container_id } = IndexKey::decode(&key)?;
+        let prefix = term_key(term.as_bytes());
+        let mut containers = vec![BitmapContainer::decode(container_id, &value)?];
+        // The term key ends unambiguously, so its rows are those it starts.
         // An error may hide one of the term's rows, so it fails the term.
         let same_term = |row: &golemdb_storage::Result<Entry>| {
             row.as_ref()
-                .map_or(true, |(next, _)| next.starts_with(term_key))
+                .map_or(true, |(next, _)| next.starts_with(&prefix))
         };
         while let Some(row) = self.rows.next_if(same_term) {
             let (next, value) = row?;
-            let container = IndexKey::container(&next[term_key.len()..])?;
-            containers.push(BitmapContainer::decode(container, &value)?);
+            let container_id = key::container_id(&next[prefix.len()..])?;
+            containers.push(BitmapContainer::decode(container_id, &value)?);
         }
         Ok(Some((term, Bitmap::from_containers(containers)?)))
     }
@@ -140,7 +142,7 @@ mod tests {
         let root = index.apply(&mut tx, 1, RootRef::Empty, [add]).unwrap().root;
         assert!(term_exists(&tx, &long).unwrap());
         assert!(!term_exists(&tx, &short).unwrap());
-        let stray = [short.key(), vec![0]].concat();
+        let stray = [term_key(short.as_bytes()), vec![0]].concat();
         tx.put(tables::INDEX, &stray, &[]).unwrap();
         assert!(term_exists(&tx, &short).is_err());
         tx.delete(tables::INDEX, &stray).unwrap();

@@ -8,8 +8,8 @@ use std::{
 
 use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
 use golemdb_index::{
-    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexTerm, PostingChange, TermRange,
-    tables,
+    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexKey, IndexTerm, PostingChange,
+    TermRange, tables,
 };
 use golemdb_merkle::{HASH_BYTES, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
@@ -54,18 +54,25 @@ fn rows(tx: &impl ReadTransaction, table: golemdb_storage::Table) -> Vec<golemdb
 }
 /// The `Index` row key of a term's container at `hi`.
 fn container_key(t: &IndexTerm, hi: u64) -> Vec<u8> {
-    [&t.key()[..], &golemdb_index::path::path_bytes(hi).unwrap()].concat()
+    let key = IndexKey {
+        term: t.clone(),
+        container_id: hi,
+    };
+    key.encode().unwrap()
 }
 
 /// A term's containers, each as its path and value, `None` for a term absent
 /// from the index.
 fn root_for(tx: &impl ReadTransaction, t: &IndexTerm) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
-    let key = t.key();
-    let containers: Vec<_> = scan_prefix(tx, tables::INDEX, key.clone())
-        .unwrap()
-        .map(|row| {
-            let (row_key, value) = row.unwrap();
-            (row_key[key.len()..].to_vec(), value)
+    let containers: Vec<_> = rows(tx, tables::INDEX)
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let IndexKey {
+                term,
+                container_id: container,
+            } = IndexKey::decode(&key).unwrap();
+            let path = golemdb_index::path::path_bytes(container).unwrap();
+            (&term == t).then(|| (path.to_vec(), value))
         })
         .collect();
     (!containers.is_empty()).then_some(containers)
@@ -110,8 +117,12 @@ fn assert_state(
     let mut leaves = rows(tx, tables::INDEX)
         .into_iter()
         .map(|(key, value)| {
-            let (term, container) = IndexTerm::split_key(&key).unwrap();
-            let path = [&term.routing_path(&HASH)[..], container].concat();
+            let IndexKey {
+                term,
+                container_id: container,
+            } = IndexKey::decode(&key).unwrap();
+            let container = golemdb_index::path::path_bytes(container).unwrap();
+            let path = [&term.routing_path(&HASH)[..], &container].concat();
             let hash = HASH.hash_parts(&[&[CONTAINER_LEAF_DOMAIN], &path, &value]);
             LeafRef::new(path.try_into().unwrap(), hash)
         })

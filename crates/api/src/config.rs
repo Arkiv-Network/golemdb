@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use golemdb_cells::CellLimits;
 use golemdb_immutable_data::ImmutableDataConfig;
-use golemdb_index::IndexTerm;
+use golemdb_index::IndexKey;
 use golemdb_merkle::HashAlgorithm;
 use golemdb_metering::{HostMeteringSchema, PricingConfig};
 use golemdb_pruning::PruningConfig;
@@ -71,7 +71,7 @@ impl Genesis {
         // the index.
         let name = u64::from(limits.max_cell_name_len);
         let key = (name + 8)
-            .max(IndexTerm::max_key_len(name, limits.max_str_len.into()))
+            .max(IndexKey::max_len(name, limits.max_str_len.into()))
             .max(40);
         // The format reserves 16 KiB for fixed engine values: trie nodes, metadata,
         // root pairs, and canonical single-u16-domain Roaring containers.

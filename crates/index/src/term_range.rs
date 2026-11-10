@@ -4,7 +4,8 @@ use golemdb_cells::{CellNameRef, CellType, CellValue, CellValueRef};
 
 use crate::{
     IndexTerm, TermError,
-    term::{key_bytes, name_prefix, name_str},
+    key::term_key,
+    term::{name_prefix, name_str},
 };
 
 /// A range of index keys for an ordered scan with [`crate::Index::terms`]:
@@ -144,18 +145,18 @@ impl TermRange {
         )
     }
 
-    /// Bounds on container keys holding exactly the containers of the
+    /// Bounds on [`crate::IndexKey`]s holding exactly the containers of the
     /// range's terms. An included lower or excluded upper bound is a prefix
     /// of the keys at or past it; the others bound every container of their
     /// term.
     pub(crate) fn into_key_bounds(self) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
         let lower = match self.lower {
             Bound::Included(term) => Bound::Included(term),
-            Bound::Excluded(term) => after(&key_bytes(&term)),
+            Bound::Excluded(term) => after(&term_key(&term)),
             Bound::Unbounded => Bound::Unbounded,
         };
         let upper = match self.upper {
-            Bound::Included(term) => past(key_bytes(&term)),
+            Bound::Included(term) => past(term_key(&term)),
             Bound::Excluded(term) => Bound::Excluded(term),
             Bound::Unbounded => Bound::Unbounded,
         };

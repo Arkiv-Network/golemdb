@@ -2,7 +2,7 @@
 use golemdb_merkle::TrieTable;
 use golemdb_storage::Table;
 
-/// Live containers keyed by `term key ‖ path` ([`crate::IndexTerm::key`]),
+/// Live containers keyed by [`crate::IndexKey`], `term ‖ hi48`,
 /// each holding its canonical Roaring bytes: the payloads of the index trie's
 /// leaves. Keys are in term order, so a term's containers are contiguous and
 /// a term exists exactly while it has a container.

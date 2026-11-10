@@ -2,9 +2,7 @@ use golemdb_cells::{CellNameRef, CellType, CellValueParseError, CellValueRef, Fl
 use golemdb_merkle::{Hash, HashProvider};
 use std::{error::Error, fmt};
 
-use crate::{HI48_BYTES, IndexError, PATH_BYTE_OFFSET, path};
-
-/// Canonical ordered index key: `name || 0x00 || attribute_tag || ordered_value`.
+/// Canonical ordered index term: `name || 0x00 || attribute_tag || ordered_value`.
 ///
 /// Strings have no length prefix. Signed numbers flip the sign bit; floats use
 /// the sortable IEEE transform after rejecting NaNs and normalizing zero.
@@ -74,7 +72,7 @@ impl IndexTerm {
         Ok(Self(bytes))
     }
 
-    /// [`Self::for_value`] for a stored cell name. Names are raw bytes; one
+    /// [`Self::from_str_name`] for a stored cell name. Names are raw bytes; one
     /// that is not UTF-8 is [`TermError::InvalidName`], like any name outside
     /// the grammar. Seal and queries both build terms through here.
     pub fn from_cell_name(
@@ -84,7 +82,7 @@ impl IndexTerm {
         Self::from_str_name(name_str(name)?, value)
     }
 
-    /// Check a stored cell name as [`Self::for_cell_name`] does, for a leaf
+    /// Check a stored cell name as [`Self::from_cell_name`] does, for a leaf
     /// with no value to build a term from.
     pub fn check_cell_name(name: CellNameRef<'_>) -> Result<(), TermError> {
         validate_name(name_str(name)?)
@@ -135,99 +133,6 @@ impl IndexTerm {
     pub fn routing_path(&self, hasher: &impl HashProvider) -> Hash {
         hasher.hash(&self.0)
     }
-
-    /// The start of every container key of this term: the term, with a
-    /// variable-width value ended by `0x00`, which no such value holds. No other
-    /// term's key starts with it, and key order is term order.
-    pub fn key(&self) -> Vec<u8> {
-        key_bytes(&self.0)
-    }
-
-    /// The longest container key of a term whose name has `name_len` bytes
-    /// and whose value has at most `value_len` bytes, or 32 if fixed-width:
-    /// a string's terminator, then `hi48`, follow the value.
-    pub const fn max_key_len(name_len: u64, value_len: u64) -> u64 {
-        let string = value_len + 1;
-        let value = if string > 32 { string } else { 32 };
-        name_len + 2 + value + crate::HI48_BYTES as u64
-    }
-
-    /// Split a container key into its term and the bytes after the term's
-    /// key, rejecting malformed and noncanonical terms.
-    pub fn split_key(key: &[u8]) -> Result<(Self, &[u8]), TermError> {
-        let bad = || TermError::InvalidEncoding;
-        let split = key.iter().position(|&b| b == 0).ok_or_else(bad)?;
-        let tag = *key.get(split + 1).ok_or_else(bad)?;
-        let start = split + 2;
-        let (raw, rest) = match value_width(tag) {
-            Some(width) => {
-                let end = start.checked_add(width).filter(|&end| end <= key.len());
-                let end = end.ok_or_else(bad)?;
-                (&key[..end], &key[end..])
-            }
-            None => {
-                let end = key.get(start..).ok_or_else(bad)?;
-                let end = start + end.iter().position(|&b| b == 0).ok_or_else(bad)?;
-                (&key[..end], &key[end + 1..])
-            }
-        };
-        Ok((Self::decode(raw)?, rest))
-    }
-}
-
-/// A container's `Index` key: its term's key ([`IndexTerm::key`]), then its
-/// `hi48`.
-pub(crate) struct IndexKey(Vec<u8>);
-
-impl IndexKey {
-    pub(crate) fn new(term_key: &[u8], container: u64) -> crate::Result<Self> {
-        Ok(Self([term_key, &path::path_bytes(container)?].concat()))
-    }
-
-    /// Split a stored key into its term and its container, rejecting a
-    /// malformed term or a suffix that is not a `hi48`.
-    pub(crate) fn split(key: &[u8]) -> crate::Result<(IndexTerm, u64)> {
-        let (term, suffix) = IndexTerm::split_key(key)?;
-        Ok((term, Self::container(suffix)?))
-    }
-
-    /// The container whose `hi48` is `suffix`, the bytes after a term's key.
-    pub(crate) fn container(suffix: &[u8]) -> crate::Result<u64> {
-        let suffix: [u8; HI48_BYTES] =
-            (suffix.try_into()).map_err(|_| IndexError::Corruption("malformed container key"))?;
-        let mut be = [0; 8];
-        be[PATH_BYTE_OFFSET..].copy_from_slice(&suffix);
-        Ok(u64::from_be_bytes(be))
-    }
-}
-
-impl AsRef<[u8]> for IndexKey {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-/// The width of the value after a type tag, or `None` for a variable width
-/// or an unknown tag.
-fn value_width(tag: u8) -> Option<usize> {
-    let ty = CellType::from_id(tag & 0x7f)
-        .ok()
-        .filter(|_| tag & 0x80 != 0)?;
-    ty.width()
-}
-
-/// Key bytes for a complete term: a variable-width value is followed by
-/// `0x00`. A string holds no `0x00`, so the key ends where its value does;
-/// order is unchanged.
-pub(crate) fn key_bytes(term: &[u8]) -> Vec<u8> {
-    let tag = term
-        .iter()
-        .position(|&b| b == 0)
-        .and_then(|split| term.get(split + 1));
-    if tag.and_then(|&tag| value_width(tag)).is_some() {
-        return term.to_vec();
-    }
-    [term, &[0]].concat()
 }
 
 /// A stored cell name as a term name: one that is not UTF-8 is

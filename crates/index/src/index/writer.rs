@@ -3,10 +3,9 @@ use golemdb_storage::{Table, WriteTransaction};
 
 use super::Index;
 use crate::{
-    BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexTerm, Result,
+    BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Result,
     index_trie::{ContainerEdit, IndexTriePath},
     path, tables,
-    term::IndexKey,
 };
 
 /// Adds a record ID to a term's bitmap or removes it from that bitmap.
@@ -92,14 +91,17 @@ impl<H: HashProvider> Index<'_, H> {
         let mut changed_terms = Vec::new();
         for group in batch.chunk_by(|a, b| a.term == b.term) {
             let term = &group[0].term;
-            let term_key = term.key();
             let term_path = term.routing_path(self.hasher);
             let mut changed = false;
             for postings in group.chunk_by(|a, b| a.container == b.container) {
                 let container = postings[0].container;
-                let key = IndexKey::new(&term_key, container)?;
+                let key = IndexKey {
+                    term: term.clone(),
+                    container_id: container,
+                }
+                .encode()?;
                 let path = IndexTriePath::new(&term_path, container)?;
-                let stored = tx.get(tables::INDEX, key.as_ref())?;
+                let stored = tx.get(tables::INDEX, &key)?;
                 let before = stored
                     .as_ref()
                     .map(|bytes| self.trie.leaf_hash(&path, bytes));
@@ -124,9 +126,9 @@ impl<H: HashProvider> Index<'_, H> {
                         .as_ref()
                         .map(|bytes| self.trie.leaf_hash(&path, bytes));
                     match bytes {
-                        Some(bytes) => tx.put(tables::INDEX, key.as_ref(), &bytes)?,
+                        Some(bytes) => tx.put(tables::INDEX, &key, &bytes)?,
                         None => {
-                            tx.delete(tables::INDEX, key.as_ref())?;
+                            tx.delete(tables::INDEX, &key)?;
                         }
                     }
                 }

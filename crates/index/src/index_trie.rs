@@ -5,7 +5,7 @@ use golemdb_storage::{ReadCursor, ReadTransaction, WriteTransaction};
 
 use crate::{
     BitmapContainer, CONTAINER_LEAF_DOMAIN, INDEX_BRANCH_DOMAIN, INDEX_TRIE_PATH_BYTES, IndexError,
-    Result, path, tables, term::IndexKey,
+    IndexKey, Result, path, tables,
 };
 
 /// The index trie over every term's containers. Leaves are virtual: each
@@ -102,7 +102,10 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
                 if cursor.next()?.is_some() {
                     return Err(IndexError::RootMismatch);
                 }
-                let (term, container) = IndexKey::split(&key)?;
+                let IndexKey {
+                    term,
+                    container_id: container,
+                } = IndexKey::decode(&key)?;
                 let path = IndexTriePath::new(&term.routing_path(self.hasher), container)?;
                 BitmapContainer::decode(container, &value)?;
                 if LeafRef::new(path.0, self.leaf_hash(&path, &value)) != leaf {

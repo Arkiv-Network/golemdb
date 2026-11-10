@@ -3,7 +3,7 @@ use golemdb_cells::{
     CELL_TRIE_PATH_BYTES, CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef,
     Cells, tables,
 };
-use golemdb_index::{INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange};
+use golemdb_index::{INDEX_TRIE_PATH_BYTES, Index, IndexKey, IndexTerm, PostingChange};
 use golemdb_merkle::{Blake3Hasher, Hash, HashProvider, Keccak256Hasher, RootRef, TrieTable};
 use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction, scan_prefix};
 use std::{
@@ -401,7 +401,7 @@ fn commits_store_only_trie_rows_reachable_from_committed_roots() {
     assert_eq!(leaves.len(), rows(tables::CELL).len());
     let index = Index::new(&hasher);
     for key in rows(golemdb_index::tables::INDEX) {
-        let (term, _) = IndexTerm::split_key(&key).unwrap();
+        let term = IndexKey::decode(&key).unwrap().term;
         assert!(
             !index
                 .bitmap(&tx, &term)
