@@ -579,7 +579,7 @@ fn check_attribute(ty: CellType, value: &[u8]) -> Result<(), CellValueParseError
         return Err(CellValueParseError::NotIndexable);
     }
     if ty == CellType::Str && value.contains(&0) {
-        return Err(CellValueParseError::NulInAttribute);
+        return Err(CellValueParseError::NulInStrAttributeValue);
     }
     Ok(())
 }

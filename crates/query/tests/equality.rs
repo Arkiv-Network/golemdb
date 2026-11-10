@@ -266,7 +266,9 @@ fn invalid_arguments_are_errors_not_empty_results() {
     };
     assert_eq!(
         source.downcast_ref::<TermError>().copied(),
-        Some(TermError::Value(CellValueParseError::NulInAttribute))
+        Some(TermError::Value(
+            CellValueParseError::NulInStrAttributeValue
+        ))
     );
 }
 

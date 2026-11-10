@@ -186,7 +186,9 @@ fn terminated(mut prefix: Vec<u8>, ty: CellType, value: &[u8]) -> Vec<u8> {
 /// A `str` value holding `0x00`, which ends a string in a term, has no term.
 fn check_str(ty: CellType, value: &[u8]) -> Result<(), TermError> {
     if ty == CellType::Str && value.contains(&0) {
-        return Err(TermError::Value(CellValueParseError::NulInAttribute));
+        return Err(TermError::Value(
+            CellValueParseError::NulInStrAttributeValue,
+        ));
     }
     Ok(())
 }

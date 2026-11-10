@@ -362,7 +362,9 @@ fn invalid_arguments_are_errors_not_empty_results() {
     let nul = Bound::Included(CellValue::from_str("a\0"));
     assert_eq!(
         cause(test.keys(range("f", nul, Bound::Unbounded))),
-        Some(TermError::Value(CellValueParseError::NulInAttribute))
+        Some(TermError::Value(
+            CellValueParseError::NulInStrAttributeValue
+        ))
     );
 }
 

@@ -91,7 +91,9 @@ fn prefixes_match_the_strings_that_start_with_them() {
     };
     assert_eq!(
         source.downcast_ref::<TermError>().copied(),
-        Some(TermError::Value(CellValueParseError::NulInAttribute))
+        Some(TermError::Value(
+            CellValueParseError::NulInStrAttributeValue
+        ))
     );
 }
 
