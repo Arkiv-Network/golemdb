@@ -1136,8 +1136,8 @@ is a value an independent encoder must produce identically, or the roots diverge
 | 9.8 | Absent pre-image in `CellChangeSet` | `typeTag = 0x00`, empty payload — the same bytes as an overlay tombstone (§10) | reject `0x00` with a non-empty payload |
 | 9.9 | `bool` | exactly one byte, `0x00` or `0x01` | reject other values or lengths |
 | 9.10 | Type-id map | the §3 grid **as shipped** is the map; frozen by the `Superblock` `format` value at genesis; a later `format` may add ids, never reassign | unknown id ⇒ `InvalidArgument` on write, corrupt-state error on read |
-| 9.11 | Cross-table key caps | genesis validation checks the **longest derived key**: `IndexChangeSet` = `8 + L` where `L` = `len(cellKey) + 1 + 1 + maxValueLen`; must be ≤ MDBX's max key size for the page size (4 KiB pages: 2022 B in libmdbx). State the formula, not the number | refuse genesis |
-| 9.12 | Leaf preimages (D06) | `CellTrie` leaf `Hash(0x00 ‖ recordID ‖ Hash(cellKey) ‖ typeTag ‖ value)`; `IndexTrie` leaf `Hash(0x04 ‖ Hash(termKey) ‖ hi48 ‖ roaring)`, one per container | — |
+| 9.11 | Cross-table key caps | genesis validation checks the **longest derived key**: `IndexChangeSet` = `8 + L` where `L` = `len(cellKey) + 2 + max(maxStrLen + 1, 32) + 6`, the longest term, then `hi48`; must be ≤ MDBX's max key size for the page size (4 KiB pages: 2022 B in libmdbx). State the formula, not the number | refuse genesis |
+| 9.12 | Leaf preimages (D06) | `CellTrie` leaf `Hash(0x00 ‖ recordID ‖ Hash(cellKey) ‖ typeTag ‖ value)`; `IndexTrie` leaf `Hash(0x04 ‖ Hash(term) ‖ hi48 ‖ roaring)`, one per container | — |
 | 9.13 | New `#params` caps (D01) | `#maxFilterGroups`, `#maxPredicatesPerGroup`: `u32` BE | as caps |
 | 9.14 | `#meta` value (added 2026-10-10) | `bytes32` field: `cells ‖ cellBytes ‖ indexedCells ‖ indexBytes`, each `u64` BE, sizes per metering D4 (design §3) | reject another type, kind or length |
 | 9.15 | Generated record key (added 2026-10-10) | `H("golemdb/record-key/v1" ‖ #keySeed ‖ recordID)`, `recordID` as `u64` BE (design §4 *Record-key modes*) | — |

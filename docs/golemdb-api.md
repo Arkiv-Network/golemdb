@@ -190,8 +190,8 @@ Validation at opening, against the store's physical limits:
 
 - `max_cell_name_len` must be positive.
 - Required key size: `max(name + 8, name + 2 + max(max_str_len + 1, 32) + 6, 40)` bytes,
-  where `name` is `max_cell_name_len`: an index key adds a string's terminator and the
-  container's 6-byte region. It must fit the store's maximum key.
+  where `name` is `max_cell_name_len`: a string term ends with a terminator, and an index key
+  adds the container's 6-byte region. It must fit the store's maximum key.
 - Required value size: `max(1 + max(max_bytes_len, max_str_len), 16 KiB)`. The 16 KiB floor
   covers internal values: trie nodes, metadata, root pairs and Roaring containers. It must fit
   the store's maximum value.
@@ -476,7 +476,7 @@ pub struct RecordMeta { pub cells: u64, pub cell_bytes: u64, pub indexed_cells: 
 | `cells` | user cells |
 | `cell_bytes` | Σ `(8 + |name|) + (1 + |value|)`: cell key plus encoded value |
 | `indexed_cells` | user cells of kind attribute |
-| `index_bytes` | Σ over attributes of `|name| + 2 + |value|`: the index term key |
+| `index_bytes` | Σ over attributes of `|name| + 2 + |value|`: the index term, less a string's terminator |
 
 `|value|` is the payload without the tag. **Encoding:** the four fields in this order, each
 `u64` BE, 32 bytes, stored as a `bytes32` field. It is under the state root, so it is

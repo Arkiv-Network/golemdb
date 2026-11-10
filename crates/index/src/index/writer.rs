@@ -3,9 +3,9 @@ use golemdb_storage::{Table, WriteTransaction};
 
 use super::Index;
 use crate::{
-    BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Result,
+    BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexTerm, Result,
     index_trie::{ContainerEdit, IndexTriePath},
-    path, tables,
+    key, path, tables,
 };
 
 /// Adds a record ID to a term's bitmap or removes it from that bitmap.
@@ -95,11 +95,7 @@ impl<H: HashProvider> Index<'_, H> {
             let mut changed = false;
             for postings in group.chunk_by(|a, b| a.container == b.container) {
                 let container = postings[0].container;
-                let key = IndexKey {
-                    term: term.clone(),
-                    container_id: container,
-                }
-                .encode()?;
+                let key = key::encode(term, container)?;
                 let path = IndexTriePath::new(&term_path, container)?;
                 let stored = tx.get(tables::INDEX, &key)?;
                 let before = stored

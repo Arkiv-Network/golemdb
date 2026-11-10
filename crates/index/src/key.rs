@@ -3,9 +3,9 @@ use golemdb_cells::CellType;
 use crate::{HI48_BYTES, IndexError, IndexTerm, PATH_BYTE_OFFSET, TermError, path};
 
 /// A container's `Index` key, decoded: its term and its `container_id`, the
-/// `hi48` its record IDs share. Encoded, it is the term's key (its bytes, a
-/// string value ended by `0x00`), then `hi48`. Keys are in term order, so a
-/// term's containers are contiguous.
+/// `hi48` its record IDs share. Encoded, it is the term's bytes, then `hi48`.
+/// No term is a prefix of another, so keys are in term order and a term's
+/// containers are contiguous.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexKey {
     pub term: IndexTerm,
@@ -13,11 +13,9 @@ pub struct IndexKey {
 }
 
 impl IndexKey {
-    /// `termKey ‖ hi48`.
+    /// `term ‖ hi48`.
     pub fn encode(&self) -> crate::Result<Vec<u8>> {
-        let mut key = term_key(self.term.as_bytes());
-        key.extend_from_slice(&path::path_bytes(self.container_id)?);
-        Ok(key)
+        encode(&self.term, self.container_id)
     }
 
     /// Decode a stored key, rejecting a malformed or noncanonical term or a
@@ -36,8 +34,8 @@ impl IndexKey {
             }
             None => {
                 let end = key.get(start..).ok_or_else(bad)?;
-                let end = start + end.iter().position(|&b| b == 0).ok_or_else(bad)?;
-                (&key[..end], &key[end + 1..])
+                let end = start + end.iter().position(|&b| b == 0).ok_or_else(bad)? + 1;
+                (&key[..end], &key[end..])
             }
         };
         Ok(Self {
@@ -56,22 +54,12 @@ impl IndexKey {
     }
 }
 
-/// The term key every `Index` key of a term starts with, from the term's
-/// bytes ([`IndexTerm::as_bytes`]): a variable-width value is followed by
-/// `0x00`, which no such value holds. No other term's key starts with it, and
-/// term key order is term order.
-pub(crate) fn term_key(term_bytes: &[u8]) -> Vec<u8> {
-    let tag = term_bytes
-        .iter()
-        .position(|&b| b == 0)
-        .and_then(|split| term_bytes.get(split + 1));
-    if tag.and_then(|&tag| value_width(tag)).is_some() {
-        return term_bytes.to_vec();
-    }
-    [term_bytes, &[0]].concat()
+/// The `Index` key of `term`'s container `container_id`: `term ‖ hi48`.
+pub(crate) fn encode(term: &IndexTerm, container_id: u64) -> crate::Result<Vec<u8>> {
+    Ok([term.as_bytes(), &path::path_bytes(container_id)?].concat())
 }
 
-/// The `container_id` stored as `hi48`, the bytes after a term key; any other
+/// The `container_id` stored as `hi48`, the bytes after a term; any other
 /// length is a corrupt key.
 pub(crate) fn container_id(hi48: &[u8]) -> crate::Result<u64> {
     let hi48: [u8; HI48_BYTES] =

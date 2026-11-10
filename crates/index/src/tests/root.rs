@@ -5,7 +5,6 @@ use golemdb_merkle::HASH_BYTES;
 use proptest::prelude::*;
 
 use crate::index_trie::IndexTriePath;
-use crate::key::term_key;
 use crate::{HI48_BYTES, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, TermRange};
 
 #[test]
@@ -33,14 +32,17 @@ fn str_term(value: &[u8]) -> IndexTerm {
 }
 
 #[test]
-fn string_keys_end_with_a_terminator_and_reject_zeros() {
+fn string_terms_end_with_a_terminator_and_reject_zeros() {
     let prefix = IndexTerm::prefix("s", CellType::Str).unwrap();
-    let key = term_key(str_term(b"ab").as_bytes());
-    assert_eq!(key, [&prefix[..], b"ab\0"].concat());
+    assert_eq!(
+        str_term(b"ab").into_bytes(),
+        [&prefix[..], b"ab\0"].concat()
+    );
     assert!(IndexTerm::new("s", CellType::Str, b"a\0b").is_err());
-    let fixed = IndexTerm::new("n", CellType::Uint(golemdb_cells::Width::W8), &[0; 8]);
-    let fixed = fixed.unwrap();
-    assert_eq!(term_key(fixed.as_bytes()), fixed.as_bytes());
+    let ty = CellType::Uint(golemdb_cells::Width::W8);
+    let fixed = IndexTerm::new("n", ty, &[0; 8]).unwrap();
+    let fixed_prefix = IndexTerm::prefix("n", ty).unwrap();
+    assert_eq!(fixed.into_bytes(), [&fixed_prefix[..], &[0; 8]].concat());
     // No zero byte in the ID, so none can stand in for the terminator.
     let id = crate::path::path_bytes(0x0102_0304_0506).unwrap();
     for tail in [&b""[..], b"a"] {

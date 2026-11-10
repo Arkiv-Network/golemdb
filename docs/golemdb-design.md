@@ -169,7 +169,7 @@ adopted here is stated and the document follows it.
 | **attribute / field** | The two cell kinds: an attribute is indexed and queryable, a field is never indexed (§3) |
 | **type tag** | The one-byte prefix of every cell value: kind bit plus 7-bit type code; part of the commitment (§3) |
 | **codec** | The encoder/decoder pair fixed for one type; one valid byte form per value; order-preserving where the value reaches a key (§1, §3) |
-| **index term** | `cellKey ‖ 0x00 ‖ typeTag ‖ cellValue` — one attribute value; with its value terminated, the start of its `Index` keys (§5) |
+| **index term** | `cellKey ‖ 0x00 ‖ typeTag ‖ cellValue`, a string value then ended by `0x00` — one attribute value, and the start of its `Index` keys (§5) |
 | **posting list** | The set of `recordID`s holding an index term, stored as Roaring containers, one `Index` row each (§5, §6) |
 | **container** | An `Index` row: the Roaring set of one term's 16-bit offsets in one 48-bit region `hi48`, and a leaf of `IndexTrie` (§2, §6) |
 | **trie** | A Merkle Patricia Trie. **Canonical trie:** path-addressed, the object the commitment is defined over. **Physical trie:** how nodes are stored — here rows keyed `commitNr ‖ route` (§9) |
@@ -376,18 +376,18 @@ count (`u8`) then the packed nibbles._
 | ----------------- | ------------------------------------------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | `Cell`            | `recordID: u64` ‖ `cellKey`                                        | `typeTag: u8` ‖ `cellValue: Bytes`              | Primary state: the live value of every cell, prefixed by its kind/type tag.                            |
 | `CellTrie`        | `commitNr: u64` ‖ `route`                                          | `BranchNodeCompact`                             | Nodes of the primary-state MPT — produces `StateRoot`.                                                 |
-| `Index`           | `termKey` ‖ `hi48: 6 B`                                            | `roaring`                                       | Live posting-list containers: the `recordID`s of one 48-bit region of a term's posting list.           |
+| `Index`           | `term` ‖ `hi48: 6 B`                                               | `roaring`                                       | Live posting-list containers: the `recordID`s of one 48-bit region of a term's posting list.           |
 | `IndexTrie`       | `commitNr: u64` ‖ `route`                                          | `BranchNodeCompact`                             | Nodes of the trie over every term's containers — produces `IndexRoot`.                                 |
 | `CellHistory`     | `recordID: u64` ‖ `cellKey`                                        | `commitsList: Roaring64`                        | Every commit number that modified a given cell.                                                        |
 | `CellChangeSet`   | `commitNr: u64` ‖ `recordID: u64` ‖ `cellKey`                      | `typeTag: u8` ‖ `cellOldValue: Bytes`           | Pre-image of a cell **before** the change made at `commitNr`.                                          |
-| `IndexHistory`    | `termKey` ‖ `hi48: 6 B`                                            | `commitsList: Roaring64`                        | Every commit number that modified a given container.                                                   |
-| `IndexChangeSet`  | `commitNr: u64` ‖ `termKey` ‖ `hi48: 6 B`                          | `roaring`                                       | Pre-image of a container before the change made at `commitNr`.                                         |
+| `IndexHistory`    | `term` ‖ `hi48: 6 B`                                               | `commitsList: Roaring64`                        | Every commit number that modified a given container.                                                   |
+| `IndexChangeSet`  | `commitNr: u64` ‖ `term` ‖ `hi48: 6 B`                             | `roaring`                                       | Pre-image of a container before the change made at `commitNr`.                                         |
 | `Superblock`      | `superKey: Bytes`                                                  | `superValue: Bytes`                             | Uncommitted engine state: format identifiers and the head ([§4](#the-superblock)).                     |
 | `Roots`           | `commitNr: u64`                                                    | `len(state): u8` ‖ `state` ‖ `index` locators   | Uncommitted: where each commit's two roots are stored, so old tries stay walkable.                     |
 | `Stale`           | `commitNr: u64` ‖ `table: u8` ‖ `key`                              | empty                                           | Uncommitted: rows each commit superseded, in key order, awaiting deletion ([§9](#garbage-collection)). |
 
-`termKey` is the index term `cellKey ‖ 0x00 ‖ typeTag ‖ cellValue`, with a variable-width
-`cellValue` terminated so that `hi48` can follow it ([§5](#structural-index-key-formulation)).
+`term` is the index term `cellKey ‖ 0x00 ‖ typeTag ‖ cellValue`, a variable-width `cellValue`
+ended by `0x00`, so that `hi48` can follow it ([§5](#structural-index-key-formulation)).
 
 The eight data tables fall into three groups — **primary state and its commitment** (`Cell`,
 `CellTrie`), **indexing and its commitment** (`Index`, `IndexTrie`) and **history**
@@ -588,13 +588,13 @@ side:
 Cell            recordID ‖ cellKey
 CellHistory     recordID ‖ cellKey
 CellChangeSet   commitNr ‖ recordID ‖ cellKey
-Index                      termKey ‖ hi48
-IndexHistory               termKey ‖ hi48
-IndexChangeSet  commitNr ‖ termKey ‖ hi48
+Index                      cellKey ‖ 0x00 ‖ typeTag ‖ cellValue [‖ 0x00] ‖ hi48
+IndexHistory               cellKey ‖ 0x00 ‖ typeTag ‖ cellValue [‖ 0x00] ‖ hi48
+IndexChangeSet  commitNr ‖ cellKey ‖ 0x00 ‖ typeTag ‖ cellValue [‖ 0x00] ‖ hi48
 ```
 
 > **Future proposal — cell-name interning (`cellID`).** The name is carried once per cell in `Cell`
-> and `CellHistory`, once per _modification_ in `CellChangeSet`, and inside every term key of
+> and `CellHistory`, once per _modification_ in `CellChangeSet`, and inside every term of
 > `Index`, `IndexHistory` and `IndexChangeSet`. MDBX has no key prefix compression, so every copy is
 > fully materialised on disk, and the change-set copies grow without bound over a cell's life. The
 > standing answer is **interning** — the same move already made for `recordKey → recordID`: map each
@@ -661,10 +661,11 @@ Cell:  recordID ‖ "#meta"   →   typeTag(field, bytes32) ‖ cells ‖ cellBy
 | `cells`        | live user cells                                            |
 | `cellBytes`    | Σ `(8 + \|name\|) + (1 + \|value\|)` over those cells      |
 | `indexedCells` | live user cells of kind `attribute`                        |
-| `indexBytes`   | Σ `\|name\| + 2 + \|value\|` over those cells (their index term keys) |
+| `indexBytes`   | Σ `\|name\| + 2 + \|value\|` over those cells (their index terms) |
 
 The sizes follow the [metering size rules](golemdb-metering.md#d4-storage-and-size-counting):
-cell key plus value, and the full term key, counted per record. System cells are never counted.
+cell key plus value, and the full term less a string's terminator, counted per record. System
+cells are never counted.
 
 `#meta` gives the engine and the host a record's shape without reading the record. A `patch` reads
 only the cells it touches, so without `#meta` it could neither check the per-record caps nor keep a
@@ -1326,7 +1327,7 @@ path each over an uncommitted predecessor: the price of making bindings provable
 To support filtering queries on cell values (`WHERE Price = 100`, `WHERE Price >= 100 AND
 Price <= 500`), the engine maintains an index over those values in the `Index` table. Each row holds
 one bounded Roaring container of the records matching an _index term_, so a term's posting list is
-the run of rows under the term's key; `IndexTrie` commits to every container
+the run of rows the term prefixes; `IndexTrie` commits to every container
 ([§6](#6-merkleizing-the-posting-list)).
 
 > **Notation.** `WHERE …`, `SELECT …`, `FIND RECORDS … AT COMMIT …` and similar fragments throughout
@@ -1340,11 +1341,11 @@ An index entry maps a cell name/value pair to the set of `recordID`s whose cell 
 **reverse (inverted) index**. The term is the attribute's name, type and value:
 
 ```
-term      = cellKey ‖ 0x00 ‖ typeTag ‖ cellValue
-Index Key = termKey ‖ hi48
+term      = cellKey ‖ 0x00 ‖ typeTag ‖ cellValue [‖ 0x00]
+Index Key = term ‖ hi48
 ```
 
-`termKey` is the term, ended so that `hi48`, the container's 48-bit region
+The term ends unambiguously, so `hi48`, the container's 48-bit region
 ([§6](#6-merkleizing-the-posting-list)), can follow it. Three parts of the key earn their place
 beside the name and the value:
 
@@ -1357,8 +1358,8 @@ beside the name and the value:
   each type its own contiguous, correctly-ordered run, so a scan stays inside one encoding.
 - **The value's end.** A fixed-width value has a known length and is written as is. A
   variable-width value ends with `0x00`, which an attribute string cannot contain. The terminator
-  keeps byte order equal to value order, and no term's key is a prefix of another's, so a term's
-  containers are exactly the rows its key prefixes.
+  keeps byte order equal to value order, and no term is a prefix of another, so a term's
+  containers are exactly the rows it prefixes.
 
 Query predicates and sort keys are correspondingly typed: a predicate matches only cells of its own
 type, and so does a sort term — a cell of any other type under the same name is treated as absent
@@ -1812,7 +1813,7 @@ Each trie is defined by two things: the **routing path** that decides where an i
 | Trie        | Routing path (`trieKey`)                            | Leaf hash built from             |
 | ----------- | --------------------------------------------------- | -------------------------------- |
 | `CellTrie`  | `Hash(recordID ‖ cellKey)`                          | the cell's `typeTag ‖ cellValue` |
-| `IndexTrie` | `Hash(cellKey ‖ 0x00 ‖ typeTag ‖ cellValue) ‖ hi48` | the container's `roaring`        |
+| `IndexTrie` | `Hash(term) ‖ hi48`                                 | the container's `roaring`        |
 
 A cell path is a 32-byte digest, 64 nibbles; a container path is its term's 32-byte digest followed by
 its 6-byte region, 76 nibbles ([§6](#binding-a-container-to-its-path)). Hashing the identity keeps
@@ -3201,8 +3202,8 @@ asking for ten records out of a million matches still fetches a million sort val
 
 ### The Alternative: Index-Ordered Emission
 
-The rejected strategy exploits the fact that `Index` is **already sorted by value**. Its key is
-`cellKey ‖ 0x00 ‖ typeTag ‖ cellValue` ([§5](#structural-index-key-formulation)), so every distinct
+The rejected strategy exploits the fact that `Index` is **already sorted by value**. Its key starts
+with the term ([§5](#structural-index-key-formulation)), so every distinct
 value of one cell forms a contiguous run in ascending `enc` order. Walking that run visits values in
 order, and each entry names the records holding it — so records can be emitted already sorted, with no
 sort step at all:

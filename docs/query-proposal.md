@@ -216,7 +216,7 @@ The written order of the tree is the execution order. Cost and stopping point ar
    per bitmap container processed, so the budget also bounds set work that nesting would
    otherwise multiply.
 7. **Leaves.** `Eq`: one term read. `In`: values given in strictly ascending order, in the
-   type's order as for `Range`, which is also term key order; one term read each. Admission checks
+   type's order as for `Range`, which is also term order; one term read each. Admission checks
    the order in one pass, so its cost is linear in the number of values. `Range`, `Prefix`, `Exists`: step through the run's terms in ascending key order from the
    lower bound, charging every term stepped; an `Exists` with no type steps through every run of
    the field, in type tag order.

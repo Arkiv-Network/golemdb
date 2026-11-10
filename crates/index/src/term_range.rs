@@ -4,19 +4,18 @@ use golemdb_cells::{CellNameRef, CellType, CellValue, CellValueRef};
 
 use crate::{
     IndexTerm, TermError,
-    key::term_key,
     term::{name_prefix, name_str},
 };
 
-/// A range of index keys for an ordered scan with [`crate::Index::terms`]:
+/// A range of index terms for an ordered scan with [`crate::Index::terms`]:
 /// inside one name/type run, over every run of one name, or over the whole
 /// index ([`TermRange::all`]).
 ///
-/// In a run's range, every key starts with the run's prefix, so a scan never
+/// In a run's range, every term starts with the run's prefix, so a scan never
 /// leaks into another type under the same name, nor into a longer name
-/// (`ab` when scanning `a`). Within the run, key order is value order. In a
+/// (`ab` when scanning `a`). Within the run, term order is value order. In a
 /// range over every run of a name ([`TermRange::of_name`] with no type),
-/// every key starts with the name and its separator instead: the range holds
+/// every term starts with the name and its separator instead: the range holds
 /// each of the name's runs, in type tag order, and still no longer name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TermRange {
@@ -100,7 +99,9 @@ impl TermRange {
     /// such range holds at least the prefix's own term, so it is never empty.
     pub fn with_prefix(name: CellNameRef<'_>, prefix: &str) -> Result<Self, TermError> {
         let prefix = CellValue::from_str(prefix);
-        let start = IndexTerm::from_cell_name(name, prefix.as_view())?.into_bytes();
+        let mut start = IndexTerm::from_cell_name(name, prefix.as_view())?.into_bytes();
+        // Without its terminator, so longer values continue past it.
+        start.pop();
         Ok(Self::starting_with(start))
     }
 
@@ -152,11 +153,11 @@ impl TermRange {
     pub(crate) fn into_key_bounds(self) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
         let lower = match self.lower {
             Bound::Included(term) => Bound::Included(term),
-            Bound::Excluded(term) => after(&term_key(&term)),
+            Bound::Excluded(term) => after(&term),
             Bound::Unbounded => Bound::Unbounded,
         };
         let upper = match self.upper {
-            Bound::Included(term) => past(term_key(&term)),
+            Bound::Included(term) => past(term),
             Bound::Excluded(term) => Bound::Excluded(term),
             Bound::Unbounded => Bound::Unbounded,
         };
@@ -169,7 +170,7 @@ impl TermRange {
 pub(crate) fn after(prefix: &[u8]) -> Bound<Vec<u8>> {
     match past(prefix.to_vec()) {
         Bound::Excluded(next) => Bound::Included(next),
-        // Only an all-0xff prefix has no key after it, and every term key
+        // Only an all-0xff prefix has no key after it, and every term
         // holds the 0x00 after its name, so this is never reached.
         _ => Bound::Excluded(prefix.to_vec()),
     }
@@ -439,9 +440,10 @@ mod tests {
         let all = [term("s", &empty), term("s", &a)];
         let at_most_empty = range("s", CellType::Str, Unbounded, Included(&empty));
         assert!(within(&at_most_empty, &all).into_iter().eq(&all[..1]));
-        // The excluded empty string is the run's own prefix: nothing lies below.
-        let below_empty = between(b"s", CellType::Str, Unbounded, Excluded(empty.clone()));
-        assert_eq!(below_empty, Ok(None));
+        // Nothing lies below the excluded empty string. As for any type's least
+        // value, the range is not recognised as empty: it costs one seek, finds nothing.
+        let below_empty = range("s", CellType::Str, Unbounded, Excluded(&empty));
+        assert!(within(&below_empty, &all).is_empty());
         let above_empty = range("s", CellType::Str, Excluded(&empty), Unbounded);
         assert!(within(&above_empty, &all).into_iter().eq(&all[1..]));
     }

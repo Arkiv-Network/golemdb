@@ -18,9 +18,9 @@ fn literal_term_vectors() {
             "S",
             T::Str,
             b"abc".to_vec(),
-            vec![b'S', 0, 0x82, b'a', b'b', b'c'],
+            vec![b'S', 0, 0x82, b'a', b'b', b'c', 0],
         ),
-        ("S", T::Str, vec![], vec![b'S', 0, 0x82]),
+        ("S", T::Str, vec![], vec![b'S', 0, 0x82, 0]),
         (
             "I",
             T::Int(W::W4),
@@ -367,7 +367,8 @@ proptest! {
 fn assert_cell_term(ty: T, native: &[u8], ordered: &[u8]) -> IndexTerm {
     let cell = CellValueRef::new(ty, ordered, true).unwrap();
     let term = IndexTerm::from_cell("Value", cell).unwrap().unwrap();
-    let expected = [b"Value\0".as_slice(), &[cell.metadata()], ordered].concat();
+    let end: &[u8] = if ty == T::Str { &[0] } else { &[] };
+    let expected = [b"Value\0".as_slice(), &[cell.metadata()], ordered, end].concat();
     assert_eq!(term.as_bytes(), expected, "{ty:?}");
     assert_eq!(IndexTerm::decode(&expected).unwrap(), term, "{ty:?}");
     assert_eq!(IndexTerm::new("Value", ty, native).unwrap(), term, "{ty:?}");

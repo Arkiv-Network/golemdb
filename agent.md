@@ -76,7 +76,7 @@ fields and do not produce attribute index terms.
 ```text
 cell_value = type_tag:u8 || payload
 type_tag   = (attribute ? 0x80 : 0x00) | type_id
-index_term = cell_name || 0x00 || attribute_type_tag || payload
+index_term = cell_name || 0x00 || attribute_type_tag || payload [|| 0x00 for str]
 ```
 
 One storage row contains one complete cell. Fixed-width types require their exact
@@ -200,15 +200,15 @@ and payloads; supplying an old root with unrelated current flat state is invalid
 
 ### Attribute index and bitmap containers
 
-The flat `Index` table holds one live row per container, keyed by the term's key
-and the container's path, so a term's containers are adjacent and terms are in
-value order. A variable-width value in a term key ends with `0x00`; attribute
+The flat `Index` table holds one live row per container, keyed by the term and
+the container's path, so a term's containers are adjacent and terms are in
+value order. A variable-width value in a term ends with `0x00`; attribute
 strings cannot contain `0x00`. `IndexTrie` commits to every container at
 the path `H(term) || hi48`; its leaves are recomputed from the `Index` rows.
 
 ```text
 record_id:u64 = hi48:48 bits || offset:16 bits
-index_key     = term_key || hi48:6-byte big-endian
+index_key     = term || hi48:6-byte big-endian
 index_value   = portable_roaring
 ```
 
