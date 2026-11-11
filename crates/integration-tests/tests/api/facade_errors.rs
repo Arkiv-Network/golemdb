@@ -85,6 +85,7 @@ fn failure_contract(database: impl Store + Clone + Send + Sync + 'static) {
         },
         None,
         golemdb_api::PricingConfig::zero(),
+        100,
     ));
     let db = Database::from_store(
         FailingStore {
@@ -196,6 +197,7 @@ fn full_mdbx_store_preserves_head_tables_and_sealed_branch() {
         },
         None,
         golemdb_api::PricingConfig::zero(),
+        100,
     );
     let db = Database::from_store(store.clone(), &OpenConfig::new(genesis)).unwrap();
     let before = super::opening::snapshot(&store);

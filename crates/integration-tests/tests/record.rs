@@ -31,6 +31,7 @@ fn zero_pricing() -> WritePricing {
         record_limits,
         None,
         golemdb_api::PricingConfig::zero(),
+        100,
     ));
     golemdb_api::Database::from_store(store.clone(), &cfg).unwrap();
     let tx = store.begin_read().unwrap();

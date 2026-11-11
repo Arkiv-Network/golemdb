@@ -59,7 +59,7 @@ with zeroes. Every listed record has its own `#key` and a binding in `#recordKey
 
 | ID | Record | Contents and role |
 | --- | --- | --- |
-| 0 | `#params` | `u32` fields `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`; `u64` `#shardSpan` and bytes `#immutableDataSegments` only when immutable data is enabled. |
+| 0 | `#params` | `u32` fields `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`; `u64` `#minRetention`; `u64` `#shardSpan` and bytes `#immutableDataSegments` only when immutable data is enabled. |
 | 1 | `#alloc` | `u64` field `#nextRecordID`, initially 64. |
 | 2 | `#roots` | Previous-commit roots, addressed by raw big-endian commit IDs. |
 | 3 | `#recordKeys` | Public-key-to-record-ID bindings. |
@@ -576,7 +576,8 @@ keys and absent rows map to public domain errors; corrupt payloads remain intern
 through `OpenConfig::with_immutable_data_directory`. `open_memory` uses memory.
 `from_store` requires an explicit directory when segments are declared. Paths are
 local settings outside genesis identity. `None` disables immutable storage. Close all database clones before reopening the immutable directory.
-Retention/pruning, key expiry and digests remain deferred.
+Pruning of history and immutable data, retention reporting, key expiry and digests
+remain deferred.
 
 ### History, proofs, and storage evolution
 

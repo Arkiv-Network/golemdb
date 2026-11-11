@@ -60,6 +60,10 @@ fn initial_cells(config: &Genesis) -> OpenResult<BTreeMap<CellKey, CellValue>> {
         CellValue::from_u64(system::FIRST_USER_RECORD_ID),
     );
     cells.extend(pricing_cells(&config.metering));
+    cells.insert(
+        CellKey::new(system::PARAMS.id, reserved::MIN_RETENTION),
+        CellValue::from_u64(config.min_retention),
+    );
     if let Some(immutable_data) = &config.immutable_data {
         cells.insert(
             CellKey::new(system::PARAMS.id, reserved::SHARD_SPAN),

@@ -223,6 +223,7 @@ fn genesis_caps_bound_final_records_without_consuming_ids_on_failure() {
             },
             None,
             golemdb_api::PricingConfig::zero(),
+            100,
         );
         cap_contract(Database::open_memory(&genesis).unwrap());
         let dir = tempfile::tempdir().unwrap();
@@ -251,6 +252,7 @@ fn zero_caps_allow_empty_records_and_do_not_limit_system_records() {
         },
         None,
         golemdb_api::PricingConfig::zero(),
+        100,
     );
     let db = Database::open_memory(&genesis).unwrap();
     let b = db.begin().unwrap();

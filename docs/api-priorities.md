@@ -77,7 +77,6 @@ means one break instead of several, but each one alone is a minor migration late
 - `#keyMode` and `#keySeed` in `#params`, for generated keys. Could also be made additive: no
   `#keyMode` cell means caller-assigned.
 - Global counters `#liveCells`, `#indexTerms` in `#alloc` (metering D3); only metering uses them.
-- `#minRetention` in `#params`, once its value is decided (metering Open Question 3).
 - `OpenConfig` → `Config` (naming decision N11).
 - `#[non_exhaustive]` on `OpenMode`: adding it later is itself a breaking change.
 - Leftover "engine" and "backend" wording in docs and messages.

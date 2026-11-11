@@ -188,6 +188,8 @@ pub mod reserved {
     pub const MAX_BYTES_LEN: CellNameRef<'static> = CellNameRef(b"#maxBytesLen");
     /// Chain parameter: the cap [`CellNameRef::parse_user`] is given.
     pub const MAX_CELL_NAME_LEN: CellNameRef<'static> = CellNameRef(b"#maxCellNameLen");
+    /// Chain parameter: commits every node retains before the head (u64).
+    pub const MIN_RETENTION: CellNameRef<'static> = CellNameRef(b"#minRetention");
     /// Global immutable-data shard span, in commits (u64).
     pub const SHARD_SPAN: CellNameRef<'static> = CellNameRef(b"#shardSpan");
     /// Canonical immutable segment declarations (bytes).
@@ -203,6 +205,7 @@ pub mod reserved {
         MAX_STR_LEN,
         MAX_BYTES_LEN,
         MAX_CELL_NAME_LEN,
+        MIN_RETENTION,
         SHARD_SPAN,
         IMMUTABLE_DATA_SEGMENTS,
     ];

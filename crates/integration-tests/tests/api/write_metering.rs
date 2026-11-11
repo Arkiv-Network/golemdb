@@ -44,6 +44,7 @@ fn genesis() -> Genesis {
         },
         None,
         pricing,
+        100,
     )
 }
 

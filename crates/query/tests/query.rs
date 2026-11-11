@@ -36,6 +36,7 @@ fn config() -> OpenConfig {
         },
         None,
         golemdb_api::PricingConfig::zero(),
+        100,
     ))
 }
 
