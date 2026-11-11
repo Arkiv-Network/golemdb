@@ -24,28 +24,17 @@ fn checked_paths_and_offsets() {
 fn stored_vectors_bind_path_and_canonical_representation() {
     // Portable no-run header: cookie 12346, count 1, key 0/cardinality-1 0,
     // payload offset 16, followed by the little-endian value 42.
-    let sparse = vec![
-        0, 0, 0, 0, 0, 1, 58, 48, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 42, 0,
-    ];
+    let sparse = vec![58, 48, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 42, 0];
     let container = BitmapContainer::from_values(1, [42]).unwrap();
-    assert_eq!(container.canonical_bytes().unwrap(), sparse);
-    assert_eq!(BitmapContainer::decode(&sparse).unwrap(), container);
+    assert_eq!(container.encode().unwrap(), sparse);
+    assert_eq!(BitmapContainer::decode(1, &sparse).unwrap(), container);
 
     // Portable run header: cookie 12347 (one container), run bitmap 1,
     // key 0/cardinality-1 65535; one run spanning all 65536 offsets.
-    let full = vec![
-        0, 0, 0, 0, 0, 0, 59, 48, 0, 0, 1, 0, 0, 255, 255, 1, 0, 0, 0, 255, 255,
-    ];
+    let full = vec![59, 48, 0, 0, 1, 0, 0, 255, 255, 1, 0, 0, 0, 255, 255];
     let container = BitmapContainer::new(0, (0..65536).collect()).unwrap();
-    assert_eq!(container.canonical_bytes().unwrap(), full);
-    assert_eq!(BitmapContainer::decode(&full).unwrap().len(), 65536);
-
-    let changed_path = BitmapContainer::from_values(2, [42])
-        .unwrap()
-        .canonical_bytes()
-        .unwrap();
-    assert_ne!(sparse, changed_path);
-    assert_eq!(&sparse[6..], &changed_path[6..]);
+    assert_eq!(container.encode().unwrap(), full);
+    assert_eq!(BitmapContainer::decode(0, &full).unwrap().len(), 65536);
 }
 
 #[test]
@@ -55,36 +44,36 @@ fn reject_noncanonical_and_malformed_storage() {
     runs.insert_range(10..12);
     let canonical = BitmapContainer::new(0, runs.clone())
         .unwrap()
-        .canonical_bytes()
+        .encode()
         .unwrap();
-    let mut raw = vec![0; 6];
+    let mut raw = Vec::new();
     runs.serialize_into(&mut raw).unwrap();
     assert_ne!(raw, canonical, "run/array tie must choose array");
     assert!(matches!(
-        BitmapContainer::decode(&raw),
+        BitmapContainer::decode(0, &raw),
         Err(BitmapError::NonCanonicalEncoding)
     ));
     for n in 0..canonical.len() {
-        assert!(BitmapContainer::decode(&canonical[..n]).is_err());
+        assert!(BitmapContainer::decode(0, &canonical[..n]).is_err());
     }
     let mut trailing = canonical.clone();
     trailing.push(0);
     assert!(matches!(
-        BitmapContainer::decode(&trailing),
+        BitmapContainer::decode(0, &trailing),
         Err(BitmapError::NonCanonicalEncoding)
     ));
-    let mut wrong_offset = vec![0; 6];
+    let mut wrong_offset = Vec::new();
     RoaringBitmap::from_iter([65536])
         .serialize_into(&mut wrong_offset)
         .unwrap();
     assert!(matches!(
-        BitmapContainer::decode(&wrong_offset),
+        BitmapContainer::decode(0, &wrong_offset),
         Err(BitmapError::OffsetOutOfRange { .. })
     ));
-    let mut empty = vec![0; 6];
+    let mut empty = Vec::new();
     RoaringBitmap::new().serialize_into(&mut empty).unwrap();
     assert!(matches!(
-        BitmapContainer::decode(&empty),
+        BitmapContainer::decode(0, &empty),
         Err(BitmapError::EmptyContainer)
     ));
 }
@@ -92,18 +81,16 @@ fn reject_noncanonical_and_malformed_storage() {
 #[test]
 fn container_mutations_and_empty_policy() {
     let mut container = BitmapContainer::empty(1).unwrap();
-    let mut bytes = vec![123];
     assert!(matches!(
-        container.encode_into(&mut bytes),
+        container.encode(),
         Err(BitmapError::EmptyContainer)
     ));
-    assert_eq!(bytes, [123]);
     assert!(container.insert(42));
     assert!(!container.insert(42));
-    assert_eq!(container.iter().collect::<Vec<_>>(), [65536 + 42]);
-    let first = container.canonical_bytes().unwrap();
-    container.encode_into(&mut bytes).unwrap();
-    assert_eq!(&bytes[1..], first);
+    assert_eq!(
+        container.iter().collect::<Vec<_>>(),
+        [(1 << crate::CHUNK_BITS) + 42]
+    );
     assert!(container.remove(42));
     assert!(!container.remove(42));
     assert!(container.is_empty());
@@ -134,27 +121,24 @@ fn canonical_across_build_paths_and_thresholds() {
         let roundtrip = RoaringBitmap::deserialize_from(serialized.as_slice()).unwrap();
         let expected = BitmapContainer::new(0, ascending.clone())
             .unwrap()
-            .canonical_bytes()
+            .encode()
             .unwrap();
         for built in [ascending, reversed, runs, optimized, roundtrip] {
-            let actual = BitmapContainer::new(0, built)
-                .unwrap()
-                .canonical_bytes()
-                .unwrap();
+            let actual = BitmapContainer::new(0, built).unwrap().encode().unwrap();
             assert_eq!(actual, expected);
             assert_eq!(
-                BitmapContainer::decode(&actual)
+                BitmapContainer::decode(0, &actual)
                     .unwrap()
-                    .canonical_bytes()
+                    .encode()
                     .unwrap(),
                 expected
             );
         }
         if values.len() == 4096 {
-            assert_eq!(expected.len(), 6 + 16 + 4096 * 2);
+            assert_eq!(expected.len(), 16 + 4096 * 2);
         }
         if values.len() == 4097 {
-            assert_eq!(expected.len(), 6 + 16 + 8192);
+            assert_eq!(expected.len(), 16 + 8192);
         }
     }
 }
@@ -258,31 +242,8 @@ proptest! {
     fn arbitrary_chunk_roundtrip_and_order_independence(path in 0u64..(1 << 48), offsets in prop::collection::vec(any::<u16>(), 1..500)) {
         let forward = BitmapContainer::from_values(path, offsets.iter().copied()).unwrap();
         let reverse = BitmapContainer::from_values(path, offsets.iter().rev().copied()).unwrap();
-        let bytes = forward.canonical_bytes().unwrap();
-        prop_assert_eq!(reverse.canonical_bytes().unwrap(), bytes.clone());
-        prop_assert_eq!(BitmapContainer::decode(&bytes).unwrap(), forward);
+        let bytes = forward.encode().unwrap();
+        prop_assert_eq!(reverse.encode().unwrap(), bytes.clone());
+        prop_assert_eq!(BitmapContainer::decode(path, &bytes).unwrap(), forward);
     }
-}
-
-#[test]
-fn bitmap_trie_rejects_containers_out_of_order() {
-    let db = golemdb_storage::MemoryStore::new();
-    let mut tx = golemdb_storage::Store::begin_write(&db).unwrap();
-    let trie = crate::bitmap_trie::BitmapTrie::new(&golemdb_merkle::Keccak256Hasher, &[0; 32]);
-    // Batching reads every container from the original root, so a container
-    // visited twice would lose its first changes.
-    assert!(matches!(
-        trie.apply(&mut tx, 0, None, [(1, 0, true), (0, 0, true)],),
-        Err(crate::IndexError::Bitmap(BitmapError::UnsortedPaths {
-            previous: 1,
-            path: 0
-        }))
-    ));
-    assert!(matches!(
-        trie.apply(&mut tx, 0, None, [(1, 0, true), (2, 0, true), (1, 1, true)],),
-        Err(crate::IndexError::Bitmap(BitmapError::UnsortedPaths {
-            previous: 2,
-            path: 1
-        }))
-    ));
 }

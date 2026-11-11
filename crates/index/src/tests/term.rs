@@ -1,8 +1,11 @@
-use crate::{BitmapContainer, IndexTerm, TermError};
+use crate::{
+    BitmapContainer, IndexTerm, TermError,
+    index_trie::{IndexTrie, IndexTriePath},
+};
 use golemdb_cells::{
     CellType as T, CellValueRef, FloatWidth as F, Width as W, encode_float, flip_sign,
 };
-use golemdb_merkle::{Hash, HashProvider, Keccak256Hasher};
+use golemdb_merkle::{HASH_BYTES, Hash, HashProvider, Keccak256Hasher};
 use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction, scan, scan_prefix};
 use proptest::prelude::*;
 use std::{cell::RefCell, ops::Bound::Included};
@@ -15,9 +18,9 @@ fn literal_term_vectors() {
             "S",
             T::Str,
             b"abc".to_vec(),
-            vec![b'S', 0, 0x82, b'a', b'b', b'c'],
+            vec![b'S', 0, 0x82, b'a', b'b', b'c', 0],
         ),
-        ("S", T::Str, vec![], vec![b'S', 0, 0x82]),
+        ("S", T::Str, vec![], vec![b'S', 0, 0x82, 0]),
         (
             "I",
             T::Int(W::W4),
@@ -101,7 +104,7 @@ fn every_supported_family_and_width_has_canonical_order() {
         &[
             b"".to_vec(),
             b"a".to_vec(),
-            b"a\0".to_vec(),
+            b"a\x01".to_vec(),
             b"aa".to_vec(),
             b"b".to_vec(),
             "é".as_bytes().to_vec(),
@@ -240,7 +243,7 @@ struct Recorder(RefCell<Vec<Vec<u8>>>);
 impl HashProvider for Recorder {
     fn hash_parts(&self, parts: &[&[u8]]) -> Hash {
         self.0.borrow_mut().push(parts.concat());
-        [self.0.borrow().len() as u8; 32]
+        [self.0.borrow().len() as u8; HASH_BYTES]
     }
 }
 
@@ -248,40 +251,31 @@ impl HashProvider for Recorder {
 fn leaf_preimages_belong_to_index_and_use_the_supplied_provider() {
     let term = IndexTerm::new("A", T::Bool, &[1]).unwrap();
     let hasher = Recorder::default();
-    assert_eq!(term.leaf_hash(&[7; 32], &hasher), [2; 32]);
+    assert_eq!(term.routing_path(&hasher), [1; HASH_BYTES]);
+    let bytes = BitmapContainer::from_values(1, [42])
+        .unwrap()
+        .encode()
+        .unwrap();
+    let path = |term_path, hi| IndexTriePath::new(&term_path, hi).unwrap();
+    let leaf = IndexTrie::new(&hasher).leaf_hash(&path([7; HASH_BYTES], 1), &bytes);
+    assert_eq!(leaf, [2; HASH_BYTES]);
     assert_eq!(
         *hasher.0.borrow(),
         vec![
             vec![b'A', 0, 0x81, 1],
-            [&[2][..], &[1; 32], &[7; 32]].concat()
+            [
+                &[4][..],
+                &[7; HASH_BYTES],
+                &crate::path::path_bytes(1).unwrap(),
+                &bytes
+            ]
+            .concat()
         ]
     );
-    let chunk = BitmapContainer::from_values(1, [42]).unwrap();
-    assert_eq!(chunk.leaf_hash(&hasher).unwrap(), [3; 32]);
-    assert_eq!(
-        hasher.0.borrow()[2],
-        [&[4][..], chunk.canonical_bytes().unwrap().as_slice()].concat()
-    );
-    assert!(
-        BitmapContainer::empty(0)
-            .unwrap()
-            .leaf_hash(&hasher)
-            .is_err()
-    );
-    let keccak = Keccak256Hasher;
-    assert_ne!(
-        chunk.leaf_hash(&keccak).unwrap(),
-        BitmapContainer::from_values(2, [42])
-            .unwrap()
-            .leaf_hash(&keccak)
-            .unwrap()
-    );
-    assert_ne!(
-        term.leaf_hash(&[7; 32], &keccak),
-        IndexTerm::new("B", T::Bool, &[1])
-            .unwrap()
-            .leaf_hash(&[7; 32], &keccak)
-    );
+    let keccak = IndexTrie::new(&Keccak256Hasher);
+    let leaf = keccak.leaf_hash(&path([7; HASH_BYTES], 1), &bytes);
+    assert_ne!(leaf, keccak.leaf_hash(&path([7; HASH_BYTES], 2), &bytes));
+    assert_ne!(leaf, keccak.leaf_hash(&path([8; HASH_BYTES], 1), &bytes));
 }
 
 #[test]
@@ -341,7 +335,7 @@ proptest! {
         prop_assert_eq!(IndexTerm::decode(a_term.as_bytes()).unwrap(),a_term);
     }
     #[test]
-    fn strings_preserve_utf8_byte_order(a in ".{0,80}",b in ".{0,80}") {
+    fn strings_preserve_utf8_byte_order(a in "[^\0]{0,80}",b in "[^\0]{0,80}") {
         let a_term=IndexTerm::new("A",T::Str,a.as_bytes()).unwrap();
         let b_term=IndexTerm::new("A",T::Str,b.as_bytes()).unwrap();
         prop_assert_eq!(a.as_bytes().cmp(b.as_bytes()),a_term.cmp(&b_term));
@@ -373,7 +367,8 @@ proptest! {
 fn assert_cell_term(ty: T, native: &[u8], ordered: &[u8]) -> IndexTerm {
     let cell = CellValueRef::new(ty, ordered, true).unwrap();
     let term = IndexTerm::from_cell("Value", cell).unwrap().unwrap();
-    let expected = [b"Value\0".as_slice(), &[cell.metadata()], ordered].concat();
+    let end: &[u8] = if ty == T::Str { &[0] } else { &[] };
+    let expected = [b"Value\0".as_slice(), &[cell.metadata()], ordered, end].concat();
     assert_eq!(term.as_bytes(), expected, "{ty:?}");
     assert_eq!(IndexTerm::decode(&expected).unwrap(), term, "{ty:?}");
     assert_eq!(IndexTerm::new("Value", ty, native).unwrap(), term, "{ty:?}");
@@ -468,7 +463,7 @@ fn cell_float_values_are_not_encoded_twice() {
 
 #[test]
 fn cell_plain_values_preserve_their_bytes_and_fields_are_omitted() {
-    for (ty, bytes) in [(T::Bool, &b"\x01"[..]), (T::Str, b"a\0b"), (T::Str, b"")] {
+    for (ty, bytes) in [(T::Bool, &b"\x01"[..]), (T::Str, b"a\x01b"), (T::Str, b"")] {
         assert_cell_term(ty, bytes, bytes);
     }
     assert_cell_term(T::Bytes20, &[0xab; 20], &[0xab; 20]);

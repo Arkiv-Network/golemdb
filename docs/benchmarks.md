@@ -116,7 +116,7 @@ full default runs now include both algorithms and take longer.
 ## Sorted-vector grouping review (2026-09-28)
 
 The writer now sorts a flat vector stably by `(term, container, offset)` and
-retains the last operation per posting. BitmapTrie consumes consecutive container
+retains the last operation per posting. The writer consumes consecutive container
 groups directly. This removes nested map allocations but retains all input
 entries until deduplication; duplicate-heavy batches can cost more time and memory.
 

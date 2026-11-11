@@ -28,6 +28,9 @@ pub enum CellValueParseError {
     NegativeZero,
     /// The indexable bit on a `bytes` cell, which has no order.
     NotIndexable,
+    /// A `0x00` byte in an attribute `str`: the index ends a string value
+    /// with `0x00`.
+    NulInStrAttributeValue,
 }
 
 impl fmt::Display for CellValueParseError {
@@ -48,6 +51,9 @@ impl fmt::Display for CellValueParseError {
             Self::FloatNaN => write!(f, "float is NaN, which has no order"),
             Self::NegativeZero => write!(f, "float is -0.0; zero is stored as +0.0"),
             Self::NotIndexable => write!(f, "a bytes cell cannot be indexable"),
+            Self::NulInStrAttributeValue => {
+                write!(f, "an attribute str cannot contain a 0x00 byte")
+            }
         }
     }
 }

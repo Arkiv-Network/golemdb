@@ -40,18 +40,17 @@ mod error;
 mod hash;
 mod node;
 mod path;
-mod payload_trie;
 mod table;
 mod trie;
 
 pub use config::{ConfigError, HashConfig};
 pub use error::{MerkleError, Result};
 pub use hash::{Blake3Hasher, HASH_BYTES, Hash, HashAlgorithm, HashProvider, Keccak256Hasher};
-pub use node::{BRANCH_SLOTS, BranchNodeCompact, LeafStorage, MAX_PATH_BYTES};
-pub use payload_trie::{LeafPayload, PayloadTrie};
+pub use node::{BRANCH_SLOTS, BranchNodeCompact, MAX_PATH_BYTES};
 pub use table::TrieTable;
 pub use trie::{
-    BRANCH_ROOT_BYTES, BranchRef, COMMIT_BYTES, LeafRef, RootRef, Trie, TrieUpdate, Walk,
+    BRANCH_ROOT_BYTES, BranchRef, COMMIT_BYTES, CheckedEdit, LeafRef, RootRef, Trie, TrieUpdate,
+    Walk,
 };
 
 #[cfg(test)]

@@ -1,29 +1,34 @@
-use std::iter::FusedIterator;
+use std::iter::{FusedIterator, Peekable};
 
 use golemdb_merkle::{HashProvider, RootRef};
-use golemdb_storage::{ReadCursor, ReadTransaction, Scan, scan, scan_prefix};
+use golemdb_storage::{Entry, ReadCursor, ReadTransaction, Scan, scan, scan_prefix};
 
 use super::Index;
 use crate::{
-    BITMAP_TRIE_PATH_BYTES, Bitmap, INDEX_TRIE_PATH_BYTES, IndexTerm, Result, TermRange,
-    bitmap_trie::BitmapTrie, index_trie::decode_root, tables,
+    Bitmap, BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Result, TermRange, key,
+    tables,
 };
 
-/// One flat-table lookup, without loading a posting list or traversing a trie.
-/// Validate the encoded root locator without following it. Presence is sufficient
-/// for creation pricing; checking the referenced data remains the responsibility
-/// of index readers/writers that consume the root.
+/// Whether `term` has postings: one seek to its first container row, decoding
+/// only its key, without traversing the trie. A row whose key is not a
+/// container key of `term` is an error.
 pub fn term_exists(tx: &impl ReadTransaction, term: &IndexTerm) -> Result<bool> {
-    match tx.get(tables::INDEX, term.as_bytes())? {
+    match scan_prefix(tx, tables::INDEX, term.as_bytes().to_vec())?
+        .next()
+        .transpose()?
+    {
         None => Ok(false),
-        Some(root) => decode_root(&root).map(|_| true),
+        Some((row, _)) => {
+            IndexKey::decode(&row)?;
+            Ok(true)
+        }
     }
 }
 
 impl<H: HashProvider> Index<'_, H> {
     /// Validate a stored root, such as one read from `Roots`. Empty/singleton
-    /// roots are checked against the flat table from this snapshot. This does
-    /// not audit all descendants of a branch root.
+    /// roots are checked against the container table from this snapshot. This
+    /// does not audit all descendants of a branch root.
     pub fn validate_root(
         &self,
         tx: &impl ReadTransaction,
@@ -32,77 +37,79 @@ impl<H: HashProvider> Index<'_, H> {
         self.trie.validate_root(tx, root)
     }
 
-    /// Materialize a term's postings; absent terms return None, never an empty bitmap.
+    /// Materialize a term's postings from its container rows; absent terms
+    /// return None, never an empty bitmap.
     pub fn bitmap(&self, tx: &impl ReadTransaction, term: &IndexTerm) -> Result<Option<Bitmap>> {
-        self.bitmap_root(tx, term)?
-            .map(|root| self.bitmap_at(tx, term, root))
-            .transpose()
+        // No other term starts with this one, so the scan holds only its rows.
+        let mut rows = TermScan::new(scan_prefix(tx, tables::INDEX, term.as_bytes().to_vec())?);
+        Ok(rows.next().transpose()?.map(|(_, bitmap)| bitmap))
     }
 
-    /// Materialize the postings under a term's bitmap root, as a [`TermScan`]
-    /// yields it, without looking its term up again. The root is a locator
-    /// (hash and commit); the term supplies the rows' namespace.
-    pub fn bitmap_at(
-        &self,
-        tx: &impl ReadTransaction,
-        term: &IndexTerm,
-        root: RootRef<BITMAP_TRIE_PATH_BYTES>,
-    ) -> Result<Bitmap> {
-        let term_path = term.routing_path(self.hasher);
-        BitmapTrie::new(self.hasher, &term_path).bitmap(tx, root)
+    /// Materialize the postings of a term; empty when the term is absent.
+    pub fn postings(&self, tx: &impl ReadTransaction, term: &IndexTerm) -> Result<Bitmap> {
+        Ok(self.bitmap(tx, term)?.unwrap_or_default())
     }
 
-    /// Ordered scan of one name/type run, between the range's bounds.
-    /// This returns roots without materializing their bitmaps:
-    /// see [`Self::bitmap_at`].
+    /// Ordered scan of the terms in `range`: each term with its postings, in
+    /// one pass over the container rows.
     pub fn terms<'a, T: ReadTransaction>(
         &'a self,
         tx: &'a T,
         range: TermRange,
     ) -> Result<TermScan<T::Cursor<'a>>> {
-        let (lower, upper) = range.into_bounds();
-        Ok(TermScan {
-            scan: scan(tx, tables::INDEX, lower, upper)?,
-            done: false,
-        })
-    }
-
-    /// Prefix from `IndexTerm::prefix`, optionally followed by an ordered value
-    /// prefix (for example UTF-8 for a string). Empty prefix scans every term.
-    pub fn terms_with_prefix<'a, T: ReadTransaction>(
-        &'a self,
-        tx: &'a T,
-        prefix: Vec<u8>,
-    ) -> Result<TermScan<T::Cursor<'a>>> {
-        Ok(TermScan {
-            scan: scan_prefix(tx, tables::INDEX, prefix)?,
-            done: false,
-        })
+        let (lower, upper) = key::bounds(range.bounds());
+        Ok(TermScan::new(scan(tx, tables::INDEX, lower, upper)?))
     }
 }
 
-/// Lazy typed term scan; any storage or decoding error ends iteration.
+/// Lazy typed term scan over the container rows: one cursor walks the range,
+/// and each term's adjacent rows are grouped into its postings. Any storage
+/// or decoding error ends iteration.
 pub struct TermScan<C: ReadCursor> {
-    scan: Scan<C>,
+    rows: Peekable<Scan<C>>,
     done: bool,
 }
 
+impl<C: ReadCursor> TermScan<C> {
+    fn new(rows: Scan<C>) -> Self {
+        Self {
+            rows: rows.peekable(),
+            done: false,
+        }
+    }
+
+    fn step(&mut self) -> Result<Option<(IndexTerm, Bitmap)>> {
+        let Some(row) = self.rows.next() else {
+            return Ok(None);
+        };
+        let (key, value) = row?;
+        let IndexKey { term, container_id } = IndexKey::decode(&key)?;
+        let mut containers = vec![BitmapContainer::decode(container_id, &value)?];
+        // The term ends unambiguously, so its rows are those it prefixes.
+        // An error may hide one of the term's rows, so it fails the term.
+        let same_term = |row: &golemdb_storage::Result<Entry>| {
+            row.as_ref()
+                .map_or(true, |(next, _)| next.starts_with(term.as_bytes()))
+        };
+        while let Some(row) = self.rows.next_if(same_term) {
+            let (next, value) = row?;
+            let container_id = key::container_id(&next[term.as_bytes().len()..])?;
+            containers.push(BitmapContainer::decode(container_id, &value)?);
+        }
+        Ok(Some((term, Bitmap::from_containers(containers)?)))
+    }
+}
+
 impl<C: ReadCursor> Iterator for TermScan<C> {
-    type Item = Result<(IndexTerm, RootRef<BITMAP_TRIE_PATH_BYTES>)>;
+    type Item = Result<(IndexTerm, Bitmap)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
         }
-        let result = self
-            .scan
-            .next()?
-            .map_err(Into::into)
-            .and_then(|(key, value)| Ok((IndexTerm::decode(&key)?, decode_root(&value)?)));
-        if result.is_err() {
-            self.done = true;
-        }
-        Some(result)
+        let item = self.step().transpose();
+        self.done = !matches!(item, Some(Ok(_)));
+        item
     }
 }
 
@@ -111,45 +118,37 @@ impl<C: ReadCursor> FusedIterator for TermScan<C> {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PostingChange;
     use golemdb_cells::CellType;
-    use golemdb_merkle::{BranchRef, LeafRef};
+    use golemdb_merkle::Keccak256Hasher;
     use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 
+    /// A term exists while it has a container, and a term whose value another
+    /// term's value extends is told apart from it.
     #[test]
-    fn term_presence_accepts_root_locators_without_loading_postings() {
+    fn term_presence_follows_its_containers() {
         let store = MemoryStore::new();
         let mut tx = store.begin_write().unwrap();
-        let term = IndexTerm::new("active", CellType::Bool, &[1]).unwrap();
-        assert!(!term_exists(&tx, &term).unwrap());
-
-        // No referenced trie rows or containers exist: presence checks only
-        // decode the flat Index row, including its commit and singleton path.
-        for root in [
-            RootRef::<BITMAP_TRIE_PATH_BYTES>::Branch(BranchRef {
-                hash: [1; 32],
-                commit: 42,
-            }),
-            RootRef::Leaf(LeafRef {
-                path: [0; BITMAP_TRIE_PATH_BYTES],
-                hash: [2; 32],
-                commit: 43,
-            }),
-        ] {
-            tx.put(tables::INDEX, term.as_bytes(), &root.encode())
-                .unwrap();
-            assert!(term_exists(&tx, &term).unwrap());
-        }
-
-        // An empty root and the old hash-only representation are invalid rows.
-        for bytes in [
-            RootRef::<BITMAP_TRIE_PATH_BYTES>::Empty.encode(),
-            vec![1; 32],
-        ] {
-            tx.put(tables::INDEX, term.as_bytes(), &bytes).unwrap();
-            assert!(matches!(
-                term_exists(&tx, &term),
-                Err(crate::IndexError::Corruption(_))
-            ));
-        }
+        let index = Index::new(&Keccak256Hasher);
+        let term = |value: &[u8]| IndexTerm::new("color", CellType::Str, value).unwrap();
+        let (short, long) = (term(b"blue"), term(b"blue\x01"));
+        assert!(!term_exists(&tx, &short).unwrap());
+        let add = PostingChange::Add {
+            term: long.clone(),
+            record_id: 1 << 20,
+        };
+        let root = index.apply(&mut tx, 1, RootRef::Empty, [add]).unwrap().root;
+        assert!(term_exists(&tx, &long).unwrap());
+        assert!(!term_exists(&tx, &short).unwrap());
+        let stray = [short.as_bytes(), &[0]].concat();
+        tx.put(tables::INDEX, &stray, &[]).unwrap();
+        assert!(term_exists(&tx, &short).is_err());
+        tx.delete(tables::INDEX, &stray).unwrap();
+        let remove = PostingChange::Remove {
+            term: long.clone(),
+            record_id: 1 << 20,
+        };
+        index.apply(&mut tx, 2, root, [remove]).unwrap();
+        assert!(!term_exists(&tx, &long).unwrap());
     }
 }
