@@ -1,13 +1,15 @@
-use crate::{CELL_BRANCH_DOMAIN, CELL_LEAF_DOMAIN};
-use golemdb_merkle::{HashProvider, LeafRef, RootRef, Trie, TrieUpdate};
+use golemdb_merkle::{CheckedEdit, HashProvider, LeafRef, MerkleError, RootRef, Trie, TrieUpdate};
 use golemdb_storage::{ReadCursor, ReadTransaction, WriteTransaction};
 
-use crate::{CELL_TRIE_PATH_BYTES, CellError, CellKey, CellValue, Result, tables};
+use crate::{
+    CELL_BRANCH_DOMAIN, CELL_LEAF_DOMAIN, CELL_TRIE_PATH_BYTES, CellError, CellKey, CellValue,
+    CellValueChange, Result, tables,
+};
 
 /// A cell's routing path, `recordID || H(encoded CellKey)`. Only
 /// [`CellTrie::path`] builds one, so every trie access is routed from a `CellKey`.
 #[derive(Clone, Copy)]
-pub(crate) struct CellPath([u8; CELL_TRIE_PATH_BYTES]);
+struct CellPath([u8; CELL_TRIE_PATH_BYTES]);
 
 /// Cell-specific routing, leaf hashing and recovery over branch-only storage.
 pub(crate) struct CellTrie<'h, H: HashProvider> {
@@ -27,7 +29,7 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
 
     /// Route a cell by its record ID, then by the hash of its encoded key, so
     /// each record's cells share one subtree.
-    pub(crate) fn path(&self, key: &CellKey) -> CellPath {
+    fn path(&self, key: &CellKey) -> CellPath {
         let record_id = key.record_id().to_be_bytes();
         // The encoded key is `recordID || name`; hashing its parts avoids allocating it.
         let digest = self.hasher.hash_parts(&[&record_id, key.name().as_bytes()]);
@@ -48,39 +50,33 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         )
     }
 
-    /// Verify that the leaf at `path` commits to the value read from the `Cell` table.
-    /// `None` requires absence from the trie. A different or missing commitment
-    /// returns `RootMismatch`; storage and branch-validation errors propagate.
-    /// This checks one address, not the entire state, and also applies to no-ops.
-    pub(crate) fn check(
-        &self,
-        tx: &impl ReadTransaction,
-        root: RootRef<CELL_TRIE_PATH_BYTES>,
-        path: CellPath,
-        before: Option<&CellValue>,
-    ) -> Result<()> {
-        if self.trie.get(tx, root, &path.0)? != before.map(|value| self.leaf(path, value)) {
-            return Err(CellError::RootMismatch);
-        }
-        Ok(())
-    }
-
-    /// For each path, insert or replace its leaf, or remove it when the value
-    /// is `None`, in one batched trie update. Returns the updated root and the
-    /// rows it superseded; older commits' rows stay for their roots, and rows
-    /// this commit wrote and then replaced are deleted. The caller updates the
-    /// `Cell` table in the same transaction and must abort that transaction if
-    /// a mutation fails.
-    pub(crate) fn set<'a>(
+    /// Set each cell's leaf to its `after` (`None` for absent) in one
+    /// batched trie update, checking on the same traversal that the old leaf is
+    /// its `before`. Returns the updated root and the rows it superseded. A
+    /// mismatch is `RootMismatch`; the caller must abort the transaction on any
+    /// error.
+    pub(crate) fn set(
         &self,
         tx: &mut impl WriteTransaction,
         commit: u64,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
-        changes: impl IntoIterator<Item = (CellPath, Option<&'a CellValue>)>,
+        changes: &[CellValueChange],
     ) -> Result<TrieUpdate<CELL_TRIE_PATH_BYTES>> {
-        let edits = (changes.into_iter())
-            .map(|(path, value)| (path.0, value.map(|value| self.leaf(path, value).hash)));
-        Ok(self.trie.apply(tx, commit, root, edits)?)
+        let hash = |path, value: &Option<CellValue>| {
+            value.as_ref().map(|value| self.leaf(path, value).hash)
+        };
+        let edits = changes.iter().map(|change| {
+            let path = self.path(&change.key);
+            CheckedEdit {
+                path: path.0,
+                before: hash(path, &change.before),
+                after: hash(path, &change.after),
+            }
+        });
+        match self.trie.apply_checked(tx, commit, root, edits) {
+            Err(MerkleError::LeafMismatch) => Err(CellError::RootMismatch),
+            result => Ok(result?),
+        }
     }
 
     /// Validate a stored root against the transaction's snapshot.
