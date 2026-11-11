@@ -691,11 +691,10 @@ for is in the [metering record model](golemdb-metering.md#the-meta-cell).
   the whole tries.
 
 **Record completeness proofs.** Cell paths are `recordID ‖ Hash(recordID ‖ cellKey)`
-([§8](#the-two-tries)), so a record's cells share one `CellTrie` subtree. A client holding an
-inclusion proof of `#meta` at commit _c_ can check that a whole-record read at _c_ withholds no user
-cell, because the proven cells must match `cells` (and `cellBytes`). This covers whole-record reads
-only; projections use per-name non-inclusion proofs, and index queries are a separate question
-(D06).
+([§8](#the-two-tries)), so a record's cells are exactly the leaves of one `CellTrie` subtree. A
+proof of that subtree at commit _c_ shows that a whole-record read at _c_ withholds no cell; `#meta`
+is not needed for it. Projections use per-name non-inclusion proofs, and index queries are a
+separate question (D06).
 
 ### Cell Names
 
@@ -1130,8 +1129,7 @@ properties such a table could not offer:
   binding stays in history, so historical key-addressed reads of deleted records resolve through
   standard cell time-travel — no bespoke rules for removal.
 - **Non-existence proofs.** "No record with key K" is a trie non-inclusion proof at
-  `3 ‖ Hash(3 ‖ K)`, with `3` the 8-byte big-endian `recordID` of `#recordKeys` — impossible with
-  an uncommitted map.
+  `recordID(#recordKeys) ‖ Hash(recordID(#recordKeys) ‖ K)` — impossible with an uncommitted map.
 - **Both directions committed.** `#key` cells give ID → key (record content, used by reads) and
   `#recordKeys` gives key → ID (used by lookups and proofs). The pair is maintained atomically by the
   engine; each direction serves proofs and reads the other cannot.
@@ -2112,7 +2110,10 @@ sharing a `d`-nibble prefix, and routing paths are hash outputs — uniformly di
 chosen by the writer — except a `CellTrie` path's leading `recordID`, which the engine allocates
 and which takes at most 16 levels. Depth tracks the population rather than the bound: a `CellTrie`
 write goes about ⌈log₁₆ R⌉ levels to its record, over R live records, then ⌈log₁₆ c⌉ over its c
-cells — about 7 levels at 10⁷ records of up to 16 cells, `#key` and `#meta` included. The
+cells — about 7 levels at 10⁷ records of up to 16 cells, `#key` and `#meta` included. System
+records that grow with the database are the exception: `#recordKeys` holds one binding per live
+record, so a binding write goes about 2⌈log₁₆ R⌉ levels, about 12 at 10⁷ records, and `#roots`
+grows likewise with commits. The
 `BitmapTrie` bound of 12 is different in kind — small, hard, and reachable — but `C` is itself
 bounded by ⌈maxRecordID / 65536⌉, so with dense allocation a term's trie stays shallow.
 
@@ -3531,7 +3532,7 @@ onto chapters.
 | D03 | Crash recovery: restart from the `Superblock` head; segment truncation; behaviour on segment-fsync or MDBX-write failure; retry idempotence; already-issued receipts | §10, §11 |
 | D04 | Concurrency contract: one MDBX read snapshot per branch and per query; where the commit guard's critical section starts relative to segment appends; arbitration of two sealed candidates | §10 |
 | D05 | Retention. **Decided (P06):** the minimum window is `#minRetention`, in commits, in `#params`, and the consensus path refuses beyond it on every node. Open: which structures survive per read class (point, filtered, proof, segments); earliest supported commit; reader and cursor protection from GC; `Pruned` vs `NotFound`; discovering terms and cell names deleted since T; where a shard's starting mark survives once the previous system-segment shard is pruned | §7, §11, §13 |
-| D06 | Proof scope: which classes are proven (membership, non-inclusion; not range completeness — though whole-record completeness follows indirectly from a proof of the record's `#meta` counts, [metering](golemdb-metering.md#the-meta-cell)); how the server obtains a mismatching virtual leaf's tagged value at head and historically; cost | §8 |
+| D06 | Proof scope: which classes are proven (membership, non-inclusion; not range completeness — though whole-record completeness follows from a proof of the record's `CellTrie` subtree, [§3](#record-shape-the-meta-cell)); how the server obtains a mismatching virtual leaf's tagged value at head and historically; cost | §8 |
 | D07 | Branch transitions: delete visibility over real overlay values; the net diff with restored or no-op entries after rollback; history of cancelled changes; create-then-delete in one commit | §10 |
 | D09 | The normative encoding profile: Roaring version, container selection and run-opt rule; odd-nibble padding; `EMPTY_ROOT`; `typeTag` for reserved-record layouts; the absent pre-image encoding for `IndexChangeSet`; `bool` byte forms; the shipped type-id map; change-set key caps | §2, §3, §4, §6, §8 |
 | D11 | Cursor contract: is the cursor in the receipt (then `machineId` must be deterministic); fingerprint scope — **same-sequence** (only what fixes membership and order, so `projection` and `limit` may vary) or **same-query** (everything but the paging position); whichever, expressed as an exclusion, not an enumeration; cursor + `offset` + `at` precedence. The argument is in [Open Question on Paging](#open-question-on-paging) | §13 |

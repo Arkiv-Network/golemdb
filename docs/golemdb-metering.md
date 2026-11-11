@@ -151,8 +151,7 @@ The reverse mapping, record key → record ID, lives in the system record `#reco
 
 ### The `#meta` Cell
 
-`#meta` holds four counters over a record's user cells; its layout, maintenance and the
-record completeness proofs it enables are in
+`#meta` holds four counters over a record's user cells; its layout and maintenance are in
 [design §3](golemdb-design.md#record-shape-the-meta-cell). Metering needs it because a
 `patch` reads only the cells it touches, and the no-probe rule (R3) forbids reading the
 rest just to price or validate the call.
@@ -401,6 +400,7 @@ Depth is capped at 7. ⌈log₁₆ N⌉ would reach 8 only above 16⁷ (≈268M)
 - The write already knows whether it adds or removes a cell or term, so counters need no extra read (R3).
 - Database growth leaves the weights: they reflect cost per node only.
 - The model over-charges repeated writes to one cell and writes sharing trie prefixes; deeper paths can be under-charged unless calibration provides sufficient upward margins (R4).
+- The `#recordKeys` binding written by every `create` and `delete` sits under one record whose subtree grows with the record count, so its path is about twice the modeled depth; calibration must cover this margin.
 
 Modeled depths approximate typical path work, not maximum depth. Calibration must
 verify sufficient pricing margins for path-depth variation, growth within a branch,
