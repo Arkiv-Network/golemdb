@@ -1,6 +1,6 @@
 use golemdb_cells::CellType;
 use golemdb_index::{
-    BitmapContainer, INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange, path, tables,
+    BitmapContainer, ContainerId, INDEX_TRIE_PATH_BYTES, Index, IndexTerm, PostingChange, tables,
 };
 use golemdb_index::{CONTAINER_LEAF_DOMAIN, INDEX_BRANCH_DOMAIN};
 use golemdb_merkle::{HASH_BYTES, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
@@ -115,14 +115,21 @@ fn persistence_worker() {
     // and keep the hashes of the containers they were built with; the
     // containers themselves are live rows, overwritten in place.
     let container = |value: &[u8], ids: &[u64]| {
-        let (hi, _) = path::split(ids[0]);
-        let chunk =
-            BitmapContainer::from_values(hi, ids.iter().map(|&id| path::split(id).1)).unwrap();
+        let (container_id, _) = ContainerId::split(ids[0]);
+        assert!(
+            ids.iter()
+                .all(|&id| ContainerId::split(id).0 == container_id),
+            "one container"
+        );
+        let bitmap = BitmapContainer::from_values(
+            container_id,
+            ids.iter().map(|&id| ContainerId::split(id).1),
+        );
         let term_path = term(value).routing_path(&HASH);
         let mut trie_path = [0; INDEX_TRIE_PATH_BYTES];
         trie_path[..HASH_BYTES].copy_from_slice(&term_path);
-        trie_path[HASH_BYTES..].copy_from_slice(&path::path_bytes(hi).unwrap());
-        let roaring = chunk.encode().unwrap();
+        trie_path[HASH_BYTES..].copy_from_slice(&container_id.to_bytes());
+        let roaring = bitmap.encode().unwrap();
         let leaf = HASH.hash_parts(&[&[CONTAINER_LEAF_DOMAIN], &trie_path, &roaring]);
         LeafRef::new(trie_path, leaf)
     };

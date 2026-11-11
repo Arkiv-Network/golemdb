@@ -6,7 +6,7 @@
 use std::{collections::BTreeMap, ops::RangeBounds};
 
 use golemdb_cells::{CellKind, CellName, CellNameRef, CellValue};
-use golemdb_index::{Bitmap, BitmapContainer, IndexTerm, TermRange, path};
+use golemdb_index::{Bitmap, BitmapContainer, ContainerId, IndexTerm, TermRange};
 
 use crate::{CellSource, PostingSource};
 
@@ -54,19 +54,19 @@ impl PostingSource for FakeSource {
     }
 }
 
-/// Chunk record IDs by their 48-bit path, as the index stores them.
+/// Group record IDs into containers, as the index stores them.
 pub(crate) fn bitmap(ids: impl IntoIterator<Item = u64>) -> Bitmap {
-    let mut chunks: BTreeMap<u64, Vec<u16>> = BTreeMap::new();
+    let mut containers: BTreeMap<ContainerId, Vec<u16>> = BTreeMap::new();
     for id in ids {
-        let (path, offset) = path::split(id);
-        chunks.entry(path).or_default().push(offset);
+        let (container_id, offset) = ContainerId::split(id);
+        containers.entry(container_id).or_default().push(offset);
     }
     Bitmap::from_containers(
-        chunks.into_iter().map(|(path, offsets)| {
-            BitmapContainer::from_values(path, offsets).expect("48-bit path")
-        }),
+        containers
+            .into_iter()
+            .map(|(container_id, offsets)| BitmapContainer::from_values(container_id, offsets)),
     )
-    .expect("unique, ordered paths")
+    .expect("unique, ordered containers")
 }
 
 /// Cells in a `BTreeMap`, by record ID and name.
