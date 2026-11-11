@@ -13,6 +13,7 @@ golemdb-merkle.workspace = true
 golemdb-pruning.workspace = true
 golemdb-storage.workspace = true
 thiserror.workspace = true
+tracing = "0.1"
 
 [dev-dependencies]
 golemdb-storage-mdbx.workspace = true
