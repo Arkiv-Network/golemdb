@@ -1,5 +1,5 @@
 //! Native MDBX tables, snapshot transactions and lazy bidirectional cursors.
-use std::{path::Path, sync::Arc};
+use std::{ffi::CString, path::Path, sync::Arc};
 
 use libmdbx::{NoWriteMap, RO, RW, TableFlags, TransactionKind, WriteFlags};
 
@@ -20,6 +20,8 @@ pub struct MdbxOptions {
     pub growth_step: usize,
     /// Page size in bytes, used only when creating a database. Sets the maximum key size.
     pub page_size: usize,
+    /// Fail to open while another process has the environment open.
+    pub exclusive: bool,
 }
 
 impl Default for MdbxOptions {
@@ -29,6 +31,7 @@ impl Default for MdbxOptions {
             max_map_size: DEFAULT_MAX_MAP_SIZE,
             growth_step: 16 * 1024 * 1024,
             page_size: DEFAULT_PAGE_SIZE,
+            exclusive: false,
         }
     }
 }
@@ -110,6 +113,7 @@ impl MdbxStore {
             libmdbx::DatabaseOptions {
                 max_tables: Some(options.max_tables),
                 page_size: Some(libmdbx::PageSize::Set(options.page_size)),
+                exclusive: options.exclusive,
                 mode: libmdbx::Mode::ReadWrite(libmdbx::ReadWriteOptions {
                     sync_mode: libmdbx::SyncMode::Durable,
                     max_size: Some(max_size),
@@ -149,6 +153,22 @@ impl MdbxStore {
     /// Physical value limit for normal (non-DUPSORT) tables.
     pub fn max_value_size(&self) -> usize {
         self.limits.value
+    }
+
+    /// Write a copy of the data file without its free pages to `dest`, which
+    /// must not exist.
+    pub fn copy_compact(&self, dest: impl AsRef<Path>) -> Result<()> {
+        let dest = CString::new(dest.as_ref().as_os_str().as_encoded_bytes())
+            .map_err(|error| StorageError::Backend(error.into()))?;
+        // SAFETY: the environment remains open, and `dest` is a NUL-terminated
+        // path that outlives the call.
+        let code = unsafe {
+            mdbx_sys::mdbx_env_copy(self.inner.ptr().0, dest.as_ptr(), mdbx_sys::MDBX_CP_COMPACT)
+        };
+        if code != mdbx_sys::MDBX_SUCCESS {
+            return Err(backend(libmdbx::Error::from_err_code(code)));
+        }
+        Ok(())
     }
 }
 

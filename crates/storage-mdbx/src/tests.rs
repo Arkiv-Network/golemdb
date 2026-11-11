@@ -208,3 +208,38 @@ fn pages_flushed_early_and_changed_again_count_twice() {
             > 2 * (after.db_size - before.db_size)
     );
 }
+
+#[test]
+fn compacted_copy_holds_the_same_rows_in_fewer_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let small_steps = MdbxOptions {
+        growth_step: 64 * KIB,
+        ..Default::default()
+    };
+    let db = MdbxStore::open_with_options(dir.path().join("db"), small_steps).unwrap();
+    let mut tx = db.begin_write().unwrap();
+    for (table, key) in rows(0, 2000) {
+        tx.put(table, &key, &[7; 300]).unwrap();
+    }
+    tx.commit().unwrap();
+    let mut tx = db.begin_write().unwrap();
+    for (table, key) in rows(100, 1900) {
+        tx.delete(table, &key).unwrap();
+    }
+    tx.commit().unwrap();
+
+    std::fs::create_dir(dir.path().join("copy")).unwrap();
+    db.copy_compact(dir.path().join("copy/mdbx.dat")).unwrap();
+    assert!(db.copy_compact(dir.path().join("copy/mdbx.dat")).is_err());
+    let size = |name: &str| {
+        std::fs::metadata(dir.path().join(name).join("mdbx.dat"))
+            .unwrap()
+            .len()
+    };
+    assert!(size("copy") < size("db") / 4);
+    let copy = MdbxStore::open(dir.path().join("copy")).unwrap();
+    let (db, copy) = (db.begin_read().unwrap(), copy.begin_read().unwrap());
+    for (table, key) in rows(0, 2000) {
+        assert_eq!(copy.get(table, &key).unwrap(), db.get(table, &key).unwrap());
+    }
+}
