@@ -3,11 +3,7 @@ use std::iter::FusedIterator;
 use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::{ReadCursor, ReadTransaction, Scan, Table, WriteTransaction, scan_prefix};
 
-use crate::{
-    CELL_TRIE_PATH_BYTES, CellKey, CellValue, Result,
-    cell_trie::{CellPath, CellTrie},
-    tables,
-};
+use crate::{CELL_TRIE_PATH_BYTES, CellKey, CellValue, Result, cell_trie::CellTrie, tables};
 
 /// Cell storage and commitment over caller-owned transactions.
 ///
@@ -34,14 +30,6 @@ pub struct CellValueChange {
     pub key: CellKey,
     pub before: Option<CellValue>,
     pub after: Option<CellValue>,
-}
-
-/// A net change with its encoded key, which addresses the `Cell` table, and its
-/// path, which addresses the trie.
-struct RoutedChange {
-    encoded_key: Vec<u8>,
-    path: CellPath,
-    change: CellValueChange,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,47 +90,21 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         root: RootRef<CELL_TRIE_PATH_BYTES>,
         changes: impl IntoIterator<Item = CellChange>,
     ) -> Result<CellsUpdate> {
-        let mut changes_by_key = Vec::new();
-        for (key, after) in normalize_changes(changes) {
-            if let Some(change) = self.check_change(tx, root, key, after)? {
-                changes_by_key.push(change);
-            }
-        }
-        // One trie update for the whole batch writes each touched branch once.
-        let edits =
-            (changes_by_key.iter()).map(|routed| (routed.path, routed.change.after.as_ref()));
-        let update = self.trie.set(tx, commit, root, edits)?;
-        write_values(tx, &changes_by_key)?;
+        let mut changes = (normalize_changes(changes).into_iter())
+            .map(|(key, after)| {
+                let before = read_value(tx, &key.encode())?;
+                Ok(CellValueChange { key, before, after })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let update = self.trie.set(tx, commit, root, &changes)?;
+        // No-ops were checked by the trie update but write nothing.
+        changes.retain(|change| change.before != change.after);
+        write_values(tx, &changes)?;
         Ok(CellsUpdate {
             root: update.root,
             superseded: update.superseded,
-            changed_cells: changes_by_key
-                .into_iter()
-                .map(|routed| routed.change)
-                .collect(),
+            changed_cells: changes,
         })
-    }
-
-    /// Check the original commitment for one net change. No-ops are checked
-    /// but produce no change. Keys are unique within a batch, so the original
-    /// root answers as the evolving root would. Returns the change with its
-    /// encoded key and path. Any error requires a tx abort.
-    fn check_change(
-        &self,
-        tx: &impl ReadTransaction,
-        root: RootRef<CELL_TRIE_PATH_BYTES>,
-        key: CellKey,
-        after: Option<CellValue>,
-    ) -> Result<Option<RoutedChange>> {
-        let encoded_key = key.encode();
-        let path = self.trie.path(&key);
-        let before = read_value(tx, &encoded_key)?;
-        self.trie.check(tx, root, path, before.as_ref())?;
-        Ok((before != after).then_some(RoutedChange {
-            encoded_key,
-            path,
-            change: CellValueChange { key, before, after },
-        }))
     }
 }
 
@@ -215,13 +177,13 @@ fn read_value(tx: &impl ReadTransaction, key: &[u8]) -> Result<Option<CellValue>
 }
 
 /// Write each change's final value under its encoded key, or delete the row.
-fn write_values(tx: &mut impl WriteTransaction, changes_by_key: &[RoutedChange]) -> Result<()> {
-    for routed in changes_by_key {
-        let key = &routed.encoded_key;
-        match &routed.change.after {
-            Some(value) => tx.put(tables::CELL, key, value.encoded_bytes())?,
+fn write_values(tx: &mut impl WriteTransaction, changes: &[CellValueChange]) -> Result<()> {
+    for change in changes {
+        let key = change.key.encode();
+        match &change.after {
+            Some(value) => tx.put(tables::CELL, &key, value.encoded_bytes())?,
             None => {
-                tx.delete(tables::CELL, key)?;
+                tx.delete(tables::CELL, &key)?;
             }
         }
     }
