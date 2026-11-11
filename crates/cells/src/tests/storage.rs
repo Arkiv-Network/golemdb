@@ -386,6 +386,30 @@ fn root_mismatches_and_corrupt_rows_are_errors(db: &impl Store) {
         .unwrap()
         .root;
     tx.commit().unwrap();
+    // Under a branch root, each key is checked against its `Cell` row: a
+    // different value, one the write repeats as a no-op, a row without a leaf,
+    // and a leaf without a row.
+    let tampered: [(&[u8], Option<&[u8]>); 4] = [
+        (b"a", Some(b"other")),
+        (b"a", Some(b"new")),
+        (b"c", Some(b"stray")),
+        (b"b", None),
+    ];
+    for (name, row) in tampered {
+        let mut tx = db.begin_write().unwrap();
+        let encoded = key(42, name).encode();
+        match row {
+            Some(bytes) => tx
+                .put(tables::CELL, &encoded, value(bytes).encoded_bytes())
+                .unwrap(),
+            None => assert!(tx.delete(tables::CELL, &encoded).unwrap()),
+        }
+        assert!(matches!(
+            cells.apply(&mut tx, 1, root, [put(42, name, b"new")]),
+            Err(CellError::RootMismatch)
+        ));
+        tx.abort();
+    }
     let mut tx = db.begin_write().unwrap();
     // Never treat a missing branch row as a singleton when multiple cells exist.
     tx.delete(tables::CELL_TRIE.table(), &root_key(&root))
