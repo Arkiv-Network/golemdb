@@ -152,7 +152,7 @@ dispatch. The same provider supplies routing, leaf, and branch hashes.
 `hash_parts` concatenates its arguments without implicit framing.
 
 ```text
-cell_path        = H(encoded_cell_key)
+cell_path        = record_id_be || H(encoded_cell_key)
 cell_leaf        = H(00 || cell_path || tagged_cell_value)
 cell_branch      = H(01 || branch_payload)
 container_path   = H(encoded_index_term) || hi48_be
@@ -161,8 +161,9 @@ index_branch     = H(03 || branch_payload)
 ```
 
 Domains are single bytes written above in hexadecimal. Tries are compressed
-16-way Patricia trees, visiting each byte's high nibble first. Index paths are 38
-bytes. The generic trie supports 1–127-byte paths.
+16-way Patricia trees, visiting each byte's high nibble first. Cell paths are
+40 bytes and lead with the record ID, so a record's cells share one subtree;
+index paths are 38 bytes. The generic trie supports 1–127-byte paths.
 
 ```text
 branch_payload = prefix_len:u8
