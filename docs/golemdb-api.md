@@ -120,6 +120,7 @@ pub trait Api {
     fn seal(&self, branch: BranchId) -> Result<SealInfo>;
     fn commit(&self, branch: BranchId) -> Result<CommitId>;
     fn discard(&self, branch: BranchId) -> Result<()>;
+    fn retention(&self) -> Result<Retention>;
 
     // Immutable data: interface only, every call returns NotImplemented.
     fn immutable_data_append(&self, branch: BranchId, segment: &str,
@@ -724,6 +725,7 @@ pub struct BranchId(u64);  // process-local, monotonic, never reused, never pers
 // Both: Copy, Eq, Ord, Hash, Display; new(u64), get() -> u64, From<u64>, Into<u64>.
 pub struct BranchInfo { pub commit_id: CommitId, pub branch_id: BranchId, pub version: u64, pub sealed: bool }
 pub struct SealInfo { pub commit_id: CommitId, pub state_root: [u8; 32], pub index_root: [u8; 32] }
+pub struct Retention { pub earliest: CommitId, pub head: CommitId }
 ```
 
 `CommitId` and `BranchId` are distinct types over a `u64`, so one cannot be passed where the
@@ -743,6 +745,7 @@ from.
 | `seal(b)` | computes both roots and freezes the branch; publishes nothing |
 | `commit(b)` | seals if needed, then persists atomically and advances the head; consumes the branch |
 | `discard(b)` | drops the branch without replay; consumes it |
+| `retention()` | `earliest` = the oldest commit whose state this node retains, and `head`, from one snapshot |
 
 **Rollback.** A rollback restores the current frame's starting state and keeps its marker.
 Another rollback without an intervening write or checkpoint steps back to the preceding frame.

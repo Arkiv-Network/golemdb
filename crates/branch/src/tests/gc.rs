@@ -14,7 +14,7 @@ use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransacti
 use crate::publication_tests::{bitmap_roots, key, reachable_rows, seed, value};
 use golemdb_pruning::{MAX_WAIT_COMMITS, PruningConfig, STALE};
 
-use crate::{Branches, ROOTS};
+use crate::{Branches, CommitId, ROOTS, Retention};
 
 /// The versioned tables, in the order of their codes in `Stale` keys.
 fn versioned() -> Vec<Table> {
@@ -216,6 +216,11 @@ fn run<S: Store + Clone>(db: S, case: Case, reopen: impl Fn(S) -> S) {
             .map(|key| u64::from_be_bytes(key[..].try_into().unwrap()))
             .collect();
         assert_eq!(roots, (earliest..=head).collect::<Vec<_>>());
+        let retention = Retention {
+            earliest: CommitId::new(earliest),
+            head: CommitId::new(head),
+        };
+        assert_eq!(branches.retention().unwrap(), retention);
     }
 }
 
@@ -267,6 +272,34 @@ fn gc_survives_a_reopen_on_mdbx() {
             open()
         });
     }
+}
+
+/// A grown window cannot bring back dropped roots, so `earliest` stays until
+/// `head − window` passes it; without pruning, it stays put.
+#[test]
+fn retention_reports_the_oldest_kept_roots() {
+    let db = MemoryStore::new();
+    seed(&db, &Keccak256Hasher, 0, &[]);
+    let open = |window: Option<u64>| {
+        let config = window.map(PruningConfig::new);
+        Branches::new(db.clone(), Keccak256Hasher, None, config).unwrap()
+    };
+    let advance = |branches: &Branches<MemoryStore, Keccak256Hasher>, commits: u64| {
+        for _ in 0..commits {
+            let head = branches.head().unwrap().get();
+            branches.commit(write(branches, &[(1, 1 + head)])).unwrap();
+        }
+        let retention = branches.retention().unwrap();
+        (retention.earliest.get(), retention.head.get())
+    };
+    let genesis = open(Some(2)).retention().unwrap();
+    assert_eq!((genesis.earliest.get(), genesis.head.get()), (0, 0));
+    assert_eq!(advance(&open(Some(2)), 10), (8, 10));
+    let grown = open(Some(5));
+    assert_eq!(advance(&grown, 1), (8, 11));
+    assert_eq!(advance(&grown, 3), (9, 14));
+    drop(grown);
+    assert_eq!(advance(&open(None), 2), (9, 16));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use golemdb_cells::CELL_TRIE_PATH_BYTES;
 use golemdb_index::INDEX_TRIE_PATH_BYTES;
-use golemdb_merkle::{HashProvider, RootRef};
-use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
+use golemdb_merkle::{COMMIT_BYTES, HashProvider, RootRef};
+use golemdb_storage::{ReadCursor, ReadTransaction, Table, WriteTransaction};
 
 use crate::{BranchError, CommitId, Head, Result};
 
@@ -53,6 +53,20 @@ pub fn read_roots(tx: &impl ReadTransaction, commit: CommitId) -> Result<Option<
     tx.get(ROOTS, &commit.get().to_be_bytes())?
         .map(|bytes| Roots::decode(&bytes).ok_or(BranchError::InvalidRoots(commit.get())))
         .transpose()
+}
+
+/// The commit a `Roots` key names.
+pub(crate) fn roots_commit(key: &[u8]) -> Result<u64> {
+    let commit = <[u8; COMMIT_BYTES]>::try_from(key)
+        .map_err(|_| BranchError::InvalidRootsKey(key.to_vec()))?;
+    Ok(u64::from_be_bytes(commit))
+}
+
+/// The oldest commit with a `Roots` row, if any.
+pub(crate) fn earliest_commit(tx: &impl ReadTransaction) -> Result<Option<CommitId>> {
+    let mut cursor = tx.cursor(ROOTS, b"")?;
+    let commit = cursor.with_next(|row| row.map(|(key, _)| roots_commit(key)))?;
+    Ok(commit.transpose()?.map(CommitId::new))
 }
 
 /// The head's roots, from `Roots[head]`, checked against the head's hashes.

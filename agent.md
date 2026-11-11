@@ -365,7 +365,7 @@ cells are omitted. An empty selection still verifies record existence and identi
 `Commit(id)` requires that ID to match the snapshot's head and rejects other commits.
 
 Branch methods are `head`, `begin`, `branch_info`, `checkpoint`, `rollback`, `seal`,
-`commit`, and `discard`. `SealInfo` exposes the candidate commit ID and both roots.
+`commit`, `discard`, and `retention`. `SealInfo` exposes the candidate commit ID and both roots.
 `ApiError` separates domain failures, capacity exhaustion, invalid input, and internal
 errors. Builder messages identify the method and cell; typed diagnostic causes remain
 available through `Error::source()`.
@@ -576,8 +576,8 @@ keys and absent rows map to public domain errors; corrupt payloads remain intern
 through `OpenConfig::with_immutable_data_directory`. `open_memory` uses memory.
 `from_store` requires an explicit directory when segments are declared. Paths are
 local settings outside genesis identity. `None` disables immutable storage. Close all database clones before reopening the immutable directory.
-Pruning of history and immutable data, retention reporting, key expiry and digests
-remain deferred.
+`retention()` reports the commits whose state a node retains, `earliest` to `head`. Pruning of history
+and immutable data, key expiry and digests remain deferred.
 
 ### History, proofs, and storage evolution
 

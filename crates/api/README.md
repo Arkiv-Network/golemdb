@@ -4,7 +4,7 @@
 
 - Records: create, get, patch, delete.
 - Queries: query, count, over committed state (from `golemdb-query`).
-- Branches: head, begin, branch_info, checkpoint, rollback, seal, commit, discard.
+- Branches: head, begin, branch_info, checkpoint, rollback, seal, commit, discard, retention.
 
 Consumers accept `&dyn Api` or `Arc<dyn Api + Send + Sync>`. The trait does not
 impose threading bounds; consumers add them when needed. Adding required methods
@@ -545,7 +545,8 @@ directory; opening an existing empty directory can create MDBX environment files
 Pruning is a local setting outside genesis identity. By default a database prunes to
 `#minRetention` commits before the head. `OpenConfig::with_pruning(PruningConfig::new(window))`
 keeps a larger window, and opening fails with `InvalidConfig` if it is below `#minRetention`.
-`OpenConfig::without_pruning()` keeps every commit from then on.
+`OpenConfig::without_pruning()` keeps every commit from then on. `retention()` reports the
+commits whose state this node retains, `earliest` to `head`.
 
 All detection, validation, and initialization occurs under one storage writer.
 Creation writes the fixed reserved-record catalogue from cells, identities and
@@ -630,8 +631,7 @@ identity. `Genesis::immutable_data: None` disables immutable storage and creates
 Close all database clones before reopening the same immutable directory.
 Startup recovers unpublished tails against durable commit metadata.
 
-Pruning of history and immutable data, retention reporting, key expiry and digests
-remain deferred.
+Pruning of history and immutable data, key expiry and digests remain deferred.
 
 ## Current scope
 
