@@ -9,6 +9,7 @@ members = [
     "crates/metering",
     "crates/index",
     "crates/pruning",
+    "crates/compact",
     "crates/branch",
     "crates/record",
     "crates/api",

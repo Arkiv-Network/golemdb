@@ -1,0 +1,22 @@
+[package]
+name = "golemdb-compact"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "golemdb-compact"
+path = "bin/compact.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+golemdb-branch.workspace = true
+golemdb-cells.workspace = true
+golemdb-index.workspace = true
+golemdb-merkle.workspace = true
+golemdb-pruning.workspace = true
+golemdb-storage.workspace = true
+golemdb-storage-mdbx.workspace = true
+tempfile = "3"
+thiserror.workspace = true
