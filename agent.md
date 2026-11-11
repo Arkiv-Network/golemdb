@@ -112,7 +112,7 @@ Ordered comparisons and scans are meaningful within a single name/type prefix.
 | --- | --- | --- |
 | `Superblock` | Metadata name | Format identifiers, genesis identity, or head. |
 | `Cell` | Encoded `CellKey` | Tagged canonical cell value. |
-| `CellTrie` | Branch hash | Compact branch bytes for 32-byte paths. |
+| `CellTrie` | Branch hash | Compact branch bytes for 40-byte paths. |
 | `Index` | Ordered index term | Nonempty bitmap root hash. |
 | `IndexTrie` | Branch hash | Compact branch bytes for 32-byte paths. |
 | `BitmapTrie` | Branch hash | Compact branch bytes for 6-byte paths. |
@@ -154,7 +154,7 @@ dispatch. The same provider supplies routing, leaf, and branch hashes.
 `hash_parts` concatenates its arguments without implicit framing.
 
 ```text
-cell_path        = H(encoded_cell_key)
+cell_path        = record_id_be || H(encoded_cell_key)
 cell_leaf        = H(00 || cell_path || tagged_cell_value)
 cell_branch      = H(01 || branch_payload)
 term_path        = H(encoded_index_term)
@@ -165,8 +165,10 @@ bitmap_branch    = H(05 || branch_payload)
 ```
 
 Domains are single bytes written above in hexadecimal. Tries are compressed
-16-way Patricia trees, visiting each byte's high nibble first. Cell and index paths
-are 32 bytes; bitmap paths are 6 bytes. The generic trie supports 1–32-byte paths.
+16-way Patricia trees, visiting each byte's high nibble first. Cell paths are
+40 bytes and lead with the record ID, so a record's cells share one subtree;
+index paths are 32 bytes; bitmap paths are 6 bytes. The generic trie supports
+1–127-byte paths.
 
 ```text
 branch_payload = prefix_len:u8

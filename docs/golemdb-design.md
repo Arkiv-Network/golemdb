@@ -536,8 +536,9 @@ pub struct BranchNodeCompact {
   and a child's route follows from its parent's, so the parent stores only the commit that wrote each
   child row.
 
-`N` is the path width: 32 bytes, or 6 (`hi48`) for `BitmapTrie`. `leaf_paths` is populated in all
-three tries. `CellTrie` and `IndexTrie` leaves are virtual, so only interior children have commits.
+`N` is the path width: 40 bytes for `CellTrie`, 32 for `IndexTrie` and 6 (`hi48`) for `BitmapTrie`.
+`leaf_paths` is populated in all three tries. `CellTrie` and `IndexTrie` leaves are virtual, so only
+interior children have commits.
 `BitmapTrie` leaves **are** materialised as `BitmapContainer` rows, so every child has one.
 
 ### Note on Hashing
@@ -609,9 +610,9 @@ IndexChangeSet  commitNr ‖ cellKey ‖ 0x00 ‖ typeTag ‖ cellValue
 > (which also lets the index key's `0x00` separator go, since a fixed-width ID parses by position).
 > **This document does not specify that change and reserves nothing for it.** No encoding
 > discriminator is carried in the key: a cell key is the name, and only the name. Because routing
-> paths are `Hash(recordID ‖ cellKey)` ([§8](#the-two-tries)), switching to `cellID`s moves every
-> leaf and shifts the roots, so it is a migration to be designed — with its own rewrite or
-> coexistence rules — if and when it is taken, not a door held open here at a per-key cost.
+> paths are `recordID ‖ Hash(recordID ‖ cellKey)` ([§8](#the-two-tries)), switching to `cellID`s
+> moves every leaf and shifts the roots, so it is a migration to be designed — with its own rewrite
+> or coexistence rules — if and when it is taken, not a door held open here at a per-key cost.
 
 **Key-addressed access costs one indirection.** A caller-supplied `recordKey` resolves to a
 `recordID` through the `#recordKeys` system record ([§4](#recordkeys-recordid-3)) — a `Cell` point
@@ -689,12 +690,10 @@ for is in the [metering record model](golemdb-metering.md#the-meta-cell).
 - **Distinct from the global counters** in [`#alloc`](#alloc-recordid-1), which count the leaves of
   the whole tries.
 
-**Record completeness proofs.** Cell paths are `Hash(recordID ‖ cellKey)`
-([§8](#the-two-tries)), so a record's cells are scattered through the `CellTrie` and the trie alone
-offers no proof that a set of cells is all of them. `#meta` closes that gap indirectly: a client
-holding an inclusion proof of `#meta` at commit _c_ can check that a whole-record read at _c_
-withholds no user cell, because the proven cells must match `cells` (and `cellBytes`). This covers
-whole-record reads only; projections use per-name non-inclusion proofs, and index queries are a
+**Record completeness proofs.** Cell paths are `recordID ‖ Hash(recordID ‖ cellKey)`
+([§8](#the-two-tries)), so a record's cells are exactly the leaves of one `CellTrie` subtree. A
+proof of that subtree at commit _c_ shows that a whole-record read at _c_ withholds no cell; `#meta`
+is not needed for it. Projections use per-name non-inclusion proofs, and index queries are a
 separate question (D06).
 
 ### Cell Names
@@ -1130,7 +1129,7 @@ properties such a table could not offer:
   binding stays in history, so historical key-addressed reads of deleted records resolve through
   standard cell time-travel — no bespoke rules for removal.
 - **Non-existence proofs.** "No record with key K" is a trie non-inclusion proof at
-  `Hash(recordID(#recordKeys) ‖ K)` — impossible with an uncommitted map.
+  `recordID(#recordKeys) ‖ Hash(recordID(#recordKeys) ‖ K)` — impossible with an uncommitted map.
 - **Both directions committed.** `#key` cells give ID → key (record content, used by reads) and
   `#recordKeys` gives key → ID (used by lookups and proofs). The pair is maintained atomically by the
   engine; each direction serves proofs and reads the other cannot.
@@ -1808,11 +1807,14 @@ Each trie is defined by two things: the **routing path** that decides where an i
 
 | Trie        | Routing path (`trieKey`)                     | Leaf hash built from             |
 | ----------- | -------------------------------------------- | -------------------------------- |
-| `CellTrie`  | `Hash(recordID ‖ cellKey)`                   | the cell's `typeTag ‖ cellValue` |
+| `CellTrie`  | `recordID ‖ Hash(recordID ‖ cellKey)`        | the cell's `typeTag ‖ cellValue` |
 | `IndexTrie` | `Hash(cellKey ‖ 0x00 ‖ typeTag ‖ cellValue)` | the term's `bitmapHash`          |
 
-Both are 32-byte digests, i.e. 64-nibble paths. Hashing the identity keeps each trie balanced
-regardless of how `recordID`s, names and values are distributed.
+A `CellTrie` path is the 8-byte big-endian `recordID` followed by a 32-byte digest: 40 bytes, or 80
+nibbles. Leading with the `recordID` puts a record's cells in one subtree, so writing a record
+rewrites one shared path down to that subtree, then short paths inside it. An `IndexTrie` path is a
+32-byte digest, or 64 nibbles. Hashing keeps each trie balanced regardless of how names and values
+are distributed.
 
 The `bitmapHash` **cannot serve as an `IndexTrie` leaf hash on its own.** It commits _what_ is stored
 but not _which term stores it_: two terms sharing a short prefix and holding the same posting list
@@ -1873,8 +1875,8 @@ field order is normative:
   could hash identically.
 - **`child_hashes` length is derived,** as `32 × popcnt(state_mask)`, so it needs no length tag.
 - **Leaf preimages are unambiguous by construction:** every leaf begins with a fixed-width path
-  (`trieKey`, 32 bytes; `hi48`, 6 bytes) followed by a single variable-length field, so no ordering
-  rule is required.
+  (`trieKey`, 40 bytes in `CellTrie` and 32 in `IndexTrie`; `hi48`, 6 bytes) followed by a single
+  variable-length field, so no ordering rule is required.
 - **Fixed-width fields are big-endian:** `prefix_len` as `u8`, `state_mask` and `tree_mask` as `u16`,
   `hi48` as 6 bytes.
 - **Nibble packing of `prefix` is pinned** — two nibbles per byte, high nibble first — including how
@@ -1955,10 +1957,11 @@ unchanged — the leaf still exists logically, it is simply derived rather than 
 ```
 DYNAMIC LEAF CALCULATION IN RAM:
 Cell Identity:    recordID 100 ‖ "Price"
-Routing Path:     trieKey = Hash(identity) = 0x912a_adb0_3ce2... (64 nibbles)
+Routing Path:     trieKey = recordID ‖ Hash(identity)
+                          = 0x0000_0000_0000_0064 ‖ 0x912a_adb0_3ce2... (80 nibbles)
 Cell Value:       typeTag(attribute, i32) ‖ 100
 
-HASH_CELL_LEAF = Hash( 0x00 ‖ 0x912a_adb0_3ce2... ‖ typeTag ‖ 100 )
+HASH_CELL_LEAF = Hash( 0x00 ‖ 0x0000_0000_0000_0064 ‖ 0x912a_adb0_3ce2... ‖ typeTag ‖ 100 )
 ```
 
 Because the preimage is the **whole** path, this hash depends only on the cell — never on where the
@@ -1967,30 +1970,33 @@ by the writer who already holds both the identity and the value.
 
 **Worked example — `CellTrie` over three cells.** Two records, `user:100` (`recordID` 100) with
 `{Price: 100, Status: "Active"}` and `user:200` (`recordID` 101) with `{Price: 500}`, decompose into
-three cells with routing paths `0x912a…3ce2`, `0x2197…9baa` and `0x9a95…1873`.
+three cells with routing paths `0x0000_0000_0000_0064 ‖ 912a…3ce2` (`Price` of 100),
+`0x0000_0000_0000_0064 ‖ 2197…9baa` (`Status` of 100) and `0x0000_0000_0000_0065 ‖ 9a95…1873`
+(`Price` of 101). All three share the 15-nibble prefix `0x0000_0000_0000_006`; the `recordID`s
+diverge at nibble 16, and the two cells of record 100 at the first nibble of their digests.
 
 ```mermaid
 flowchart TB
     subgraph PHYS["Physical MDBX rows — keyed commitNr ‖ route, written at commit 7"]
         direction TB
-        PR["<b>CellTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ route []<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: []<br/>prefix_len: 0<br/>state_mask: 0b0000_0010_0000_0100<br/>tree_mask: 0b0000_0010_0000_0000<br/>child_hashes: [0xH222 · slot 2, 0xMID · slot 9]<br/>leaf_paths: [0x2197…9baa]<br/>child_commits: [7 · slot 9]"]
-        PM["<b>CellTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ route 0x9<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: []<br/>prefix_len: 0<br/>state_mask: 0b0000_0100_0000_0010<br/>tree_mask: 0b0000_0000_0000_0000<br/>child_hashes: [0xH111 · slot 1, 0xH333 · slot A]<br/>leaf_paths: [0x912a…3ce2, 0x9a95…1873]<br/>child_commits: []"]
+        PR["<b>CellTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ route []<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: 0x0000_0000_0000_006<br/>prefix_len: 15<br/>state_mask: 0b0000_0000_0011_0000<br/>tree_mask: 0b0000_0000_0001_0000<br/>child_hashes: [0xMID · slot 4, 0xH333 · slot 5]<br/>leaf_paths: [0x0000_0000_0000_0065 ‖ 9a95…1873]<br/>child_commits: [7 · slot 4]"]
+        PM["<b>CellTrie</b> row<br/>─────────────────────<br/><b><i>key:</i></b> 7 ‖ route 0x0000_0000_0000_0064<br/><b><i>value:</i></b> BranchNodeCompact<br/>prefix: []<br/>prefix_len: 0<br/>state_mask: 0b0000_0010_0000_0100<br/>tree_mask: 0b0000_0000_0000_0000<br/>child_hashes: [0xH222 · slot 2, 0xH111 · slot 9]<br/>leaf_paths: [0x0000_0000_0000_0064 ‖ 2197…9baa, 0x0000_0000_0000_0064 ‖ 912a…3ce2]<br/>child_commits: []"]
         PC["<b>Cell</b> rows<br/>─────────────────────<br/><b><i>key:</i></b> 100 ‖ Price · <b><i>value:</i></b> tag ‖ 100<br/><b><i>key:</i></b> 100 ‖ Status · <b><i>value:</i></b> tag ‖ 'Active'<br/><b><i>key:</i></b> 101 ‖ Price · <b><i>value:</i></b> tag ‖ 500"]
-        PR -- "slot 9: commit 7" --> PM
+        PR -- "slot 4: commit 7" --> PM
         PR -. "leaf hash recomputed from" .-> PC
         PM -. "leaf hashes recomputed from" .-> PC
     end
     subgraph CANON["Canonical MPT — path-addressed"]
         direction TB
-        R["<b>INTERIOR</b><br/>─────────────────────<br/><b><i>key:</i></b> path ⟨root⟩<br/><b><i>value:</i></b> Hash(0x01 ‖ node payload)<br/>= 0xR00T"]
-        M["<b>INTERIOR</b><br/>─────────────────────<br/><b><i>key:</i></b> path 0x9<br/><b><i>value:</i></b> Hash(0x01 ‖ node payload)<br/>= 0xMID"]
-        L2["<b>LEAF</b><br/>─────────────────────<br/><b><i>key:</i></b> path 0x2197…9baa<br/><b><i>value:</i></b> Hash(0x00 ‖ path ‖ tag ‖ 'Active')<br/>= 0xH222"]
-        L1["<b>LEAF</b><br/>─────────────────────<br/><b><i>key:</i></b> path 0x912a…3ce2<br/><b><i>value:</i></b> Hash(0x00 ‖ path ‖ tag ‖ 100)<br/>= 0xH111"]
-        L3["<b>LEAF</b><br/>─────────────────────<br/><b><i>key:</i></b> path 0x9a95…1873<br/><b><i>value:</i></b> Hash(0x00 ‖ path ‖ tag ‖ 500)<br/>= 0xH333"]
-        R -- "nibble 2" --> L2
-        R -- "nibble 9" --> M
-        M -- "nibble 1" --> L1
-        M -- "nibble A" --> L3
+        R["<b>INTERIOR</b><br/>─────────────────────<br/><b><i>key:</i></b> path 0x0000_0000_0000_006<br/><b><i>value:</i></b> Hash(0x01 ‖ node payload)<br/>= 0xR00T"]
+        M["<b>INTERIOR</b><br/>─────────────────────<br/><b><i>key:</i></b> path 0x0000_0000_0000_0064<br/><b><i>value:</i></b> Hash(0x01 ‖ node payload)<br/>= 0xMID"]
+        L2["<b>LEAF</b><br/>─────────────────────<br/><b><i>key:</i></b> path 0x0000_0000_0000_0064 ‖ 2197…9baa<br/><b><i>value:</i></b> Hash(0x00 ‖ path ‖ tag ‖ 'Active')<br/>= 0xH222"]
+        L1["<b>LEAF</b><br/>─────────────────────<br/><b><i>key:</i></b> path 0x0000_0000_0000_0064 ‖ 912a…3ce2<br/><b><i>value:</i></b> Hash(0x00 ‖ path ‖ tag ‖ 100)<br/>= 0xH111"]
+        L3["<b>LEAF</b><br/>─────────────────────<br/><b><i>key:</i></b> path 0x0000_0000_0000_0065 ‖ 9a95…1873<br/><b><i>value:</i></b> Hash(0x00 ‖ path ‖ tag ‖ 500)<br/>= 0xH333"]
+        R -- "nibble 4" --> M
+        R -- "nibble 5" --> L3
+        M -- "nibble 2" --> L2
+        M -- "nibble 9" --> L1
     end
 
     classDef canon fill:#dae8fc,stroke:#6c8ebf,color:#000000
@@ -2003,7 +2009,8 @@ flowchart TB
 
 _Figure 8 — Read exactly as Figure 5. **Left:** the canonical trie, five nodes, each a **key** (its
 path) bound to a **value** (the hash of its payload). **Right:** the same trie physically stored,
-where each row is keyed by its node's route (Figure 2), under the commit that wrote it. Only **two**
+where each row is keyed by its node's route (Figure 2), under the commit that wrote it — so the
+root, whose canonical key `0x0000_0000_0000_006` is all prefix, has route `[]`. Only **two**
 rows exist: the three leaves are never written, their hashes being recomputed in RAM from the `Cell`
 rows whenever a parent is loaded — so `0xH111`, `0xH222` and `0xH333` appear on the left and inside
 `child_hashes` on the right, but never as a row of their own. `leaf_paths` carries each leaf child's
@@ -2014,8 +2021,9 @@ full `trieKey` so restructuring never has to read a value._
 Virtual leaves create one difficulty. A slot whose `tree_mask` bit is `0` says only "a leaf lives
 here"; `child_hashes[i]` is 32 opaque bytes. When an insert must convert `N → leafA` into
 `N → M → {leafA, leafB}`, the engine needs `leafA`'s path — to compute `M`'s common prefix and to
-know which slot `leafA` occupies inside `M`. Nothing in the hashed payload reveals it, and `trieKey`
-cannot be inverted back to a cell identity, so scanning `Cell` would be the only recourse.
+know which slot `leafA` occupies inside `M`. Nothing in the hashed payload reveals it, and only the
+`recordID` part of `trieKey` can be read back, so finding the cell would mean reading every cell of
+its record and hashing each one's key.
 
 `leaf_paths` ([§2](#the-branchnodecompact-structural-payload)) supplies exactly that, and
 shape-independent leaf hashes supply the rest:
@@ -2032,11 +2040,11 @@ shape-independent leaf hashes supply the rest:
 Only leaf children need this. An interior child's path is already known from the walk — accumulated
 prefix, slot nibble, and the child's own `prefix`.
 
-The cost is 32 bytes per leaf child, sitting in a copy-on-written node and therefore duplicated
-across retained versions. The alternative — a companion table mapping `trieKey` to its cell — costs
-the same 32 bytes per cell as a key, plus row overhead, plus a table to keep consistent with the
-trie, plus a seek on every insert that lands on a leaf slot. Storing the path where it is used is
-both smaller and simpler.
+The cost is one path per leaf child (40 bytes in `CellTrie`, 32 in `IndexTrie`), sitting in a
+copy-on-written node and therefore duplicated across retained versions. The alternative — a
+companion table mapping `trieKey` to its cell — costs the same path per cell as a key, plus row
+overhead, plus a table to keep consistent with the trie, plus a seek on every insert that lands on a
+leaf slot. Storing the path where it is used is both smaller and simpler.
 
 ### Which Tables Are Under Commitment
 
@@ -2091,17 +2099,23 @@ Every trie mutation is copy-on-write: it does not update one node, it writes a n
 on the path from the mutated leaf up to the root. Path length therefore caps how much structure a
 single write disturbs:
 
-| Trie         | Routing path                   | Max depth | Typical depth                |
-| ------------ | ------------------------------ | --------- | ---------------------------- |
-| `CellTrie`   | 64 nibbles (32-byte `trieKey`) | 64        | ⌈log₁₆ N⌉ over N cells       |
-| `IndexTrie`  | 64 nibbles (32-byte `trieKey`) | 64        | ⌈log₁₆ T⌉ over T index terms |
-| `BitmapTrie` | 12 nibbles (48-bit `hi48`)     | 12        | ⌈log₁₆ C⌉ over C containers  |
+| Trie         | Routing path                   | Max depth | Typical depth                             |
+| ------------ | ------------------------------ | --------- | ----------------------------------------- |
+| `CellTrie`   | 80 nibbles (40-byte `trieKey`) | 80        | ⌈log₁₆ R⌉ + ⌈log₁₆ c⌉, R records, c cells |
+| `IndexTrie`  | 64 nibbles (32-byte `trieKey`) | 64        | ⌈log₁₆ T⌉ over T index terms              |
+| `BitmapTrie` | 12 nibbles (48-bit `hi48`)     | 12        | ⌈log₁₆ C⌉ over C containers               |
 
-The two 64-nibble maxima are effectively unreachable. Reaching depth `d` requires `d` leaves sharing a
-`d`-nibble prefix, and routing paths are hash outputs — uniformly distributed, and not chosen by the
-writer. Depth tracks the population rather than the bound: at a billion cells, `CellTrie` sits around
-8 levels. The `BitmapTrie` bound of 12 is different in kind — small, hard, and reachable — but `C` is
-itself bounded by ⌈maxRecordID / 65536⌉, so with dense allocation a term's trie stays shallow.
+The 80- and 64-nibble maxima are effectively unreachable. Reaching depth `d` requires `d` leaves
+sharing a `d`-nibble prefix, and routing paths are hash outputs — uniformly distributed, and not
+chosen by the writer — except a `CellTrie` path's leading `recordID`, which the engine allocates
+and which takes at most 16 levels. Depth tracks the population rather than the bound: a `CellTrie`
+write goes about ⌈log₁₆ R⌉ levels to its record, over R live records, then ⌈log₁₆ c⌉ over its c
+cells — about 7 levels at 10⁷ records of up to 16 cells, `#key` and `#meta` included. System
+records that grow with the database are the exception: `#recordKeys` holds one binding per live
+record, so a binding write goes about 2⌈log₁₆ R⌉ levels, about 12 at 10⁷ records, and `#roots`
+grows likewise with commits. The
+`BitmapTrie` bound of 12 is different in kind — small, hard, and reachable — but `C` is itself
+bounded by ⌈maxRecordID / 65536⌉, so with dense allocation a term's trie stays shallow.
 
 Three upgrade paths are open. The first two are **non-breaking** — neither changes the canonical
 trie, so neither requires a state fork; the third changes what keys look like and is therefore a
@@ -2125,10 +2139,10 @@ migration in its own right.
    `cellID`, interned once per distinct name, would make every key that embeds a cell name
    fixed-width and end the per-modification duplication of long names in `CellChangeSet`. The binding
    would live in a further system record, so it stays under commitment. Unlike (1) and (2), this one
-   is **not** free of consequences for the state: routing paths are `Hash(recordID ‖ cellKey)`, so
-   re-keying a cell moves its leaf and shifts the roots. Nothing in the current key layout is
-   reserved to soften that ([§3](#the-cell-key)) — the migration is left to be designed alongside the
-   change itself.
+   is **not** free of consequences for the state: routing paths are
+   `recordID ‖ Hash(recordID ‖ cellKey)`, so re-keying a cell moves its leaf and shifts the roots.
+   Nothing in the current key layout is reserved to soften that ([§3](#the-cell-key)) — the
+   migration is left to be designed alongside the change itself.
 
 ---
 
@@ -2171,7 +2185,7 @@ so reclaiming them requires garbage collection. Unlike hash keys, equal content 
 _different_ positions can never be identical. Content-addressing therefore only ever deduplicated
 across versions of the same position: the same sub-trie shared between an old and a new root, and a
 term returning to a state it previously held. Sharing between unrelated positions was never going to
-occur over 32-byte hashed paths. The exception is the posting lists: `BitmapTrie` hashes bind `hi48`
+occur over hashed paths. The exception is the posting lists: `BitmapTrie` hashes bind `hi48`
 but not the term, so terms with equal bitmaps shared whole sub-tries, and equal containers shared a
 row ([§6](#structural-sharing-and-zero-cost-history)). Versioned keys keep the first kind of sharing
 through copy-on-write — the new root references the unchanged rows — and give up the second and the
@@ -3518,7 +3532,7 @@ onto chapters.
 | D03 | Crash recovery: restart from the `Superblock` head; segment truncation; behaviour on segment-fsync or MDBX-write failure; retry idempotence; already-issued receipts | §10, §11 |
 | D04 | Concurrency contract: one MDBX read snapshot per branch and per query; where the commit guard's critical section starts relative to segment appends; arbitration of two sealed candidates | §10 |
 | D05 | Retention. **Decided (P06):** the minimum window is `#minRetention`, in commits, in `#params`, and the consensus path refuses beyond it on every node. Open: which structures survive per read class (point, filtered, proof, segments); earliest supported commit; reader and cursor protection from GC; `Pruned` vs `NotFound`; discovering terms and cell names deleted since T; where a shard's starting mark survives once the previous system-segment shard is pruned | §7, §11, §13 |
-| D06 | Proof scope: which classes are proven (membership, non-inclusion; not range completeness — though whole-record completeness follows indirectly from a proof of the record's `#meta` counts, [metering](golemdb-metering.md#the-meta-cell)); how the server obtains a mismatching virtual leaf's tagged value at head and historically; cost | §8 |
+| D06 | Proof scope: which classes are proven (membership, non-inclusion; not range completeness — though whole-record completeness follows from a proof of the record's `CellTrie` subtree, [§3](#record-shape-the-meta-cell)); how the server obtains a mismatching virtual leaf's tagged value at head and historically; cost | §8 |
 | D07 | Branch transitions: delete visibility over real overlay values; the net diff with restored or no-op entries after rollback; history of cancelled changes; create-then-delete in one commit | §10 |
 | D09 | The normative encoding profile: Roaring version, container selection and run-opt rule; odd-nibble padding; `EMPTY_ROOT`; `typeTag` for reserved-record layouts; the absent pre-image encoding for `IndexChangeSet`; `bool` byte forms; the shipped type-id map; change-set key caps | §2, §3, §4, §6, §8 |
 | D11 | Cursor contract: is the cursor in the receipt (then `machineId` must be deterministic); fingerprint scope — **same-sequence** (only what fixes membership and order, so `projection` and `limit` may vary) or **same-query** (everything but the paging position); whichever, expressed as an exclusion, not an enumeration; cursor + `offset` + `at` precedence. The argument is in [Open Question on Paging](#open-question-on-paging) | §13 |

@@ -487,10 +487,6 @@ normative.
   `Record::meta()` decodes it, returning `None` if the read did not include it.
 - A user record without `#meta`, or a count that would fall below zero, is reported as
   corrupt state (`Internal`), never repaired.
-- **Completeness.** A client with a trusted root that receives `cells + 2` distinct cells of
-  a record (user cells, `#key`, `#meta`), each with a valid inclusion proof, has the whole
-  record. This needs every mutation to keep the counts exact. It does not cover projections,
-  withheld records or query results. Proofs themselves are not implemented yet.
 
 ---
 
@@ -1125,7 +1121,8 @@ to a party holding nothing but the root.
 - **Any past commit is provable, not just the head:** a light client holding the current root can
   verify the root at a past commit, from `#roots`, and descend from it.
 - **Proofs attest typed values,** since the type tag is inside the hashed value.
-- **Whole-record completeness** follows from a proof of `#meta` ([`#meta`](#meta)).
+- **Whole-record completeness** follows from a proof of the record's `CellTrie` subtree, which
+  holds exactly its cells ([design §3](golemdb-design.md#record-shape-the-meta-cell)).
 - **`id_of` and `key_of`** come with proofs: a cell's trie path is derived from the record ID, so a
   verifier needs it. They are fixed-size point reads (metering D6).
 
@@ -1242,7 +1239,7 @@ Four ideas run through the differences below:
 | --- | --- | --- | --- |
 | Call shape | `create(branch, key?, cells, budget, debug?)` etc. | one `RecordOp<Op>` argument per call, returning `Metered<T>` | Ideas 1 and 2. An operation is also a plain value: it can be cloned to retry after losing a commit race and compared in a mock. |
 | Key modes | `CallerAssigned` / `EngineAssigned`, per branch lineage | `CallerAssigned` / `Generated { seed }`, fixed in genesis, with a specified derivation | Idea 3. Generated keys are predictable, so mixing modes would let a caller claim a future generated key; one mode per database rules that out. A specified derivation makes generated keys reproducible on every node. |
-| Reading `#meta` | dedicated `meta` accessor | `get`, full or `.only(["#meta"])`, decoded by `Record::meta()` | Idea 4. A completeness proof needs `#meta` in the same read as the cells, so `get` must return it anyway; a projection on `#meta` is already a fixed-size point read. |
+| Reading `#meta` | dedicated `meta` accessor | `get`, full or `.only(["#meta"])`, decoded by `Record::meta()` | Idea 4. `#meta` is a cell of the record, so `get` returns it anyway; a projection on `#meta` is already a fixed-size point read. |
 | `id_of`, `key_of` | record accessors | not built; to come with proofs | Idea 4. Exposing record IDs makes them part of the contract. Their only consumer is proof verification, whose cell paths are derived from the ID. |
 | Receipt details | opt-in (`debug?`) | always present | Idea 2. In process they are a small struct computed anyway: the same counting path maintains `#meta`. Arkiv prices storage lifetime from the bytes written and deleted. Opt-in remains for transports, where receipt size matters (metering R9). |
 | Writes to a sealed branch | `HandleInvalid` | `Sealed`; the handle stays valid | A host must know that it can still commit or discard the branch. `HandleInvalid` would tell it the handle is gone. |
