@@ -265,7 +265,7 @@ fn batch<const N: usize>(base: &[([u8; N], u32)], edits: &[([u8; N], u32, bool)]
         .collect();
     let mut tx = db.begin_write().unwrap();
     let checked_root = trie
-        .apply_checked(&mut tx, 1, old, checked.clone())
+        .apply_with_check(&mut tx, 1, old, checked.clone())
         .unwrap()
         .root;
     assert_eq!(checked_root, root);
@@ -285,7 +285,7 @@ fn batch<const N: usize>(base: &[([u8; N], u32)], edits: &[([u8; N], u32, bool)]
         };
         let mut tx = db.begin_write().unwrap();
         assert!(matches!(
-            trie.apply_checked(&mut tx, 1, old, checked),
+            trie.apply_with_check(&mut tx, 1, old, checked),
             Err(MerkleError::LeafMismatch)
         ));
         tx.abort();
