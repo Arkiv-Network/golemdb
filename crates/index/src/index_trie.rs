@@ -75,7 +75,7 @@ impl<'h, H: HashProvider> IndexTrie<'h, H> {
             before: edit.before,
             after: edit.after,
         });
-        match self.trie.apply_checked(tx, commit, root, edits) {
+        match self.trie.apply_with_check(tx, commit, root, edits) {
             Err(MerkleError::LeafMismatch) => Err(IndexError::RootMismatch),
             result => Ok(result?),
         }

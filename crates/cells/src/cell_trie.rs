@@ -73,7 +73,7 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
                 after: hash(path, &change.after),
             }
         });
-        match self.trie.apply_checked(tx, commit, root, edits) {
+        match self.trie.apply_with_check(tx, commit, root, edits) {
             Err(MerkleError::LeafMismatch) => Err(CellError::RootMismatch),
             result => Ok(result?),
         }
