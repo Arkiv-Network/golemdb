@@ -54,7 +54,7 @@ impl PostingSource for FakeSource {
     }
 }
 
-/// Chunk record IDs by their 48-bit path, as the BitmapTrie stores them.
+/// Chunk record IDs by their 48-bit path, as the index stores them.
 pub(crate) fn bitmap(ids: impl IntoIterator<Item = u64>) -> Bitmap {
     let mut chunks: BTreeMap<u64, Vec<u16>> = BTreeMap::new();
     for id in ids {

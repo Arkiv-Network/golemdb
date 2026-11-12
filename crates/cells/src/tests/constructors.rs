@@ -117,6 +117,16 @@ fn kind_conversion_only_changes_metadata_and_rejects_unindexable_bytes() {
         attribute
     );
     assert_eq!(attribute.with_kind(CellKind::Field).unwrap(), field);
+    let nul = CellValue::from_str("a\0b");
+    assert_eq!(
+        nul.clone().with_kind(CellKind::Attribute),
+        Err(CellValueParseError::NulInStrAttributeValue)
+    );
+    assert!(nul.with_kind(CellKind::Field).is_ok());
+    assert_eq!(
+        CellValueRef::new(CellType::Str, b"a\0b", true),
+        Err(CellValueParseError::NulInStrAttributeValue)
+    );
     for bytes in [b"".as_slice(), b"abc"] {
         assert_eq!(
             CellValue::from_bytes(bytes).with_kind(CellKind::Attribute),

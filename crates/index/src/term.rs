@@ -1,12 +1,14 @@
-use crate::INDEX_LEAF_DOMAIN;
 use golemdb_cells::{CellNameRef, CellType, CellValueParseError, CellValueRef, FloatWidth};
 use golemdb_merkle::{Hash, HashProvider};
 use std::{error::Error, fmt};
 
-/// Canonical ordered index key: `name || 0x00 || attribute_tag || ordered_value`.
+/// Canonical ordered index term:
+/// `name || 0x00 || attribute_tag || ordered_value [|| 0x00]`.
 ///
-/// Strings have no length prefix. Signed numbers flip the sign bit; floats use
-/// the sortable IEEE transform after rejecting NaNs and normalizing zero.
+/// Strings have no length prefix: a `str` value ends with `0x00`, which it
+/// cannot hold, so no term is a prefix of another. Signed numbers flip the
+/// sign bit; floats use the sortable IEEE transform after rejecting NaNs and
+/// normalizing zero.
 /// Ordering is meaningful within one name/type prefix. Name/value size policies
 /// beyond the cell codec belong to the engine, which knows deployment limits.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -17,7 +19,7 @@ impl IndexTerm {
     /// BE and floats are IEEE BE. This encodes their order once. For an already
     /// encoded cell payload, use `from_cell` instead.
     pub fn new(name: &str, ty: CellType, value: &[u8]) -> Result<Self, TermError> {
-        let mut bytes = Self::prefix(name, ty)?;
+        let bytes = Self::prefix(name, ty)?;
         // Guard indexing/conversion below without interpreting native float
         // bits as the stored ordered representation expected by validate().
         if let Some(expected) = ty.width()
@@ -47,8 +49,8 @@ impl IndexTerm {
             _ => {} // Supported by prefix(): unsigned, bool, string, fixed bytes.
         }
         ty.validate(&ordered).map_err(TermError::Value)?;
-        bytes.extend_from_slice(&ordered);
-        Ok(Self(bytes))
+        check_str(ty, &ordered)?;
+        Ok(Self(terminated(bytes, ty, &ordered)))
     }
 
     /// Fields, including reserved-record cells, produce no index term. Validate
@@ -66,12 +68,12 @@ impl IndexTerm {
     /// queries look a value up by name, type and value. The payload is already
     /// valid and order-encoded, so it is copied verbatim, as for `from_cell`.
     pub fn from_str_name(name: &str, value: CellValueRef<'_>) -> Result<Self, TermError> {
-        let mut bytes = Self::prefix(name, value.cell_type())?;
-        bytes.extend_from_slice(value.value());
-        Ok(Self(bytes))
+        let ty = value.cell_type();
+        check_str(ty, value.value())?;
+        Ok(Self(terminated(Self::prefix(name, ty)?, ty, value.value())))
     }
 
-    /// [`Self::for_value`] for a stored cell name. Names are raw bytes; one
+    /// [`Self::from_str_name`] for a stored cell name. Names are raw bytes; one
     /// that is not UTF-8 is [`TermError::InvalidName`], like any name outside
     /// the grammar. Seal and queries both build terms through here.
     pub fn from_cell_name(
@@ -81,7 +83,7 @@ impl IndexTerm {
         Self::from_str_name(name_str(name)?, value)
     }
 
-    /// Check a stored cell name as [`Self::for_cell_name`] does, for a leaf
+    /// Check a stored cell name as [`Self::from_cell_name`] does, for a leaf
     /// with no value to build a term from.
     pub fn check_cell_name(name: CellNameRef<'_>) -> Result<(), TermError> {
         validate_name(name_str(name)?)
@@ -96,8 +98,8 @@ impl IndexTerm {
     }
 
     /// Decode exactly one term, rejecting noncanonical forms rather than
-    /// normalizing persisted bytes. The trailing string consumes all remaining
-    /// bytes; fixed-width types must have exactly their declared width.
+    /// normalizing persisted bytes. A string runs to its terminator, the last
+    /// byte; fixed-width types must have exactly their declared width.
     pub fn decode(bytes: &[u8]) -> Result<Self, TermError> {
         let split = bytes
             .iter()
@@ -113,9 +115,14 @@ impl IndexTerm {
         }
         let ty = CellType::from_id(tag & 0x7f).map_err(TermError::Value)?;
         supported(ty)?;
+        let value = match ty.width() {
+            Some(_) => value,
+            None => value.strip_suffix(&[0]).ok_or(TermError::InvalidEncoding)?,
+        };
         // Stored terms and cells share the same canonical ordered payload.
         // Validate it directly, without decoding/re-encoding native numbers.
         ty.validate(value).map_err(TermError::Value)?;
+        check_str(ty, value)?;
         Ok(Self(bytes.to_vec()))
     }
 
@@ -126,18 +133,10 @@ impl IndexTerm {
         self.0
     }
 
-    /// Full 32-byte IndexTrie routing path (the term itself has no hash domain).
+    /// The term's hash, with no domain byte: the start of the index trie path
+    /// of each of its containers.
     pub fn routing_path(&self, hasher: &impl HashProvider) -> Hash {
         hasher.hash(&self.0)
-    }
-
-    /// `H(0x02 || complete_term_path || bitmap_root)`.
-    pub fn leaf_hash(&self, bitmap_root: &Hash, hasher: &impl HashProvider) -> Hash {
-        hasher.hash_parts(&[
-            &[INDEX_LEAF_DOMAIN],
-            &self.routing_path(hasher),
-            bitmap_root,
-        ])
     }
 }
 
@@ -171,6 +170,25 @@ fn validate_name(name: &str) -> Result<(), TermError> {
             .all(|b| b.is_ascii_alphanumeric() || b"_-.:".contains(b))
     {
         return Err(TermError::InvalidName);
+    }
+    Ok(())
+}
+
+/// `prefix ‖ value`, then the `0x00` that ends a variable-width value.
+fn terminated(mut prefix: Vec<u8>, ty: CellType, value: &[u8]) -> Vec<u8> {
+    prefix.extend_from_slice(value);
+    if ty.width().is_none() {
+        prefix.push(0);
+    }
+    prefix
+}
+
+/// A `str` value holding `0x00`, which ends a string in a term, has no term.
+fn check_str(ty: CellType, value: &[u8]) -> Result<(), TermError> {
+    if ty == CellType::Str && value.contains(&0) {
+        return Err(TermError::Value(
+            CellValueParseError::NulInStrAttributeValue,
+        ));
     }
     Ok(())
 }
@@ -314,6 +332,9 @@ mod tests {
             let term = IndexTerm::from_str_name("Price", value.as_view()).expect("indexable");
             let mut expected = IndexTerm::prefix("Price", value.cell_type()).expect("indexable");
             expected.extend_from_slice(value.value());
+            if value.cell_type() == CellType::Str {
+                expected.push(0);
+            }
             assert_eq!(term.as_bytes(), expected, "{value:?}");
             assert_eq!(
                 IndexTerm::decode(term.as_bytes()).expect("canonical"),

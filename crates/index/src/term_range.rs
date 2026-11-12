@@ -7,14 +7,15 @@ use crate::{
     term::{name_prefix, name_str},
 };
 
-/// A range of index keys inside one name/type run, or over every run of one
-/// name, for an ordered scan with [`crate::Index::terms`].
+/// A range of index terms for an ordered scan with [`crate::Index::terms`]:
+/// inside one name/type run, over every run of one name, or over the whole
+/// index ([`TermRange::all`]).
 ///
-/// Every key in the range starts with the run's prefix, so a scan never
+/// In a run's range, every term starts with the run's prefix, so a scan never
 /// leaks into another type under the same name, nor into a longer name
-/// (`ab` when scanning `a`). Within the run, key order is value order. In a
+/// (`ab` when scanning `a`). Within the run, term order is value order. In a
 /// range over every run of a name ([`TermRange::of_name`] with no type),
-/// every key starts with the name and its separator instead: the range holds
+/// every term starts with the name and its separator instead: the range holds
 /// each of the name's runs, in type tag order, and still no longer name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TermRange {
@@ -40,7 +41,7 @@ impl TermRange {
     /// The terms of `name` of type `ty` whose value lies between `lower` and
     /// `upper`. A bounded side is the term of its value; an unbounded side
     /// reaches the end of the run, so two unbounded sides are the whole run.
-    /// `None` when the keys admit no term: the lower above the upper, or
+    /// `None` when the bounds admit no term: the lower above the upper, or
     /// equal to it with a side excluded. Such a range matches nothing, and
     /// needs no scan.
     ///
@@ -78,7 +79,7 @@ impl TermRange {
             Bound::Excluded(value) => Bound::Excluded(term(value)?),
             Bound::Unbounded => past(run),
         };
-        // The keys share the run's prefix, so key order is value order.
+        // The terms share the run's prefix, so term order is value order.
         let empty = match (&lower, &upper) {
             (Bound::Included(low), Bound::Included(high)) => low > high,
             (
@@ -98,14 +99,16 @@ impl TermRange {
     /// such range holds at least the prefix's own term, so it is never empty.
     pub fn with_prefix(name: CellNameRef<'_>, prefix: &str) -> Result<Self, TermError> {
         let prefix = CellValue::from_str(prefix);
-        let start = IndexTerm::from_cell_name(name, prefix.as_view())?.into_bytes();
+        let mut start = IndexTerm::from_cell_name(name, prefix.as_view())?.into_bytes();
+        // Without its terminator, so longer values continue past it.
+        start.pop();
         Ok(Self::starting_with(start))
     }
 
     /// Every term of `name` of type `ty`, the whole run; with no type, every
     /// term of `name`, each of its runs in type tag order. Terms are
     /// `name ‖ 0x00 ‖ tag ‖ value`, and a name holds no `0x00` byte, so the
-    /// terms of `name` are exactly the keys starting with `name ‖ 0x00`.
+    /// terms of `name` are exactly those starting with `name ‖ 0x00`.
     ///
     /// The name and the type are checked as [`IndexTerm::from_cell_name`]
     /// checks them. Such a range is never empty, so it always needs a scan.
@@ -118,7 +121,15 @@ impl TermRange {
         Ok(Self::starting_with(start))
     }
 
-    /// The keys that start with `start`.
+    /// Every term in the index, in term order.
+    pub fn all() -> Self {
+        Self {
+            lower: Bound::Unbounded,
+            upper: Bound::Unbounded,
+        }
+    }
+
+    /// The terms that start with `start`.
     fn starting_with(start: Vec<u8>) -> Self {
         Self {
             upper: past(start.clone()),
@@ -126,17 +137,13 @@ impl TermRange {
         }
     }
 
-    /// The key bounds, usable as a `RangeBounds<[u8]>`.
+    /// The bounds on terms ([`IndexTerm::as_bytes`]), usable as a
+    /// `RangeBounds<[u8]>`. They are not bounds on `Index` keys.
     pub fn bounds(&self) -> (Bound<&[u8]>, Bound<&[u8]>) {
         (
             self.lower.as_ref().map(Vec::as_slice),
             self.upper.as_ref().map(Vec::as_slice),
         )
-    }
-
-    /// The key bounds, owned, as a storage scan takes them.
-    pub fn into_bounds(self) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
-        (self.lower, self.upper)
     }
 }
 
@@ -147,10 +154,10 @@ fn bound_value<T>(bound: Bound<T>) -> Option<T> {
     }
 }
 
-/// The upper bound just past every key that starts with `prefix`: excluding
-/// the least key greater than all of them, or unbounded when `prefix` is all
+/// The upper bound just past all bytes that start with `prefix`: excluding
+/// the least bytes greater than all of them, or unbounded when `prefix` is all
 /// `0xff`.
-fn past(mut prefix: Vec<u8>) -> Bound<Vec<u8>> {
+pub(crate) fn past(mut prefix: Vec<u8>) -> Bound<Vec<u8>> {
     while let Some(last) = prefix.pop() {
         if let Some(next) = last.checked_add(1) {
             prefix.push(next);
@@ -201,7 +208,7 @@ mod tests {
         IndexTerm::from_str_name(name, value.as_view()).expect("valid term")
     }
 
-    /// The terms of `all`, in key order, that fall within `range`.
+    /// The terms of `all`, in term order, that fall within `range`.
     fn within<'a>(range: &TermRange, all: &'a [IndexTerm]) -> Vec<&'a IndexTerm> {
         let mut sorted: Vec<_> = all.iter().collect();
         sorted.sort();
@@ -217,7 +224,7 @@ mod tests {
         CellValue::from_u32(n)
     }
 
-    // Keys of the `u32` run of `a`: name, 0x00, type tag 0x8c, then the value.
+    // Terms of the `u32` run of `a`: name, 0x00, type tag 0x8c, then the value.
     const RUN_START: &[u8] = &[b'a', 0, 0x8c];
     const ONE: &[u8] = &[b'a', 0, 0x8c, 0, 0, 0, 1];
     const SEVEN: &[u8] = &[b'a', 0, 0x8c, 0, 0, 0, 7];
@@ -404,9 +411,10 @@ mod tests {
         let all = [term("s", &empty), term("s", &a)];
         let at_most_empty = range("s", CellType::Str, Unbounded, Included(&empty));
         assert!(within(&at_most_empty, &all).into_iter().eq(&all[..1]));
-        // The excluded empty string is the run's own prefix: nothing lies below.
-        let below_empty = between(b"s", CellType::Str, Unbounded, Excluded(empty.clone()));
-        assert_eq!(below_empty, Ok(None));
+        // Nothing lies below the excluded empty string. As for any type's least
+        // value, the range is not recognised as empty: it costs one seek, finds nothing.
+        let below_empty = range("s", CellType::Str, Unbounded, Excluded(&empty));
+        assert!(within(&below_empty, &all).is_empty());
         let above_empty = range("s", CellType::Str, Excluded(&empty), Unbounded);
         assert!(within(&above_empty, &all).into_iter().eq(&all[1..]));
     }
@@ -428,7 +436,7 @@ mod tests {
         CellValue::from_str(value)
     }
 
-    // Keys of the `str` run of `a`: name, 0x00, type tag 0x82, then UTF-8.
+    // Terms of the `str` run of `a`: name, 0x00, type tag 0x82, then UTF-8 and 0x00.
     const STR_RUN_START: &[u8] = &[b'a', 0, 0x82];
     const AB: &[u8] = &[b'a', 0, 0x82, b'a', b'b'];
     /// `AB` with its last byte incremented: past every string starting with `ab`.
@@ -520,7 +528,7 @@ mod tests {
         TermRange::of_name(CellNameRef::raw(name), ty)
     }
 
-    // Keys of every term of `a`, whatever its type: the name, then 0x00.
+    // Every term of `a`, whatever its type, starts with the name, then 0x00.
     const NAME_START: &[u8] = &[b'a', 0];
     /// The separator incremented: past every term of `a`, and before every
     /// longer name, whose next byte is a name char.
@@ -546,7 +554,7 @@ mod tests {
 
     #[test]
     fn a_name_range_of_no_type_holds_every_term_of_the_name() {
-        // Terms of `a` of several types, in key order: by type tag, then by
+        // Terms of `a` of several types, in term order: by type tag, then by
         // value.
         let of_a = [
             term("a", &CellValue::from_bool(false)),

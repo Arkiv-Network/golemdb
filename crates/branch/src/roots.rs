@@ -1,17 +1,16 @@
 use golemdb_cells::CELL_TRIE_PATH_BYTES;
 use golemdb_index::INDEX_TRIE_PATH_BYTES;
-use golemdb_merkle::{HashProvider, RootRef};
+use golemdb_merkle::{HASH_BYTES, HashProvider, RootRef};
 use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
 use crate::{BranchError, CommitId, Head, Result};
 
 /// Every published commit's roots, by commit number: locators that make old
-/// state and index tries walkable (not the bitmap tries an old index root
-/// names). `#roots` commits only their hashes.
+/// state and index tries walkable. `#roots` commits only their hashes.
 pub const ROOTS: Table = Table("Roots");
 
-/// One commit's two roots, as locators: hash, commit and, for a singleton, its
-/// path.
+/// One commit's two roots, as locators: a branch's hash and commit, or a
+/// singleton's hash and path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Roots {
     pub state: RootRef<CELL_TRIE_PATH_BYTES>,
@@ -21,8 +20,9 @@ pub struct Roots {
 impl Roots {
     /// `len(state) ‖ state ‖ index`, each root as [`RootRef::encode`] writes it.
     pub(crate) fn encode(&self) -> Vec<u8> {
-        // Every state root fits the length byte.
-        const { assert!(RootRef::<CELL_TRIE_PATH_BYTES>::MAX_ENCODED_BYTES <= u8::MAX as usize) };
+        // A state root is at most a leaf's `hash ‖ path`; a branch's
+        // `hash ‖ commit` is shorter. Either fits the length byte.
+        const { assert!(HASH_BYTES + CELL_TRIE_PATH_BYTES <= u8::MAX as usize) };
         let state = self.state.encode();
         [&[state.len() as u8][..], &state, &self.index.encode()].concat()
     }

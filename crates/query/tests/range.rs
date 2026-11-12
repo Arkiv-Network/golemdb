@@ -14,7 +14,7 @@ use golemdb_api::{
     ApiError, Bounds, CellNameRef, Filter, RecordKey,
     marker::{Date32, Dec32, I32, I64},
 };
-use golemdb_cells::{CellType, CellValue, Width};
+use golemdb_cells::{CellType, CellValue, CellValueParseError, Width};
 use golemdb_index::TermError;
 use proptest::prelude::*;
 use support::{
@@ -357,6 +357,14 @@ fn invalid_arguments_are_errors_not_empty_results() {
     assert_eq!(
         cause(test.keys(range("not valid", one(), Bound::Unbounded))),
         Some(TermError::InvalidName)
+    );
+    // No attribute holds a str with 0x00, so no bound can be one.
+    let nul = Bound::Included(CellValue::from_str("a\0"));
+    assert_eq!(
+        cause(test.keys(range("f", nul, Bound::Unbounded))),
+        Some(TermError::Value(
+            CellValueParseError::NulInStrAttributeValue
+        ))
     );
 }
 

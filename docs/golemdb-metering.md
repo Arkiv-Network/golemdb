@@ -176,7 +176,7 @@ retrieval:
 - A **posting** is one record ID filed under a term.
 - A term's **posting list** is all record IDs under it. It is stored as a bitmap split into
   **bitmap containers**, each holding the 16-bit offsets of up to 2¹⁶ record IDs that share their
-  upper 48 bits, kept together by a bitmap trie ([design glossary](golemdb-design.md#glossary)).
+  upper 48 bits, each an `Index` row next to the term's others ([design glossary](golemdb-design.md#glossary)).
 
 Writes join and leave terms (D2); queries look terms up, step through ranges of terms, and load and
 combine posting lists (D6).
@@ -406,7 +406,7 @@ Modeled depths approximate typical path work, not maximum depth. Calibration mus
 verify sufficient pricing margins for path-depth variation, growth within a branch,
 and posting-list updates. The depth cap limits charged depth, not supported database
 size or actual trie depth. The [design's depth bounds](golemdb-design.md#depth-bounds-and-future-optimization-paths)
-are 80 for the cell trie, 64 for the index trie and 12 for posting-list tries; these bounds and measured
+are 80 for the cell trie and 76 for the index trie; these bounds and measured
 workloads inform verification rather than implying that current weights already cover
 every case.
 
@@ -424,10 +424,10 @@ deployment with a longer `#minRetention` therefore has higher weights; a node th
 retains more history than `#minRetention` does so at its own cost. Either way, all
 nodes of a deployment charge the same.
 
-**Size per record, names included.** GolemDB stores cell names in full in every cell key and every index term key. Size is counted per record, never shared:
+**Size per record, names included.** GolemDB stores cell names in full in every cell key and every index term. Size is counted per record, never shared:
 
 - A cell counts `8 + |name|` bytes for its key (ID prefix and name) and `1 + |value|` bytes for its value (type tag and value).
-- An index entry counts `|name| + 2 + |value|` bytes: its term key, name ‖ `0x00` ‖ type tag ‖ value.
+- An index entry counts `|name| + 2 + |value|` bytes: its term, name ‖ `0x00` ‖ type tag ‖ value [‖ `0x00`]. A string term's terminating `0x00` is not counted.
 - [`#meta`](#the-meta-cell) keeps four counts per record on this basis: cells, cell bytes, indexed cells, and index bytes. They cover user cells only; system cells are fixed-size and charged separately (D2).
 - When details are requested for a write call, its receipt must report cells created, updated and deleted; index joins, leaves and terms created; and cell and index bytes written and deleted, on this basis (R9). Terms created come from the index-term reads of D2 step 4, which planning performs anyway to price `write.index_term_create`; an implementation without metering may not report them yet. Deleted counts are reported, never refunded (R6).
 - Counting per record overcounts popular index terms: the safe direction (R4).
@@ -550,7 +550,7 @@ with them, and a query materializes its records with them.
 
 - **Flat charges, calibrated for the maximum size.** A cell point read and a scan step are flat,
   calibrated for a value of the maximum size (`#maxStrLen`, `#maxBytesLen`), as D2's fixed
-  per-cell charges are. A term lookup is flat, calibrated for the longest term key the genesis
+  per-cell charges are. A term lookup is flat, calibrated for the longest term the genesis
   limits allow.
 - **Bytes are charged after the read and before the copy.** A cell read yields the value's length;
   the cell's bytes are then charged as a step of their own, before the value is decoded and copied
@@ -633,9 +633,9 @@ reference execution: the execution rules of the
     start with it. The empty prefix scans the whole `str` run.
 
   So scans over attributes with many distinct values pay for their width.
-- **Containers are charged one at a time, as they are loaded.** A posting root does not record
-  how many containers it holds, so the charge-before-step rule requires loading them one at a
-  time, walking the posting-list trie. Today's `bitmap_at` loads all of a term's containers at
+- **Containers are charged one at a time, as they are loaded.** Nothing records how many
+  containers a term holds, so the charge-before-step rule requires loading them one at a time,
+  one `Index` row per cursor step. Today's `Index::postings` loads all of a term's containers at
   once and needs a container-by-container variant.
 - **The containers of a set.** Every set a query holds, a posting list or the result of a
   combination, is a set of record IDs. Its **container count** `C(s)` is the number of distinct
@@ -1239,7 +1239,7 @@ implementation, from which weights are calibrated, and are never stored or charg
 | `write.index.join`, `write.index.leave` | Index membership change (D2) | `op.index_term_flip`, `op.secidx_container_rewrite`, `op.secidx_path_rewrite` |
 | `write.index_term_create` | Creating a new term, including its later removal (D2) | new index row and index-trie leaf, plus their removal |
 | `write.index_trie_update` | Index-trie path, per node × `index_trie_depth` (D2, D3) | `op.indextrie_path_rewrite` |
-| `write.index_byte` | Index storage: bytes written (D2, D4) | byte term (new term keys) |
+| `write.index_byte` | Index storage: bytes written (D2, D4) | byte term (new terms) |
 | Core read weights (`read.key`, `read.cell`, `read.cell_scan`, `read.byte`, `read.term`) | Point reads of records and index terms (D6.1), shared by `get`, write planning (D2) and query materialization | `op.key_resolve`, `op.cell_read`, `op.index_seek` |
 | Query read weights (`read.base`, `read.admission.base`, `read.admission.entry`, `read.admission.byte`, `read.term_step`, `read.container`, `read.set_container`, `read.sort_compare`) | Read steps of `query` and `count` (D6.2); `get` also pays `read.base` and admission | read op classes |
 | `write.log_append.base`, `write.log_append.byte` | Immutable-log append: fixed staging work, row bytes written and their shard residency (D7) | `op.immutable_data_append` plus the byte term |

@@ -189,8 +189,9 @@ record_keys: caller_assigned     # or:  record_keys: { generated: { seed: "0x…
 Validation at opening, against the store's physical limits:
 
 - `max_cell_name_len` must be positive.
-- Required key size: `max(name + 8, name + 2 + max(max_str_len, 32), 40)` bytes, where `name`
-  is `max_cell_name_len`. It must fit the store's maximum key.
+- Required key size: `max(name + 8, name + 2 + max(max_str_len + 1, 32) + 6, 40)` bytes,
+  where `name` is `max_cell_name_len`: a string term ends with a terminator, and an index key
+  adds the container's 6-byte region. It must fit the store's maximum key.
 - Required value size: `max(1 + max(max_bytes_len, max_str_len), 16 KiB)`. The 16 KiB floor
   covers internal values: trie nodes, metadata, root pairs and Roaring containers. It must fit
   the store's maximum value.
@@ -426,7 +427,7 @@ valid value.
 All other IDs up to 127 are reserved. Fixed-width types have no configurable limit.
 
 **Kind** is chosen per write, not per name: `attribute` or `field`. Two records may give the
-same name different types and kinds.
+same name different types and kinds. An attribute `str` cannot contain `0x00`; a field can.
 
 ### Rust values
 
@@ -475,7 +476,7 @@ pub struct RecordMeta { pub cells: u64, pub cell_bytes: u64, pub indexed_cells: 
 | `cells` | user cells |
 | `cell_bytes` | Σ `(8 + |name|) + (1 + |value|)`: cell key plus encoded value |
 | `indexed_cells` | user cells of kind attribute |
-| `index_bytes` | Σ over attributes of `|name| + 2 + |value|`: the index term key |
+| `index_bytes` | Σ over attributes of `|name| + 2 + |value|`: the index term, less a string's terminator |
 
 `|value|` is the payload without the tag. **Encoding:** the four fields in this order, each
 `u64` BE, 32 bytes, stored as a `bytes32` field. It is under the state root, so it is
@@ -544,7 +545,7 @@ accessors come from `feature/golem-db-api`, where `changes()` yields `Option<&Ce
 | Problem | Message |
 | --- | --- |
 | a name violating the grammar | `attribute("x y"): invalid cell name`, cause as source |
-| a value that cannot convert (NaN) or cannot take the kind (`bytes` as attribute) | `field("f"): invalid cell value`, cause as source |
+| a value that cannot convert (NaN) or cannot take the kind (`bytes`, or a `str` containing `0x00`, as attribute) | `field("f"): invalid cell value`, cause as source |
 | a name written or removed twice in one operation | `remove("x"): the operation already writes or removes this cell` |
 | `.key` given twice | `key(): the record key is given twice` |
 
@@ -824,7 +825,7 @@ internal failures keep their causes as sources.
 | `KeyModeMismatch` | a create's key does not match the key mode |
 | `OutOfBudget { required: Option<u64> }` (agreed shape) | the call's budget cannot cover its next step or its total; not returned yet |
 | `Reserved` | create, patch or delete addresses a reserved key |
-| `InvalidArgument { message, source }` | a builder problem, or a name or value over a genesis limit |
+| `InvalidArgument { message, source }` | a builder problem, a name or value over a genesis limit, or a query `str` operand containing `0x00` |
 | `HandleInvalid` | an unknown, consumed or stale branch handle, on any call including `commit` |
 | `Conflict` | reserved for an optimistic-concurrency mismatch, should record versioning be added ([Open items](#open-items)); not raised today |
 | `Sealed` | a record write, checkpoint or rollback on a sealed branch; the handle stays valid |

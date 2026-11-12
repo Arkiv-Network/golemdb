@@ -18,7 +18,7 @@ and adapters.
 | `branch` | Branch registry, overlays, undo frames, guarded reads and writes, sealing, and atomic publication. |
 | `cells` | Cell names, keys, types, canonical values, deployment limits, reserved-record constants, `Cell` storage and its commitment. |
 | `immutable-data` | Typed rows and genesis schemas using cell codecs, NippyJar/memory files, physical reads/recovery and transactional log metadata. |
-| `index` | Ordered terms, bitmap containers, posting updates, index queries, and the two index commitment tiers. |
+| `index` | Ordered terms, bitmap containers, posting updates, index queries, and the index commitment. |
 | `merkle` | Generic compressed hexary Patricia tries, branch codecs, traversal, immutable branch mutation, and hash providers. |
 | `storage` | Transactional ordered KV traits, cursors, shared scans, and `MemoryStore`. |
 | `storage-mdbx` | `MdbxStore`, native transactions and cursors, durability, and physical capacity settings. |
@@ -76,7 +76,7 @@ fields and do not produce attribute index terms.
 ```text
 cell_value = type_tag:u8 || payload
 type_tag   = (attribute ? 0x80 : 0x00) | type_id
-index_term = cell_name || 0x00 || attribute_type_tag || payload
+index_term = cell_name || 0x00 || attribute_type_tag || payload [|| 0x00 for str]
 ```
 
 One storage row contains one complete cell. Fixed-width types require their exact
@@ -112,11 +112,9 @@ Ordered comparisons and scans are meaningful within a single name/type prefix.
 | --- | --- | --- |
 | `Superblock` | Metadata name | Format identifiers, genesis identity, or head. |
 | `Cell` | Encoded `CellKey` | Tagged canonical cell value. |
-| `CellTrie` | Branch hash | Compact branch bytes for 40-byte paths. |
-| `Index` | Ordered index term | Nonempty bitmap root hash. |
-| `IndexTrie` | Branch hash | Compact branch bytes for 32-byte paths. |
-| `BitmapTrie` | Branch hash | Compact branch bytes for 6-byte paths. |
-| `BitmapContainer` | Container leaf hash | Six-byte path followed by canonical portable Roaring bytes. |
+| `CellTrie` | Commit and route | Compact branch bytes for 40-byte paths. |
+| `Index` | Term followed by the container's six-byte path | Canonical portable Roaring bytes. |
+| `IndexTrie` | Commit and route | Compact branch bytes for 38-byte paths. |
 
 `Superblock/head` is `commit_id:u64_be || state_root:[u8;32] || index_root:[u8;32]`.
 Other metadata keys are `format` (`u32_be`, value 1), `hash_fn` (`u16_be`, 1 for
@@ -157,18 +155,15 @@ dispatch. The same provider supplies routing, leaf, and branch hashes.
 cell_path        = record_id_be || H(encoded_cell_key)
 cell_leaf        = H(00 || cell_path || tagged_cell_value)
 cell_branch      = H(01 || branch_payload)
-term_path        = H(encoded_index_term)
-index_leaf       = H(02 || term_path || bitmap_root)
+container_path   = H(encoded_index_term) || hi48_be
+container_leaf   = H(04 || container_path || canonical_roaring)
 index_branch     = H(03 || branch_payload)
-bitmap_leaf      = H(04 || hi48_be || canonical_roaring)
-bitmap_branch    = H(05 || branch_payload)
 ```
 
 Domains are single bytes written above in hexadecimal. Tries are compressed
 16-way Patricia trees, visiting each byte's high nibble first. Cell paths are
 40 bytes and lead with the record ID, so a record's cells share one subtree;
-index paths are 32 bytes; bitmap paths are 6 bytes. The generic trie supports
-1–127-byte paths.
+index paths are 38 bytes. The generic trie supports 1–127-byte paths.
 
 ```text
 branch_payload = prefix_len:u8
@@ -194,23 +189,28 @@ to the owning layer.
 Empty roots are `H(empty bytes)`, singleton roots are their leaf hashes, and larger
 roots are branch hashes. `RootRef` preserves this distinction and singleton paths.
 A missing branch row does not establish a singleton. Cell and index singleton
-reopening verifies the sole matching flat row; a bitmap singleton verifies its
-container. Corrupt or missing referenced data is an error, not absence.
+reopening verifies the sole matching flat row. Corrupt or missing referenced data
+is an error, not absence, in trie walks, root validation and checked writes.
+Reads trust the flat tables, so a missing row reads as absent until a checked
+write or a full check reaches it.
 
-Branch and container rows are immutable. Hash-key reuse requires equality of the
+Branch rows are immutable. Hash-key reuse requires equality of the
 complete stored bytes, including stored-only paths. Mutations rewrite affected
 branches and retain old rows. Reading an old root requires its retained metadata
 and payloads; supplying an old root with unrelated current flat state is invalid.
 
 ### Attribute index and bitmap containers
 
-The flat `Index` table supports ordered term scans. `IndexTrie` commits to the
-term-to-bitmap mapping using hashed term paths. Each `BitmapTrie` commits to one
-posting list of internal record IDs.
+The flat `Index` table holds one live row per container, keyed by the term and
+the container's path, so a term's containers are adjacent and terms are in
+value order. A variable-width value in a term ends with `0x00`; attribute
+strings cannot contain `0x00`. `IndexTrie` commits to every container at
+the path `H(term) || hi48`; its leaves are recomputed from the `Index` rows.
 
 ```text
 record_id:u64 = hi48:48 bits || offset:16 bits
-container_bytes = hi48:6-byte big-endian || portable_roaring
+index_key     = term || hi48:6-byte big-endian
+index_value   = portable_roaring
 ```
 
 A container holds offsets in `0..=65535`. `Bitmap` assembles path-ordered containers
@@ -221,19 +221,19 @@ Canonical serialization strips run compression, then optimizes, then serializes.
 For cardinality `N`, the base form is an array when `N <= 4096`, otherwise an
 8192-byte bitmap. A run form is selected only when `2 + 4 * run_count` is strictly
 smaller than the base payload cost. Ties retain the base form. Roaring's internal
-portable fields are little-endian; the outer path is big-endian.
+portable fields are little-endian; `hi48` is big-endian.
 
 `roaring = "=0.11.5"` is pinned because its representation and serialization rules
 affect root hashes. Persisted decoding checks bounds, full consumption, nonempty
 contents, and byte equality with canonical re-encoding. Empty working containers
-remove their leaves; an empty posting list removes its flat term and index leaf.
+remove their rows and leaves; a term with no containers is absent.
 
 `Index::apply` coalesces posting changes by term, container, and offset; the last
 input change to a term/record pair wins. Each affected container is loaded and
-finalized once, and each term receives one final root update. No-op changes produce
-no writes. The result contains the new root and changed terms' before/after roots.
-Queries materialize bitmaps or scan ordered terms by bounds/prefix without loading
-their bitmaps. Index operations use the caller's transaction and never commit it.
+finalized once, its row is rewritten in place, and the trie is updated once. No-op
+changes produce no writes. The result contains the new root and the changed terms,
+with whether each had postings before and after. Queries materialize bitmaps or
+scan ordered terms by bounds/prefix, reading each term's postings in one pass. Index operations use the caller's transaction and never commit it.
 
 ### Branch lifecycle and atomic publication
 
@@ -581,8 +581,8 @@ Retention/pruning, key expiry and digests remain deferred.
 ### History, proofs, and storage evolution
 
 Historical record/index queries, forks, and rewind require matching historical
-flat state and root metadata. Retaining immutable branch/container rows alone does
-not reconstruct old record payloads or term tables. Changesets, reconstruction,
+flat state and root metadata. Retaining immutable trie branch rows alone does not
+reconstruct old cell values or containers, which are live rows overwritten in place. Changesets, reconstruction,
 retention, and garbage collection must preserve the roots and leaf data needed by
 readers and proofs.
 
