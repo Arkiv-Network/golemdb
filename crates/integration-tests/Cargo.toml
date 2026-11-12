@@ -11,6 +11,7 @@ golemdb-api.workspace = true
 golemdb-immutable-data.workspace = true
 golemdb-branch.workspace = true
 golemdb-cells.workspace = true
+golemdb-history.workspace = true
 golemdb-index.workspace = true
 golemdb-merkle.workspace = true
 golemdb-metering.workspace = true
