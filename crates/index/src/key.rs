@@ -1,7 +1,5 @@
 use std::ops::Bound;
 
-use golemdb_cells::CellType;
-
 use crate::{
     HI48_BYTES, IndexError, IndexTerm, PATH_BYTE_OFFSET, TermError, path, term_range::past,
 };
@@ -22,28 +20,12 @@ impl IndexKey {
         encode(&self.term, self.container_id)
     }
 
-    /// Decode a stored key, rejecting a malformed or noncanonical term or a
-    /// suffix that is not a `hi48`. The term ends after its fixed-width value,
-    /// or after a string's `0x00`.
+    /// Decode a stored key: a canonical term followed by its container's
+    /// `hi48`.
     pub fn decode(key: &[u8]) -> crate::Result<Self> {
-        // Finds where the term ends by the rule `IndexTerm::decode` checks;
-        // that decode is the source of truth and validates the bytes found.
-        let bad = || TermError::InvalidEncoding;
-        let split = key.iter().position(|&b| b == 0).ok_or_else(bad)?;
-        let tag = *key.get(split + 1).ok_or_else(bad)?;
-        let start = split + 2;
-        let (term, hi48) = match value_width(tag) {
-            Some(width) => {
-                let end = start.checked_add(width).filter(|&end| end <= key.len());
-                let end = end.ok_or_else(bad)?;
-                (&key[..end], &key[end..])
-            }
-            None => {
-                let end = key.get(start..).ok_or_else(bad)?;
-                let end = start + end.iter().position(|&b| b == 0).ok_or_else(bad)? + 1;
-                (&key[..end], &key[end..])
-            }
-        };
+        let (term, hi48) = key
+            .split_last_chunk::<HI48_BYTES>()
+            .ok_or(TermError::InvalidEncoding)?;
         Ok(Self {
             term: IndexTerm::decode(term)?,
             container_id: container_id(hi48)?,
@@ -104,13 +86,4 @@ pub(crate) fn container_id(hi48: &[u8]) -> crate::Result<u64> {
     let mut be = [0; 8];
     be[PATH_BYTE_OFFSET..].copy_from_slice(&hi48);
     Ok(u64::from_be_bytes(be))
-}
-
-/// The width of the value after a type tag, or `None` for a variable width
-/// or an unknown tag.
-fn value_width(tag: u8) -> Option<usize> {
-    let ty = CellType::from_id(tag & 0x7f)
-        .ok()
-        .filter(|_| tag & 0x80 != 0)?;
-    ty.width()
 }

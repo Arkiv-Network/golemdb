@@ -10,19 +10,14 @@ use crate::{
 };
 
 /// Whether `term` has postings: one seek to its first container row, decoding
-/// only its key, without traversing the trie. A row whose key is not a
-/// container key of `term` is an error.
+/// only its key without copying the container, and without traversing the
+/// trie. A row under `term` whose key is not a container key is an error.
 pub fn term_exists(tx: &impl ReadTransaction, term: &IndexTerm) -> Result<bool> {
-    match scan_prefix(tx, tables::INDEX, term.as_bytes().to_vec())?
-        .next()
-        .transpose()?
-    {
-        None => Ok(false),
-        Some((row, _)) => {
-            IndexKey::decode(&row)?;
-            Ok(true)
-        }
-    }
+    let term = term.as_bytes();
+    tx.cursor(tables::INDEX, term)?.with_next(|row| match row {
+        Some((key, _)) if key.starts_with(term) => IndexKey::decode(key).map(|_| true),
+        _ => Ok(false),
+    })?
 }
 
 impl<H: HashProvider> Index<'_, H> {
