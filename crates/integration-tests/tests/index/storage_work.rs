@@ -128,6 +128,11 @@ fn one_container_update_does_not_rebuild_256_container_postings() {
         )
         .unwrap();
     assert_eq!(tx.counts.borrow().hits.get(&tables::INDEX), Some(&1));
+    assert_eq!(update.changed_containers.len(), 1);
+    assert_eq!(
+        update.changed_containers[0].key.container_id,
+        ContainerId::new(0).unwrap()
+    );
     // One container row rewritten in place and the trie branches above it.
     let writes = tx.counts.borrow().writes.clone();
     assert_eq!(writes.get(&tables::INDEX), Some(&1));
@@ -138,6 +143,7 @@ fn one_container_update_does_not_rebuild_256_container_postings() {
         .apply(&mut tx, 0, update.root, [add(term(0), 1), add(term(0), 2)])
         .unwrap();
     assert!(noop.changed_terms.is_empty());
+    assert!(noop.changed_containers.is_empty());
     assert!(tx.counts.borrow().writes.is_empty());
     tx.reset();
     let bitmap = index.bitmap(&tx, &term(0)).unwrap().unwrap();

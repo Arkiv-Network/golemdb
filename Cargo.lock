@@ -558,6 +558,7 @@ name = "golemdb-cells"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "golemdb-history",
  "golemdb-merkle",
  "golemdb-storage",
  "proptest",
@@ -593,6 +594,7 @@ name = "golemdb-index"
 version = "0.1.0"
 dependencies = [
  "golemdb-cells",
+ "golemdb-history",
  "golemdb-merkle",
  "golemdb-storage",
  "proptest",

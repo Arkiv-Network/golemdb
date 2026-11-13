@@ -9,6 +9,7 @@ license.workspace = true
 golemdb-cells.workspace = true
 golemdb-merkle.workspace = true
 golemdb-storage.workspace = true
+golemdb-history.workspace = true
 thiserror.workspace = true
 roaring.workspace = true
 
