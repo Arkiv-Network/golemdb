@@ -1,0 +1,17 @@
+[package]
+name = "golemdb-immutable-data"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+golemdb-cells.workspace = true
+golemdb-storage.workspace = true
+reth-nippy-jar = { git = "https://github.com/paradigmxyz/reth", rev = "d58c6e3d0723a28f655e89da83c3738e47dcc364" }
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile = "3"

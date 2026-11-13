@@ -47,6 +47,18 @@ impl<T: ReadTransaction> ReadTransaction for Observed<T> {
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
         self.inner.cursor(table, key)
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if table == tables::CELL {
+            self.reads.set(self.reads.get() + 1);
+        }
+        self.inner.with_value(table, key, inspect)
+    }
 }
 impl<T: WriteTransaction> WriteTransaction for Observed<T> {
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> golemdb_storage::Result<()> {
@@ -80,6 +92,7 @@ fn coalescing_reads_once_per_key_and_noops_do_not_write() {
     let first = cells
         .apply(
             &mut tx,
+            0,
             RootRef::Empty,
             [put(b"a", b"1"), put(b"a", b"2"), put(b"a", b"3")],
         )
@@ -91,6 +104,7 @@ fn coalescing_reads_once_per_key_and_noops_do_not_write() {
     let unchanged = cells
         .apply(
             &mut tx,
+            0,
             first.root,
             [
                 put(b"a", b"intermediate"),
@@ -114,21 +128,21 @@ fn abort_after_a_flat_write_failure_discards_intermediate_trie_nodes() {
     let cells = Cells::new(&HASH);
     let mut tx = db.begin_write().unwrap();
     let root = cells
-        .apply(&mut tx, RootRef::Empty, [put(b"a", b"original")])
+        .apply(&mut tx, 0, RootRef::Empty, [put(b"a", b"original")])
         .unwrap()
         .root;
     tx.commit().unwrap();
     let mut tx = Observed::new(db.begin_write().unwrap());
     tx.fail_cells = true;
     assert!(matches!(
-        cells.apply(&mut tx, root, [put(b"b", b"new")]),
+        cells.apply(&mut tx, 0, root, [put(b"b", b"new")]),
         Err(CellError::Storage(StorageError::Poisoned(
             "injected write failure"
         )))
     ));
     // The trie write preceded the failed flat write. Caller must abort both.
     assert!(
-        tx.cursor(tables::CELL_TRIE, b"")
+        tx.cursor(tables::CELL_TRIE.table(), b"")
             .unwrap()
             .next()
             .unwrap()
@@ -137,7 +151,7 @@ fn abort_after_a_flat_write_failure_discards_intermediate_trie_nodes() {
     tx.abort();
     let read = db.begin_read().unwrap();
     assert!(
-        read.cursor(tables::CELL_TRIE, b"")
+        read.cursor(tables::CELL_TRIE.table(), b"")
             .unwrap()
             .next()
             .unwrap()
@@ -148,7 +162,7 @@ fn abort_after_a_flat_write_failure_discards_intermediate_trie_nodes() {
         Some("original")
     );
     assert!(cells.get(&read, &key(b"b")).unwrap().is_none());
-    assert_eq!(cells.reopen(&read, root.hash(&HASH)).unwrap(), root);
+    cells.validate_root(&read, root).unwrap();
 }
 
 struct FailingRead;
@@ -164,6 +178,16 @@ impl ReadCursor for FailingCursor {
     fn prev(&mut self) -> golemdb_storage::Result<Option<golemdb_storage::Entry>> {
         unreachable!()
     }
+
+    fn with_next<Output>(
+        &mut self,
+        inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        let row = self.next()?;
+        Ok(inspect(
+            row.as_ref().map(|(k, v)| (k.as_slice(), v.as_slice())),
+        ))
+    }
 }
 impl ReadTransaction for FailingRead {
     type Cursor<'a> = FailingCursor;
@@ -172,6 +196,17 @@ impl ReadTransaction for FailingRead {
     }
     fn cursor(&self, _: Table, _: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
         Ok(FailingCursor { called: false })
+    }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        let _ = (table, key, inspect);
+
+        Err(StorageError::Poisoned("injected read failure"))
     }
 }
 

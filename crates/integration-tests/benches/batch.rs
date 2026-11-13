@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use criterion::{Criterion, SamplingMode, criterion_group, criterion_main};
-use golemdb_api::{Api, Database, ReadTarget, RecordOp};
+use golemdb_api::{Api, Budget, Database, ReadTarget, RecordOp};
 use golemdb_integration_tests::workload::{Batch, Workload, execute, key, open, preload};
 use tempfile::TempDir;
 
@@ -64,8 +64,9 @@ impl Fixture {
             .unwrap();
         let db = open(dir.path()).unwrap();
         let workload = preload(&db, records).unwrap();
-        let read = db.get(ReadTarget::Head, RecordOp::get(key(records / 2)));
-        assert!(read.unwrap().cells.contains_key(b"payload".as_slice()));
+        let get = RecordOp::get(key(records / 2), Budget::Unlimited);
+        let record = db.get(ReadTarget::Head, get).into_result().unwrap();
+        assert!(record.cells.contains_key(b"payload".as_slice()));
         Self {
             db,
             workload,

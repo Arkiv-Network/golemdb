@@ -24,11 +24,15 @@ pub enum OpenError {
     #[error("unsupported Roaring format {0}")]
     UnsupportedRoaring(u16),
     #[error(transparent)]
+    Metering(#[from] golemdb_metering::ModelError),
+    #[error(transparent)]
     Storage(#[from] golemdb_storage::StorageError),
     #[error(transparent)]
     Cells(#[from] golemdb_cells::CellError),
     #[error(transparent)]
     Branch(#[from] golemdb_branch::BranchError),
+    #[error(transparent)]
+    ImmutableData(#[from] golemdb_immutable_data::ImmutableDataStorageError),
     #[error(transparent)]
     Index(#[from] golemdb_index::IndexError),
 }

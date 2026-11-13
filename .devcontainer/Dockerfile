@@ -1,4 +1,4 @@
-# A light dev container for golem-db: the pinned Rust toolchain, lld and
+# A light dev container for golemdb: the pinned Rust toolchain, lld and
 # cargo-nextest. See devcontainer.json.
 FROM mcr.microsoft.com/devcontainers/rust:1-bookworm
 

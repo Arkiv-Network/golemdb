@@ -87,7 +87,7 @@ fn seed(
     let changes =
         (0..4).flat_map(|t| (0..chunks).flat_map(move |hi| (0..32).map(move |lo| add(t, hi, lo))));
     let root = Index::new(hasher)
-        .apply(&mut tx, RootRef::Empty, changes)
+        .apply(&mut tx, 0, RootRef::Empty, changes)
         .unwrap()
         .root;
     tx.commit().unwrap();
@@ -176,9 +176,11 @@ fn backend(
     });
     // Read transaction lifetime is excluded from these warm-snapshot queries.
     drop(read);
+    // Timed writes belong to the next commit, as seal's do: new keys after the
+    // seeded rows, never overwriting them in place.
     for (label, changes) in workloads(chunks) {
         let mut check = db.begin_write().unwrap();
-        let updated = index.apply(&mut check, root, changes.clone()).unwrap();
+        let updated = index.apply(&mut check, 1, root, changes.clone()).unwrap();
         assert_ne!(updated.root, root);
         assert!(!updated.changed_terms.is_empty());
         check.abort();
@@ -189,7 +191,7 @@ fn backend(
                 |(tx, changes)| {
                     black_box(
                         index
-                            .apply(tx, black_box(root), std::mem::take(changes))
+                            .apply(tx, 1, black_box(root), std::mem::take(changes))
                             .unwrap(),
                     )
                 },
@@ -216,8 +218,9 @@ fn durable_commit(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider
                 },
                 |(db, _, root, changes)| {
                     let mut tx = db.begin_write().unwrap();
+                    // The commit after the seeded one, as in the engine.
                     let update = index
-                        .apply(&mut tx, black_box(*root), std::mem::take(changes))
+                        .apply(&mut tx, 1, black_box(*root), std::mem::take(changes))
                         .unwrap();
                     tx.commit().unwrap();
                     black_box(update)

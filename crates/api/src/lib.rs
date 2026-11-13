@@ -1,15 +1,17 @@
-//! Public Rust contracts for GolemDB record CRUD and branch lifecycle.
+//! Public Rust contracts for GolemDB record CRUD, queries and branch lifecycle.
 //!
-//! [`Api`] is the synchronous facade contract for CRUD and branch operations.
+//! [`Api`] is the synchronous facade contract for CRUD, query and branch operations.
 //! Consumers can use `Arc<dyn Api + Send + Sync>`; builders accept explicit cell values.
 //! All results own their data and expose no storage transaction or cell writer.
 //!
 //! [`Database`] implements Api on a cloneable handle with a shared branch registry.
 //! Its constructors initialize or validate genesis and select the configured hash.
-//! These contracts are unmetered: no budget, receipt, debug flag, or record version.
+//! CRUD, query and count return [`Metered`] results on success and failure.
+//! CRUD enforces budgets using committed prices and returns charged work on failure.
+//! Query and count remain unmetered and their budgets are not yet enforced.
 //! Current record storage supports branch reads and committed-head reads only.
-//! Immutable-data types and methods are exposed, but every such Database call
-//! returns [`ApiError::NotImplemented`] immediately without I/O or state changes.
+//! Immutable rows are staged on branches and read from committed storage, with
+//! named column projections and native typed access.
 //!
 //! ```
 //! use golemdb_api::{Api, CellLimits, CellValue, Genesis, Database,
@@ -17,18 +19,22 @@
 //!
 //! let config = OpenConfig::new(Genesis::new(HashAlgorithm::Keccak256, CellLimits {
 //!         max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 128,
-//! }));
+//! },
+//!     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
+//!     None,
+//!     golemdb_api::PricingConfig::zero(),
+//! ));
 //! let db = Database::open_memory(&config.genesis)?;
 //! let branch = db.begin()?;
 //! let key = RecordKey([0x42; 32]);
-//! db.create(branch, RecordOp::create(key)
-//!     .attribute("price", CellValue::from_i32(50))?
-//!     .field("description", CellValue::from_str("A product"))?)?;
-//! let pending = db.clone().get(ReadTarget::Branch(branch), RecordOp::get(key))?;
+//! db.create(branch, RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+//!     .attribute("price", CellValue::from_i32(50))
+//!     .field("description", CellValue::from_str("A product"))).into_result()?;
+//! let pending = db.clone().get(ReadTarget::Branch(branch), RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 //! assert_eq!(pending.cells[b"price".as_slice()].as_i32(), Some(50));
 //! let commit = db.commit(branch)?;
 //! assert_eq!(commit.get(), 1);
-//! assert_eq!(db.get(ReadTarget::Head, RecordOp::get(key))?, pending);
+//! assert_eq!(db.get(ReadTarget::Head, RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?, pending);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -36,9 +42,11 @@ mod config;
 mod database;
 mod error;
 mod genesis;
-mod immutable_data;
+mod metered;
 mod open;
 mod open_error;
+mod pricing;
+mod query_op;
 mod record_op;
 mod types;
 
@@ -46,38 +54,83 @@ pub use config::{Genesis, OpenConfig, OpenMode};
 pub use database::Database;
 pub use error::{ApiError, Result};
 pub use golemdb_cells::CellLimits;
-pub use golemdb_merkle::HashAlgorithm;
-pub use golemdb_storage_mdbx::MdbxOptions;
-pub use immutable_data::{
-    ImmutableDataAddress, ImmutableDataKey, ImmutableDataOrdinal, ImmutableDataRow,
+pub use golemdb_immutable_data::{
+    FromImmutableDataValue, ImmutableDataAddress, ImmutableDataColumn, ImmutableDataCompression,
+    ImmutableDataConfig, ImmutableDataConfigError, ImmutableDataError, ImmutableDataKey,
+    ImmutableDataOrdinal, ImmutableDataReadOptions, ImmutableDataRow, ImmutableDataSchema,
+    ImmutableDataSegment,
 };
+pub use golemdb_merkle::HashAlgorithm;
+pub use golemdb_metering::{Budget, HostMeteringSchema, Ledger, PricingConfig, WeightName};
+pub use golemdb_pruning::PruningConfig;
+pub use golemdb_storage_mdbx::MdbxOptions;
+pub use metered::{Details, Metered, Receipt};
 pub use open::OpenInfo;
 pub use open_error::{OpenError, OpenResult};
+pub use pricing::{MeteringModelInfo, MeteringModelMetadata, ModelWeights};
+pub use query_op::{CountOp, QueryOp};
 pub use record_op::{RecordOp, op};
 pub use types::SealInfo;
 
 pub use golemdb_branch::{BranchId, BranchInfo, CommitId};
-pub use golemdb_cells::{CellKind, CellName, CellNameRef, CellType, CellValue, FloatWidth, Width};
-pub use golemdb_record::{ReadTarget, Record, RecordKey};
+pub use golemdb_cells::{
+    CellKind, CellName, CellNameRef, CellType, CellValue, FloatWidth, NotNan32, NotNan64, Width,
+    marker,
+};
+pub use golemdb_query::{
+    Bounds, Direction, EqValue, ExistsType, Filter, InValues, QueryPage, SortKey, ValuesError,
+};
+pub use golemdb_record::{
+    CreateEntry, PatchChange, PatchEntry, ReadTarget, Record, RecordKey, RecordLimits, RecordMeta,
+};
 
 /// Synchronous record and branch facade. Builders assist callers; implementations
 /// enforce deployment limits, reserved-record rules, identity, and atomic mutations.
 /// Adding a required method requires updating concrete implementations and mocks.
 pub trait Api {
     /// Stage a caller-keyed record with zero or more user cells and return its key.
-    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Result<RecordKey>;
+    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Metered<RecordKey>;
 
     /// Read pending or committed state. Head selection and materialization share
     /// one snapshot. Missing projected cells are omitted; an empty projection
     /// still verifies existence. Explicit non-head commits are not yet supported.
-    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Result<Record>;
+    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Metered<Record>;
 
     /// Atomically edit one record. Removing every user cell preserves its identity.
     /// Empty patches and removals of missing cells are valid on an existing record.
-    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Result<()>;
+    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Metered<()>;
 
     /// Delete the record and its binding without reclaiming the internal ID.
-    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()>;
+    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Metered<()>;
+
+    /// Committed records matching the operation's filter, in the order of its
+    /// sort keys, ties and an unsorted query in record ID order, projected as
+    /// `get` projects. A page skips the operation's offset, then holds the
+    /// next matches in that order, up to the operation's limit, or with no
+    /// limit up to the implementation's page size; `total_matched` counts
+    /// every match. An offset past the last match gives an empty page. A
+    /// limit of 0 returns InvalidQuery; one above the page size, or more sort
+    /// keys than the implementation's cap, LimitExceeded, naming the cap.
+    /// Matching and materialization share one snapshot. `commit` names the
+    /// commit to read, `None` the head; explicit non-head commits are not yet
+    /// supported.
+    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Metered<QueryPage>;
+
+    /// The number of committed records matching the operation's filter, under
+    /// the same commit rules as `query`.
+    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Metered<u64>;
+
+    /// Unmetered committed pricing inspection. None selects head; explicit
+    /// non-head commits return CommitUnavailable until historical reads exist.
+    fn metering_model(&self, commit_id: Option<CommitId>) -> Result<MeteringModelInfo>;
+
+    /// Weights (including host.*) at the selected commit. None selects its active
+    /// model. Use the same explicit commit for related model/weight lookups.
+    fn model_weights(
+        &self,
+        commit_id: Option<CommitId>,
+        version: Option<u64>,
+    ) -> Result<ModelWeights>;
 
     // Branch lifecycle. IDs are valid only for their issuing engine.
     fn head(&self) -> Result<CommitId>;
@@ -88,7 +141,8 @@ pub trait Api {
     /// Undo one frame. Repeated rollback moves to preceding frames.
     fn rollback(&self, branch: BranchId) -> Result<()>;
 
-    /// Freeze without publishing. Sealed branches allow reads but reject writes, checkpoints, and rollback.
+    /// Freeze live state without publishing. Sealed branches allow reads and immutable
+    /// appends/truncation, but reject live-state writes, checkpoints, and rollback.
     /// The `#roots` cell added by sealing is visible only after commit.
     fn seal(&self, branch: BranchId) -> Result<SealInfo>;
 
@@ -97,10 +151,13 @@ pub trait Api {
     fn commit(&self, branch: BranchId) -> Result<CommitId>;
     fn discard(&self, branch: BranchId) -> Result<()>;
 
-    /// Future contract: stage a row on a sealed branch with an optional unique
-    /// segment-local key; return a provisional ordinal. Duplicate keys never
-    /// overwrite rows. Row and key binding become visible together at commit.
-    /// Currently returns NotImplemented immediately, without validating arguments.
+    /// Discover a segment's ordered column names and logical types from genesis.
+    /// Unknown segments return NotFound, including when no segments are configured.
+    fn immutable_data_schema(&self, segment: &str) -> Result<ImmutableDataSchema>;
+
+    /// Stage a complete typed row before or after seal, returning a provisional
+    /// segment ordinal. An optional key must be unique within committed bindings
+    /// and this branch's staged rows. Rows and keys become visible together at commit.
     fn immutable_data_append(
         &self,
         branch: BranchId,
@@ -109,28 +166,33 @@ pub trait Api {
         row: ImmutableDataRow,
     ) -> Result<ImmutableDataOrdinal>;
 
-    /// Future contract: read a committed row by ordinal or caller-provided key.
-    /// Currently returns NotImplemented without storage access.
+    /// Remove this branch's staged suffix beginning at `from_ordinal`, releasing
+    /// its keys and ordinals. Cannot truncate committed rows. Works after seal and
+    /// remains independent of live-state checkpoints and rollback.
+    fn immutable_data_truncate(
+        &self,
+        branch: BranchId,
+        segment: &str,
+        from_ordinal: ImmutableDataOrdinal,
+    ) -> Result<()>;
+
+    /// Read a committed row by ordinal or key using one current published snapshot.
+    /// Projections preserve caller order and reject empty, duplicate or unknown columns.
     fn immutable_data_get(
         &self,
         segment: &str,
         address: ImmutableDataAddress,
+        options: &ImmutableDataReadOptions,
     ) -> Result<ImmutableDataRow>;
 
-    /// Future contract: the half-open ordinal range appended by this commit.
-    /// Currently returns NotImplemented without storage access.
-    fn immutable_data_range_of(
-        &self,
-        segment: &str,
-        commit: CommitId,
-    ) -> Result<std::ops::Range<ImmutableDataOrdinal>>;
-
-    /// Future contract: this commit's rows in append order.
-    /// Currently returns NotImplemented without storage access.
+    /// Read this commit's rows in append order using one published snapshot.
+    /// Existing commits with no rows (including genesis) return an empty vector;
+    /// future commits return CommitUnavailable. Projection follows the get rules.
     fn immutable_data_rows_of(
         &self,
         segment: &str,
         commit: CommitId,
+        options: &ImmutableDataReadOptions,
     ) -> Result<Vec<ImmutableDataRow>>;
 }
 

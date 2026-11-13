@@ -1,5 +1,12 @@
 mod facade;
 mod facade_errors;
 mod immutable_data;
+mod immutable_genesis;
+mod metadata;
 mod opening;
 mod opening_failure;
+mod pricing;
+mod pruning;
+mod read_metering;
+mod receipts;
+mod write_metering;

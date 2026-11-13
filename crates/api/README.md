@@ -3,6 +3,7 @@
 `golemdb-api` defines one synchronous, dyn-compatible `Api` trait:
 
 - Records: create, get, patch, delete.
+- Queries: query, count, over committed state (from `golemdb-query`).
 - Branches: head, begin, branch_info, checkpoint, rollback, seal, commit, discard.
 
 Consumers accept `&dyn Api` or `Arc<dyn Api + Send + Sync>`. The trait does not
@@ -31,21 +32,23 @@ let config = OpenConfig::new(Genesis::new(
         max_str_len: 64,
         max_bytes_len: 128,
     },
+    golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
+    None,
 ));
 let db = Database::open("./golemdb-quickstart", &config)?;
 let branch = db.begin()?;
 let key = RecordKey([0x42; 32]);
 db.create(
     branch,
-    RecordOp::create(key)
-        .attribute("price", CellValue::from_i32(50))?
-        .field("description", CellValue::from_str("A product"))?,
-)?;
+    RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+        .attribute("price", CellValue::from_i32(50))
+        .field("description", CellValue::from_str("A product")),
+).into_result()?;
 let pending = db
     .clone()
-    .get(ReadTarget::Branch(branch), RecordOp::get(key))?;
+    .get(ReadTarget::Branch(branch), RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 db.commit(branch)?;
-assert_eq!(db.get(ReadTarget::Head, RecordOp::get(key))?, pending);
+assert_eq!(db.get(ReadTarget::Head, RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?, pending);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -60,13 +63,13 @@ use golemdb_api::{CellValue, RecordKey, RecordOp};
 
 let key = RecordKey([0x42; 32]);
 
-let record = RecordOp::create(key)
-    .attribute("price", CellValue::from_i32(50))?
-    .field("description", CellValue::from_str("A product"))?;
-let patch = RecordOp::patch(key)
-    .attribute("price", CellValue::from_i32(75))?
-    .remove("description")?;
-let read = RecordOp::get(key).only(["price", "#key"]);
+let record = RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+    .attribute("price", CellValue::from_i32(50))
+    .field("description", CellValue::from_str("A product"));
+let patch = RecordOp::patch(key, golemdb_api::Budget::Limited(u64::MAX))
+    .attribute("price", CellValue::from_i32(75))
+    .remove("description");
+let read = RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX)).only(["price", "#key"]);
 # Ok::<(), golemdb_api::ApiError>(())
 ```
 
@@ -74,29 +77,114 @@ let read = RecordOp::get(key).only(["price", "#key"]);
 `RecordOp<op::Delete>` bundle the key with that operation's inputs. Each CRUD method
 accepts only its matching type; branch or read target stays a separate argument.
 Caller-provided keys are required in every constructor. For deletion, use
-`db.delete(branch, RecordOp::delete(key))`.
+`db.delete(branch, RecordOp::delete(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()`.
 
-Explicit cell constructors own value encoding. The operation helpers choose field or
-attribute kind; create's `.insert()` and patch's `.set()` preserve the supplied
-value's kind. Builders reject invalid names, unindexable attributes, and duplicate
-names, including a set and removal for the same name. Errors are returned immediately
-and identify the step and cell, for example `attribute("payload"): invalid cell value`;
-the typed cause is available through `Error::source()`. Error messages provide context
-without repeating the cause. Deployment limits and record invariants remain
-execution-time checks in record.
+Explicit cell constructors own value encoding. `.attribute()` and `.field()` record
+an explicit requested kind without changing the supplied value. A patch's `.set()`
+preserves the stored kind and fails with `CellNotFound` if the cell is absent; a
+create has no `.set()` or `.insert()`.
 
-Operations implement `Clone`, `PartialEq`, and `Eq` for mocks and retry preparation.
-All expose `record_key()`. Creates expose `value()` and `cells()`; patches expose
-`value()`, `removes()`, and `changes()` (a value for sets, `None` for removals).
-Reads expose `names()`. The API no longer re-exports `RecordCells`, `RecordPatch`,
-or `CellPatch`; those types remain available in the lower-level record crate.
-Metering options and receipts will be designed in a later increment.
+Builder steps only collect input, preserving order, duplicates and malformed names.
+They perform no request validation or normalization and provide no `validate()`
+method. After handle/snapshot selection, record execution checks reserved keys,
+then admits entries in input order: name/value lengths, name grammar, requested
+kind and duplicate names. Admission errors retain their typed cause through
+`Error::source()` and return a receipt with zero write effects.
+
+Operations implement `Clone`, `PartialEq`, and `Eq`. All expose `record_key()`,
+`budget()` and `max_cost()`. Create and patch expose `entries()` as an ordered slice
+of `CreateEntry` or `PatchEntry`; these include invalid and duplicate entries.
+`CreateEntry.kind` and `PatchChange::Write { kind, value }` keep the requested kind
+separate from the original value. `PatchChange::Set` and `Remove` preserve the other
+patch actions. Reads expose the original projection through `names()`.
+
+The API transfers these record-owned entries and the budget to execution without
+building a second validated map. The private record admission module prepares that
+map. Metering checks each admission charge before the corresponding work;
+validation that rejects input records its units before returning the error.
+Writes use the committed model's weights. Typed value
+construction, input allocation and transport decoding remain host responsibilities.
+
+## Receipts and budgets
+
+CRUD, query and count return `Metered<T> { result, receipt }` on both success and
+failure. Read the receipt before propagating an error; `.into_result()?` explicitly
+discards it. `map` and `map_err` preserve the receipt.
+
+`receipt.cost` contains charged read work, or write planning and approved mutations.
+`get` is metered; query and count still cost zero. `receipt.priced_at` is the branch origin or
+committed snapshot's head, including for rejected historical reads. Invalid handles
+and failures before selecting a snapshot have no pricing commit. `receipt.details`
+counts actual user-cell changes and encoded bytes; it excludes system cells,
+no-ops, failed writes and reads. Rollback does not revoke earlier receipts.
+
+`get` charges `read.admission.base`, then each supplied projection entry and its
+name bytes (duplicates included), `read.base`, and `read.key`. Distinct projected
+names cost `read.cell` each, including absent cells; found cells also pay `read.byte`
+on encoded key + tagged value size, before decoding/copying. An empty projection
+only resolves the binding. `#key` consistency is checked when that cell is returned.
+A full user record reads `#key` and `#meta` (two `read.cell`), then atomically charges
+`meta.cells * read.cell_scan + (meta.cell_bytes + 91) * read.byte` before scanning.
+Its metadata must be valid. A full reserved record has no `#meta`: it charges scan
+attempts and returned bytes incrementally. Attempts include the terminating probe,
+overlay-only entries (including tombstones), and origin rows even when shadowed.
+An overlay replacement shares the origin row's attempt. Reserved scan charges can
+therefore differ from a scan of the committed result; user scans skip hidden runs.
+Every failed read retains spent accounting and returns no partial record.
+
+Target selection still precedes admission: invalid handles and unavailable commits
+cost zero. The selected snapshot supplies both data and committed prices; staged
+weights are never used. Admission-before-snapshot ordering and `evaluated_at` remain
+deferred. No new public CRUD arguments or receipt fields are added.
+
+`receipt.ledger` contains charged units per weight name, in name order. It is
+separate from `details`: admission, reads and system mutations can be charged
+without changing user data. `Ledger` and `WeightName` are re-exported by the API.
+Record CUD uses admission, planning, approval and application through `WriteMeter`.
+Database construction shares its persisted pricing provider and validated genesis limits;
+write ledgers record performed planning and, on success, approved mutations.
+Each write captures the provider's snapshot inside the validated branch guard,
+before admission, and retains it through application. No per-call model scan or
+independent head lookup occurs. Missing weights remain errors, not implicit zeros.
+Outcome-to-API conversion forwards accounting on both success and
+failure. Write admission enforces genesis-configured cell lengths;
+planning enforces the resulting per-record cell caps. There are no additional
+request-entry or total-input-byte caps.
+
+API owns the `RecordOp`, `QueryOp` and `CountOp` builders. Query execution accepts
+a `golemdb_query::QueryRequest` and a separate budget; count execution accepts a
+filter and budget. Filters, typed operands, sort keys and result pages remain in
+the query crate and are re-exported by API. `QueryOp::request()` and
+`CountOp::predicate()` expose the inputs for inspection; `requested_budget()`
+exposes either query/count operation's budget. Their fields are private, so use
+the fluent methods instead of struct literals or direct field mutation.
+
+Every request constructor requires `Budget::Limited(n)` or `Budget::Unlimited`:
+`RecordOp::create(key, budget)`, `patch(key, budget)`, `get(key, budget)`,
+`delete(key, budget)`, `QueryOp::from_filter(filter, budget)` and
+`CountOp::filter(filter, budget)`. Write budgets are checked before each planning
+step and against the full total before any mutation is applied. Get budgets are checked
+before each read step and before copying returned values; query/count budgets remain
+unenforced and their ledgers empty. `OutOfBudget { required }` reports unfunded work;
+zero prices do not exhaust a budget. Unlimited use is an explicit host decision.
+
+Early budget refusal, missing weights and arithmetic overflow report `required: None`.
+After complete planning, an insufficient budget reports `required: Some(total)`.
+Both return only completed planning charges and zero effects. Missing weights and
+overflow also fail under `Unlimited`; an unpriced failure logs the weight name.
+Trie depths remain fixed at 6. Runtime model administration/activation is deferred.
+
+Index term-creation charges use existence at the committed branch origin. Two calls
+joining a term absent there each pay creation, even if an earlier branch call joined
+it. Removing/rejoining a term present at the origin adds no creation charge. Sealing
+still applies the final index diff; these are deterministic per-call charges.
 
 `ReadTarget::Branch(id)` reads work in progress. `ReadTarget::Head` resolves head
 and reads the record in one storage snapshot. `ReadTarget::Commit(id)` currently
 accepts only that snapshot's head; historical reads are deferred.
-`RecordOp::get(key)` reads all cells. Its `.only(names)` helper accepts text or raw
-byte names for reserved records, deduplicated in byte order. Calling `.only()` again
+`RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))` reads all cells. Its `.only(names)` helper accepts text or raw
+byte names for reserved records. The builder preserves duplicates and input order;
+execution deduplicates and sorts after selecting the target. Calling `.only()` again
 replaces the projection; an empty projection still checks existence.
 
 `ApiError` exposes common failures directly and retains diagnostic sources for
@@ -115,10 +203,10 @@ or discard.
 
 ## Empty records
 
-A record may have zero user cells. A full read still contains its system `#key`;
+A record may have zero user cells. A full read still contains its system `#key` and `#meta`;
 its binding and identity remain until `delete`. Removing the last user cell does
 not delete the record. An empty projection returns no cells but still verifies
-that the record exists. `#meta` and metering remain deferred.
+that the record exists. Operation pricing remains deferred.
 
 ```rust
 use golemdb_api::{
@@ -133,28 +221,31 @@ let config = OpenConfig::new(Genesis::new(
         max_str_len: 64,
         max_bytes_len: 128,
     },
+    golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
+    None,
 ))
 .with_mode(OpenMode::CreateNew);
 let db = Database::open("./golemdb-empty-records", &config)?;
 let branch = db.begin()?;
 let key = RecordKey([7; 32]);
-db.create(branch, RecordOp::create(key))?;
+db.create(branch, RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 db.patch(
     branch,
-    RecordOp::patch(key).attribute("price", CellValue::from_i32(50))?,
-)?;
-db.patch(branch, RecordOp::patch(key).remove("price")?)?;
+    RecordOp::patch(key, golemdb_api::Budget::Limited(u64::MAX)).attribute("price", CellValue::from_i32(50)),
+).into_result()?;
+db.patch(branch, RecordOp::patch(key, golemdb_api::Budget::Limited(u64::MAX)).remove("price")).into_result()?;
 db.commit(branch)?;
 
-let empty = db.get(ReadTarget::Head, RecordOp::get(key))?;
-assert_eq!(empty.cells.len(), 1);
+let empty = db.get(ReadTarget::Head, RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
+assert_eq!(empty.cells.len(), 2);
 assert_eq!(empty.cells[b"#key".as_slice()].as_bytes32(), Some(key.0));
+assert_eq!(empty.meta(), Some(golemdb_api::RecordMeta::default()));
 
 let branch = db.begin()?;
-db.delete(branch, RecordOp::delete(key))?;
+db.delete(branch, RecordOp::delete(key, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 db.commit(branch)?;
 assert!(matches!(
-    db.get(ReadTarget::Head, RecordOp::get(key)),
+    db.get(ReadTarget::Head, RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))).into_result(),
     Err(ApiError::NotFound)
 ));
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -190,6 +281,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_str_len: 128,
             max_bytes_len: 1024,
         },
+        golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
+        None,
     ))
     .with_mode(OpenMode::CreateNew);
     let db = Database::open("./golemdb-catalogue", &config)?;
@@ -207,11 +300,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ] {
         db.create(
             branch,
-            RecordOp::create(key)
-                .attribute("name", CellValue::from_str(name))?
-                .attribute("price_cents", CellValue::from_i32(price_cents))?
-                .field("description", CellValue::from_str(description))?,
-        )?;
+            RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+                .attribute("name", CellValue::from_str(name))
+                .attribute("price_cents", CellValue::from_i32(price_cents))
+                .field("description", CellValue::from_str(description)),
+        ).into_result()?;
     }
     // Seal computes roots and freezes the branch; nothing is published yet.
     let first_seal = db.seal(branch)?;
@@ -223,7 +316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(first_commit.get(), 1); // Opening created genesis at commit 0.
 
     // 2. Read a full record and a projection from committed state.
-    let saved_laptop = db.get(ReadTarget::Head, RecordOp::get(laptop))?;
+    let saved_laptop = db.get(ReadTarget::Head, RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
     assert_eq!(
         saved_laptop.cells[b"price_cents".as_slice()].as_i32(),
         Some(120_000)
@@ -236,8 +329,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // An explicit commit target is supported while that commit is the head.
     let saved_keyboard = db.get(
         ReadTarget::Commit(first_commit),
-        RecordOp::get(keyboard).only(["name", "price_cents"]),
-    )?;
+        RecordOp::get(keyboard, golemdb_api::Budget::Limited(u64::MAX)).only(["name", "price_cents"]),
+    ).into_result()?;
     assert_eq!(saved_keyboard.cells.len(), 2);
     assert_eq!(
         saved_keyboard.cells[b"name".as_slice()].as_str(),
@@ -249,41 +342,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let branch = db.begin()?;
     db.patch(
         branch,
-        RecordOp::patch(laptop)
-            .attribute("price_cents", CellValue::from_i32(110_000))?
-            .field("stock", CellValue::from_u32(5))?
-            .remove("description")?,
-    )?;
+        RecordOp::patch(laptop, golemdb_api::Budget::Limited(u64::MAX))
+            .attribute("price_cents", CellValue::from_i32(110_000))
+            .field("stock", CellValue::from_u32(5))
+            .remove("description"),
+    ).into_result()?;
     db.create(
         branch,
-        RecordOp::create(monitor)
-            .attribute("name", CellValue::from_str("Monitor"))?
-            .attribute("price_cents", CellValue::from_i32(30_000))?
-            .field("description", CellValue::from_str("27-inch monitor"))?,
-    )?;
-    db.delete(branch, RecordOp::delete(mouse))?;
+        RecordOp::create(monitor, golemdb_api::Budget::Limited(u64::MAX))
+            .attribute("name", CellValue::from_str("Monitor"))
+            .attribute("price_cents", CellValue::from_i32(30_000))
+            .field("description", CellValue::from_str("27-inch monitor")),
+    ).into_result()?;
+    db.delete(branch, RecordOp::delete(mouse, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
 
     // Branch reads see the changes immediately; head still contains commit 1.
-    let pending_laptop = db.get(ReadTarget::Branch(branch), RecordOp::get(laptop))?;
+    let pending_laptop = db.get(ReadTarget::Branch(branch), RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
     assert_eq!(
         pending_laptop.cells[b"price_cents".as_slice()].as_i32(),
         Some(110_000)
     );
     assert_eq!(
-        db.get(ReadTarget::Head, RecordOp::get(laptop))?,
+        db.get(ReadTarget::Head, RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?,
         saved_laptop
     );
     assert!(matches!(
-        db.get(ReadTarget::Branch(branch), RecordOp::get(mouse)),
+        db.get(ReadTarget::Branch(branch), RecordOp::get(mouse, golemdb_api::Budget::Limited(u64::MAX))).into_result(),
         Err(ApiError::NotFound)
     ));
-    assert!(db.get(ReadTarget::Head, RecordOp::get(mouse)).is_ok());
+    assert!(db.get(ReadTarget::Head, RecordOp::get(mouse, golemdb_api::Budget::Limited(u64::MAX))).into_result().is_ok());
 
     // Sealing preserves branch reads and rejects writes, checkpoints, and rollback.
     // The seal-added #roots cell becomes visible only after commit.
     let second_seal = db.seal(branch)?;
     assert_eq!(
-        db.get(ReadTarget::Branch(branch), RecordOp::get(laptop))?,
+        db.get(ReadTarget::Branch(branch), RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?,
         pending_laptop
     );
     println!("Candidate commit: {}", second_seal.commit_id);
@@ -291,7 +384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Index root: {:02x?}", second_seal.index_root);
     assert_eq!(db.head()?, first_commit);
     assert_eq!(
-        db.get(ReadTarget::Head, RecordOp::get(laptop))?,
+        db.get(ReadTarget::Head, RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?,
         saved_laptop
     );
     assert_eq!(db.seal(branch)?, second_seal); // Repeated seal returns the same result.
@@ -304,18 +397,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Read again: laptop changed, keyboard stayed the same, monitor appeared,
     //    and mouse disappeared. Use Head now; historical commit 1 is deferred.
-    let updated_laptop = db.get(ReadTarget::Head, RecordOp::get(laptop))?;
+    let updated_laptop = db.get(ReadTarget::Head, RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
     assert_eq!(updated_laptop, pending_laptop);
     assert_eq!(updated_laptop.cells[b"stock".as_slice()].as_u32(), Some(5));
     assert!(!updated_laptop.cells.contains_key(b"description".as_slice()));
 
     let unchanged_keyboard = db.get(
         ReadTarget::Head,
-        RecordOp::get(keyboard).only(["name", "price_cents"]),
-    )?;
+        RecordOp::get(keyboard, golemdb_api::Budget::Limited(u64::MAX)).only(["name", "price_cents"]),
+    ).into_result()?;
     assert_eq!(unchanged_keyboard, saved_keyboard);
 
-    let new_monitor = db.get(ReadTarget::Head, RecordOp::get(monitor))?;
+    let new_monitor = db.get(ReadTarget::Head, RecordOp::get(monitor, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
     assert_eq!(
         new_monitor.cells[b"name".as_slice()].as_str(),
         Some("Monitor")
@@ -325,7 +418,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(30_000)
     );
     assert!(matches!(
-        db.get(ReadTarget::Head, RecordOp::get(mouse)),
+        db.get(ReadTarget::Head, RecordOp::get(mouse, golemdb_api::Budget::Limited(u64::MAX))).into_result(),
         Err(ApiError::NotFound)
     ));
 
@@ -343,11 +436,69 @@ cell_limits:
   max_cell_name_len: 32
   max_str_len: 64
   max_bytes_len: 128
+record_limits:
+  max_cells: 100
+  max_indexed_cells: 100
+immutable_data:
+  shard_span: 500000
+  segments:
+    - name: headers
+      compression: lz4
+      columns:
+        - {name: block_height, type: u64}
+        - {name: block_body} # bytes by default
 ```
 
-`blake3` is also supported. Missing, duplicate, and unknown fields are rejected.
+`blake3` is also supported. Omit `immutable_data` or set it to `null` to disable
+immutable storage. An enabled configuration requires at least one segment and a
+positive shard span. Other fields are required except a column's `type`, which
+defaults to `bytes`. Duplicate and unknown fields are rejected.
 Use `Genesis::load(path)` or `Genesis::from_yaml(text)`; the loader
 does not search for files or read environment overrides.
+
+Typed construction uses `Genesis::new(hash, cell_limits, record_limits, None)` to disable
+immutable data, or `Genesis::new(hash, cell_limits, record_limits,
+Some(ImmutableDataConfig::new(shard_span, segments)))` to enable it. These
+configuration types own their declarations and implement `Clone`, not `Copy`.
+
+`RecordLimits { max_cells, max_indexed_cells }` contains explicit `u64` caps,
+stored at genesis as `#params.#maxRecordCells` and `#params.#maxRecordIndexedCells`.
+Creates and patches check the final user-cell counts before writing; violations
+return `InvalidArgument` with zero applied effects and do not consume an ID.
+System and admin records are exempt. Zero caps allow empty user records;
+`max_indexed_cells: 0` allows fields only. The values above are examples, not defaults.
+
+Each user record stores `#meta` as four big-endian `u64` counters in a `bytes32`
+field: `cells`, `cell_bytes`, `indexed_cells`, `index_bytes`. Metadata and receipt
+details use the same user effects and exclude system cells. Patches rewrite
+`#meta` only when a counter changes. Full reads and `.only(["#meta"])` include it.
+Projections return stored metadata. `Record::meta()` returns its decoded `RecordMeta`,
+or `None` if the cell is absent or malformed. Full `get`, patch and delete validate
+metadata before using its counters: missing or malformed metadata, or counter
+underflow, returns `Internal` without repair.
+
+Segment names match `[a-z][a-z0-9_]{0,63}` and are rejected rather than normalized
+when invalid. Column names use the cell user-name grammar, independently of the
+user-cell length limits. Segment names are unique; column names are unique within
+a segment, and their order is significant. Column types use the existing cell
+types: `bool`, `str`, `bytes`, `bytes4/8/16/20/32`, `u32/64/128/256`,
+`i32/64/128/256`, `dec32/64/128/256`, `f32/64`, `date32`, and `timestamp64`.
+Compression is explicitly `none`, `lz4`, or ordinary `zstd`.
+
+The current format allows up to 64 user segments and 1–64 columns per segment,
+with positive `u64` shard spans. The encoded segment declaration is limited to
+16,383 bytes so its tagged parameter cell fits the 16 KiB engine value budget.
+These are configuration limits; they do not cap immutable row payloads.
+
+When enabled, genesis writes `#params.#shardSpan` as a `u64` field and
+`#params.#immutableDataSegments` as a bytes field. Both cells are absent when
+disabled; no placeholder span or empty schema is persisted. Declarations are encoded with
+fixed-width lengths and type/compression IDs, with segments sorted by name and
+columns in declaration order. Zero-based `u32` segment IDs follow that sorted
+order. YAML formatting, segment order and omitted versus explicit `bytes` types
+have identical commitments. Changing a name, column order, type, compression or
+shard span, or enabling/disabling immutable data, changes genesis identity. Reopening checks the stored parameter cells
+and their trie commitments without rewriting them.
 
 ```rust
 use golemdb_api::{Database, Genesis, OpenConfig};
@@ -386,14 +537,14 @@ directory; opening an existing empty directory can create MDBX environment files
 
 All detection, validation, and initialization occurs under one storage writer.
 Creation writes the fixed reserved-record catalogue from cells, identities and
-bindings, the configured limits, allocator at 64, and a real cell trie. Every
-genesis cell is a field, so the index root is empty. The transaction writes format,
+bindings, the configured limits and immutable declarations, allocator at 64, and a
+real cell trie. Every genesis cell is a field, so the index root is empty. The transaction writes format,
 hash, Roaring, genesis identity, and head metadata before publishing commit 0.
 `#roots` and `#rootIndex` contain their identity cells but no history entries.
 The two metering records have identities and bindings only; metering is deferred.
 
 The opener validates physical backend ceilings, including complete cell/index
-keys and value tags. Format 1 also requires room for 16 KiB engine values, covering
+keys and value tags. The format also requires room for 16 KiB engine values, covering
 trie nodes and canonical bitmap containers. Limits are user-cell admission policy;
 system root-history bytes do not consume the configured user bytes allowance.
 
@@ -408,36 +559,95 @@ changed deployment settings return `GenesisMismatch`.
 failures. `Database::info()` describes the opening snapshot; call `head()` for the
 live head, or `get(ReadTarget::Head, ...)` for a consistent current record read.
 
+## Immutable data
+
+Genesis declares each segment's ordered, named, typed columns and compression.
+The API re-exports the immutable-data types and cell codecs:
+
+| Method | Behavior |
+| --- | --- |
+| `immutable_data_schema(segment)` | Return the declared column names and types. |
+| `immutable_data_append(branch, segment, key, row)` | Stage a complete typed row and return its provisional `u64` ordinal. |
+| `immutable_data_truncate(branch, segment, from_ordinal)` | Remove only the branch's staged suffix, releasing its keys and ordinals. |
+| `immutable_data_get(segment, address, &options)` | Read a committed row by ordinal or optional 32-byte key. |
+| `immutable_data_rows_of(segment, commit, &options)` | Read that commit's rows in append order; an existing empty commit returns no rows. |
+
+Append and truncate work before and after seal, independently of live-state
+checkpoints and rollback. Files are appended and synced during commit; MDBX then
+publishes live state, key bindings, commit ranges and head atomically. Losing and
+discarded branches publish no rows. Keys are unique per segment; duplicate keys
+return `AlreadyExists`. Cell size limits do not constrain immutable payloads.
+
+Reads use one published snapshot. `ImmutableDataReadOptions::all()` selects every
+column; `columns(["hash", "height"])` selects named columns in caller order.
+Explicitly empty, duplicate or unknown projections return `InvalidArgument`.
+Unknown segments and absent rows return `NotFound`; future commits return
+`CommitUnavailable`. Read rows own their values and layout metadata. Use
+`row.get::<T>("column")` for checked native conversion, `value` for borrowed cell
+access, or `iter` for named values. Schema types remain exact when projecting.
+Row equality compares typed values in order, ignoring column names, schema and
+projection metadata. A full read row equals its append input; projections of
+different columns also compare equal when their ordered typed values match.
+
+For a segment declared as `height: u64`, `hash: bytes32`:
+
+```rust
+use golemdb_api::{Api, CellValue, ImmutableDataAddress, ImmutableDataKey,
+    ImmutableDataReadOptions, ImmutableDataRow};
+
+let branch = db.begin()?;
+let ordinal = db.immutable_data_append(
+    branch,
+    "headers",
+    Some(ImmutableDataKey([7; 32])),
+    ImmutableDataRow::new(vec![CellValue::from_u64(42), CellValue::from_bytes32([9; 32])]),
+)?;
+let commit = db.commit(branch)?;
+let projection = ImmutableDataReadOptions::columns(["hash"]);
+let row = db.immutable_data_get("headers", ImmutableDataAddress::Ordinal(ordinal), &projection)?;
+let hash: [u8; 32] = row.get("hash")?;
+let rows = db.immutable_data_rows_of("headers", commit, &projection)?;
+```
+
+`Database::open` defaults to `<database>/immutable-data`; override with
+`OpenConfig::with_immutable_data_directory(path)`. `open_memory` uses memory for
+both live state and immutable rows. `from_store` requires an explicit immutable
+directory when segments are declared; it cannot infer the supplied store's
+persistence. The directory is local configuration and does not change genesis
+identity. `Genesis::immutable_data: None` disables immutable storage and creates no files.
+Close all database clones before reopening the same immutable directory.
+Startup recovers unpublished tails against durable commit metadata.
+
+Retention/pruning, key expiry and digests remain deferred.
+
 ## Current scope
 
-Immutable data has an interface only. `Api` exposes:
+Typed cells, record CRUD, branch lifecycle, atomic opening/genesis, and typed
+immutable data are implemented behind a cloneable `Database` with shared state.
+Queries support `Eq`, `In`, `Range`, `Prefix` and `Exists` filters, combined by `And` and `Or`
+trees, with full or projected records, and `count`. A filter nests at most 64 `And` / `Or`
+levels, a hardcoded cap until it is read from genesis; a deeper one returns
+`ApiError::LimitExceeded`. A query returns at most 100 records, the first matches in record ID
+order, a hardcoded page size until it is read from genesis; `total_matched` and `count` still
+count every match. `limit(n)` returns at most `n` records: a `limit` of 0 returns
+`ApiError::InvalidQuery`, and one above the page size `ApiError::LimitExceeded`, whose `max` is
+the page size. `offset(n)` starts the page past the first `n` matches, so the next page's
+offset is the previous one plus the records returned; an offset past the last match returns an
+empty page. A `Prefix` matches `str` values only. An `Exists` matches the records
+holding an attribute of its name: of its type, or, with no type, of any type. `Eq` values, `In`
+values, `Range` bounds and `Exists` types are of one indexable type by construction:
+`EqValue::of(marker::Str, "blue")`, `InValues::of(marker::U32, [1, 2])`,
+`Bounds::new(marker::Str, ..)` and `ExistsType::of(marker::U32)` take a cell-type marker, so mixed
+types or `bytes` do not compile; `EqValue::try_from`, `InValues::try_from`,
+`Bounds::try_new(ty, ..)` and `ExistsType::try_from(ty)` check at run time (`ValuesError`, which
+converts into `ApiError::InvalidArgument`). A `Range` with two unbounded sides matches every cell
+of its type.
+Queries read committed state only: `None` reads the head, and an explicit commit
+other than the head returns `ApiError::CommitUnavailable`. Sort returns
+`ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost
+receipts, generated keys, OCC, and transport serialization are deferred.
 
-- `immutable_data_append(branch, segment, key, row) -> ordinal`, where `key` is
-  `Option<ImmutableDataKey>` and `row` is `Vec<Vec<u8>>` (one byte array per column).
-- `immutable_data_get(segment, address) -> row`, with
-  `ImmutableDataAddress::Ordinal(u64)` or `ImmutableDataAddress::Key(key)`.
-- `immutable_data_range_of(segment, commit) -> Range<u64>`.
-- `immutable_data_rows_of(segment, commit) -> Vec<ImmutableDataRow>`.
-
-`ImmutableDataKey` contains 32 caller-provided bytes and is distinct from a record
-key. The intended contract makes keys unique within a segment, with rows and key
-bindings published together from a sealed branch at commit. Keys are optional;
-all rows retain ordinal addressing. Duplicate keys will never overwrite rows.
-
-**Every immutable-data call currently returns `ApiError::NotImplemented { operation }`
-immediately**, including calls with invalid handles or unknown segments. Nothing
-is validated, staged, allocated, read, or written. Segment configuration, files,
-key indexes, and commit integration are deferred. The
-[immutable-data specification](../../docs/golem-db-api.md#immutable-data) describes
-the future behavior, including pruning and rewind of key bindings.
-
-All four iterations are implemented: typed cells, the facade contract and builders,
-atomic opening/genesis, and a cloneable `Database` with shared branch state.
-Budgets, cost receipts, generated keys, OCC, and transport serialization are deferred.
-
-The [consumer test](src/tests/consumer.rs) demonstrates a single facade mock and
-commit failure injection behind `Arc<dyn Api + Send + Sync>`. Use scripted mocks
-for consumer error paths. For tests, replace the storage opening with
+Use scripted mocks for consumer error paths behind `Arc<dyn Api + Send + Sync>`. For tests, replace the storage opening with
 `Database::open_memory(&config.genesis)?` to get a fresh in-memory database. Arkiv can
 pass `Arc::new(Database::open_memory(&config.genesis)?)`
 as `Arc<dyn Api + Send + Sync>` to run behavioral tests with real database semantics.

@@ -6,7 +6,10 @@ use golemdb_record::RecordError;
 
 #[test]
 fn api_errors_preserve_diagnostic_sources() {
-    let invalid = ApiError::from(RecordError::InvalidArgument("deployment limit".into()));
+    let invalid = ApiError::from(RecordError::InvalidInput {
+        message: "deployment limit".into(),
+        source: None,
+    });
     assert_eq!(invalid.to_string(), "invalid argument: deployment limit");
     assert!(invalid.source().is_none());
     let error = ApiError::from(BranchError::Storage(
@@ -45,12 +48,112 @@ fn capacity_errors_remain_public_through_internal_wrappers() {
         RecordError::Storage(StorageError::Full),
         RecordError::Cells(CellError::Storage(StorageError::Full)),
         RecordError::Cells(CellError::Merkle(MerkleError::Storage(StorageError::Full))),
+        RecordError::Pricing(golemdb_metering::ModelError::Cells(CellError::Storage(
+            StorageError::Full,
+        ))),
         RecordError::Branch(BranchError::Storage(StorageError::Full)),
         RecordError::Branch(BranchError::Index(IndexError::Storage(StorageError::Full))),
         RecordError::Branch(BranchError::Index(IndexError::Merkle(
             MerkleError::Storage(StorageError::Full),
         ))),
+        RecordError::Branch(BranchError::Pruning(
+            golemdb_pruning::PruningError::Storage(StorageError::Full),
+        )),
     ] {
         assert!(matches!(ApiError::from(error), ApiError::StoreFull));
     }
+    assert!(matches!(
+        ApiError::from(golemdb_metering::ModelError::Cells(CellError::Storage(
+            StorageError::Full
+        ))),
+        ApiError::StoreFull
+    ));
+}
+
+#[test]
+fn query_errors_map_to_public_errors() {
+    use golemdb_branch::CommitId;
+    use golemdb_cells::CellNameRef;
+    use golemdb_index::TermError;
+    use golemdb_query::QueryError;
+    use golemdb_storage::StorageError;
+
+    let invalid = ApiError::from(QueryError::InvalidArgument {
+        field: CellNameRef::raw(b"1bad").into(),
+        source: TermError::InvalidName,
+    });
+    assert!(matches!(&invalid, ApiError::InvalidArgument { .. }));
+    assert_eq!(
+        invalid.source().unwrap().downcast_ref::<TermError>(),
+        Some(&TermError::InvalidName)
+    );
+    assert!(matches!(
+        ApiError::from(QueryError::InvalidQuery { reason: "branch" }),
+        ApiError::InvalidQuery { reason: "branch" }
+    ));
+    assert!(matches!(
+        ApiError::from(QueryError::NotImplemented {
+            operation: "query: sort"
+        }),
+        ApiError::NotImplemented {
+            operation: "query: sort"
+        }
+    ));
+    let (requested, head) = (CommitId::new(1), CommitId::new(2));
+    assert!(matches!(
+        ApiError::from(QueryError::CommitUnavailable { requested, head }),
+        ApiError::CommitUnavailable { requested: r, head: h } if r == requested && h == head
+    ));
+    let internal = ApiError::from(QueryError::Internal(Box::new(RecordError::CorruptState(
+        "missing identity",
+    ))));
+    assert!(matches!(&internal, ApiError::Internal { .. }));
+    assert!(
+        internal
+            .source()
+            .unwrap()
+            .downcast_ref::<RecordError>()
+            .is_some()
+    );
+    assert!(matches!(
+        ApiError::from(QueryError::Internal(Box::new(StorageError::Full))),
+        ApiError::StoreFull
+    ));
+}
+
+#[test]
+fn immutable_failures_keep_input_integrity_and_capacity_distinct() {
+    use golemdb_immutable_data::{ImmutableDataError, ImmutableDataStorageError as DataError};
+    use golemdb_storage::StorageError;
+    let input = ApiError::from(DataError::Input(ImmutableDataError::UnknownColumn {
+        name: "missing".into(),
+    }));
+    assert!(matches!(input, ApiError::InvalidArgument { .. }));
+    assert!(
+        input
+            .source()
+            .unwrap()
+            .downcast_ref::<ImmutableDataError>()
+            .is_some()
+    );
+    let corrupt = ApiError::from(DataError::Input(ImmutableDataError::PayloadArity {
+        expected: 2,
+        actual: 1,
+    }));
+    assert!(matches!(corrupt, ApiError::Internal { .. }));
+    for error in [
+        ApiError::from(DataError::Store(StorageError::Full)),
+        ApiError::from(BranchError::ImmutableData(DataError::Store(
+            StorageError::Full,
+        ))),
+        ApiError::internal(BranchError::ImmutableData(DataError::Store(
+            StorageError::Full,
+        ))),
+    ] {
+        assert!(matches!(error, ApiError::StoreFull));
+    }
+    assert!(matches!(
+        ApiError::from(DataError::Corrupt("missing file")),
+        ApiError::Internal { .. }
+    ));
 }

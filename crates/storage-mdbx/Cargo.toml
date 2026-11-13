@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 golemdb-storage.workspace = true
 libmdbx = "=0.6.6"
-# Match the binding's native version; used only to query physical size limits.
+# Match the binding's native version; used for size limits and I/O counters.
 mdbx-sys = "=13.11.0"
 
 [dev-dependencies]

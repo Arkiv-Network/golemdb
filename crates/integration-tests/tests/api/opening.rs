@@ -4,15 +4,29 @@ use golemdb_api::*;
 use golemdb_branch::Branches;
 use golemdb_cells::{CellKey, CellReader, reserved, system, tables};
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher};
-use golemdb_record::Records;
+use golemdb_record::{Records, WritePricing};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 
 const SUPERBLOCK: Table = Table("Superblock");
 const KEY: RecordKey = RecordKey([0x42; 32]);
-const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\n";
+const YAML: &str = "hash_function: keccak-256\ncell_limits:\n  max_cell_name_len: 32\n  max_str_len: 64\n  max_bytes_len: 128\nrecord_limits: {max_cells: 100, max_indexed_cells: 100}\nmetering: {golemdb_code_version: 1, host_code_version: 0, weights: {}}\n";
 
 fn config() -> OpenConfig {
-    OpenConfig::new(Genesis::from_yaml(YAML).unwrap())
+    let mut genesis = Genesis::from_yaml(YAML).unwrap();
+    genesis.metering = PricingConfig::zero();
+    OpenConfig::new(genesis)
+}
+
+fn pricing(store: &impl Store, genesis: &Genesis) -> WritePricing {
+    let tx = store.begin_read().unwrap();
+    let head = golemdb_branch::read_head(&tx).unwrap();
+    let provider =
+        golemdb_metering::PricingProvider::load(&CellReader::new(&tx), head.get(), &[]).unwrap();
+    WritePricing::new(
+        Arc::new(provider),
+        genesis.cell_limits,
+        genesis.record_limits,
+    )
 }
 
 pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
@@ -20,11 +34,11 @@ pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
     [
         SUPERBLOCK,
         tables::CELL,
-        tables::CELL_TRIE,
+        tables::CELL_TRIE.table(),
         golemdb_index::tables::INDEX,
-        golemdb_index::tables::INDEX_TRIE,
-        golemdb_index::tables::BITMAP_TRIE,
-        golemdb_index::tables::BITMAP_CONTAINER,
+        golemdb_index::tables::INDEX_TRIE.table(),
+        golemdb_index::tables::BITMAP_TRIE.table(),
+        golemdb_index::tables::BITMAP_CONTAINER.table(),
     ]
     .into_iter()
     .map(|table| {
@@ -39,7 +53,7 @@ pub(super) fn snapshot(db: &impl Store) -> Vec<Vec<golemdb_storage::Entry>> {
 #[test]
 fn yaml_is_explicit_strict_and_has_canonical_identity() {
     let first = Genesis::from_yaml(YAML).unwrap();
-    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nhash_function: keccak-256\n").unwrap();
+    let reordered = Genesis::from_yaml("# same deployment\ncell_limits: {max_bytes_len: 128, max_str_len: 64, max_cell_name_len: 32}\nrecord_limits: {max_indexed_cells: 100, max_cells: 100}\nhash_function: keccak-256\nmetering: {golemdb_code_version: 1, host_code_version: 0, weights: {}}\nimmutable_data: null\n").unwrap();
     assert_eq!(first, reordered);
     assert_eq!(
         Database::open_memory(&first).unwrap().info(),
@@ -59,6 +73,15 @@ fn yaml_is_explicit_strict_and_has_canonical_identity() {
         format!("{YAML}unknown: 1\n"),
         YAML.replace("max_str_len: 64", "max_str_len: 64\n  max_str_len: 65"),
         YAML.replace("max_str_len: 64", "max_str_len: -1"),
+        YAML.replace(
+            "record_limits: {max_cells: 100, max_indexed_cells: 100}\n",
+            "",
+        ),
+        YAML.replace("max_cells: 100, ", ""),
+        YAML.replace(", max_indexed_cells: 100", ""),
+        YAML.replace("max_cells: 100", "max_cells: -1"),
+        YAML.replace("max_cells: 100", "max_cells: 100, unknown: 1"),
+        YAML.replace("max_cells: 100", "max_cells: 100, max_cells: 99"),
     ] {
         assert!(Genesis::from_yaml(&bad).is_err());
     }
@@ -86,6 +109,21 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
     assert_eq!(opened.genesis(), &config.genesis);
     let tx = db.begin_read().unwrap();
     let reader = CellReader::new(&tx);
+    for (name, cap) in [
+        (
+            reserved::MAX_RECORD_CELLS,
+            config.genesis.record_limits.max_cells,
+        ),
+        (
+            reserved::MAX_RECORD_INDEXED_CELLS,
+            config.genesis.record_limits.max_indexed_cells,
+        ),
+    ] {
+        assert_eq!(
+            reader.get(&CellKey::new(system::PARAMS.id, name)).unwrap(),
+            Some(CellValue::from_u64(cap))
+        );
+    }
     for record in system::ALL {
         assert_eq!(
             reader.get(&CellKey::new(record.id, reserved::KEY)).unwrap(),
@@ -101,14 +139,20 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
             Some(CellValue::from_u64(record.id))
         );
     }
-    for id in [
-        system::ROOTS.id,
-        system::ROOT_INDEX.id,
-        system::METERING_MODEL.id,
-        system::MODEL_WEIGHT.id,
-    ] {
+    for id in [system::ROOTS.id, system::ROOT_INDEX.id] {
         assert_eq!(reader.scan_record(id).unwrap().count(), 1);
     }
+    assert_eq!(
+        reader.scan_record(system::MODEL_WEIGHT.id).unwrap().count(),
+        1 + config.genesis.metering.weights.len()
+    );
+    assert_eq!(
+        reader
+            .scan_record(system::METERING_MODEL.id)
+            .unwrap()
+            .count(),
+        2
+    );
     let before = snapshot(&db);
     let reopened = Database::from_store(db.clone(), &config).unwrap();
     assert_eq!(
@@ -120,8 +164,9 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
     );
     assert_eq!(snapshot(&db), before);
 
-    let branches = Branches::new(db.clone(), hasher).unwrap();
-    let records = Records::new(branches.clone());
+    let branches = Branches::new(db.clone(), hasher, None, None).unwrap();
+    let pricing = pricing(&db, &config.genesis);
+    let records = Records::new(branches.clone(), pricing.clone());
     let branch = branches.begin().unwrap();
     let cells = golemdb_record::RecordCells::from([(
         CellNameRef::raw(b"price").into(),
@@ -129,21 +174,35 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
             .with_kind(CellKind::Attribute)
             .unwrap(),
     )]);
-    records.create(branch, KEY, cells).unwrap();
+    records
+        .create(branch, KEY, create_entries(cells), Budget::Unlimited)
+        .result
+        .unwrap();
     assert_eq!(
         branches.commit(branch).unwrap(),
         golemdb_branch::CommitId::new(1)
     );
     let before = snapshot(&db);
-    let reopened =
-        Database::from_store(db.clone(), &config.with_mode(OpenMode::ExistingOnly)).unwrap();
+    let reopened = Database::from_store(
+        db.clone(),
+        &config.clone().with_mode(OpenMode::ExistingOnly),
+    )
+    .unwrap();
     assert!(!reopened.info().created);
     assert_eq!(reopened.info().commit_id, golemdb_branch::CommitId::new(1));
     assert_eq!(reopened.info().genesis_id, genesis.genesis_id);
     assert_eq!(snapshot(&db), before);
-    let fresh = Records::new(Branches::new(db.clone(), hasher).unwrap());
+    let fresh = Records::new(
+        Branches::new(db.clone(), hasher, None, None).unwrap(),
+        pricing,
+    );
     assert_eq!(
-        fresh.get(ReadTarget::Head, KEY, None).unwrap().cells[b"price".as_slice()].as_i32(),
+        fresh
+            .get(ReadTarget::Head, KEY, None, Budget::Unlimited)
+            .result
+            .unwrap()
+            .cells[b"price".as_slice()]
+        .as_i32(),
         Some(50)
     );
     let tx = db.begin_read().unwrap();
@@ -165,6 +224,15 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
             .as_bytes(),
         Some([genesis.state_root, genesis.index_root].concat().as_slice())
     );
+    // `#roots` commits the hashes; the Roots table locates both commits' tries.
+    let roots = |commit| golemdb_branch::read_roots(&tx, golemdb_branch::CommitId::new(commit));
+    let first = roots(0).unwrap().unwrap();
+    assert_eq!(first.state.hash(&hasher), genesis.state_root);
+    assert_eq!(first.index, golemdb_merkle::RootRef::Empty);
+    assert_eq!(
+        roots(1).unwrap().unwrap().state.hash(&hasher),
+        reopened.info().state_root
+    );
     genesis
 }
 
@@ -181,24 +249,30 @@ fn memory_genesis_and_committed_reopen_support_both_hash_algorithms() {
 fn modes(db: impl Store + Clone + Send + Sync + 'static) {
     let config = config();
     assert!(matches!(
-        Database::from_store(db.clone(), &config.with_mode(OpenMode::ExistingOnly)),
+        Database::from_store(
+            db.clone(),
+            &config.clone().with_mode(OpenMode::ExistingOnly)
+        ),
         Err(OpenError::NotInitialized)
     ));
     assert!(db.begin_write().unwrap().is_empty().unwrap());
-    let opened = Database::from_store(db.clone(), &config.with_mode(OpenMode::CreateNew)).unwrap();
+    let opened =
+        Database::from_store(db.clone(), &config.clone().with_mode(OpenMode::CreateNew)).unwrap();
     assert!(opened.info().created);
     let before = snapshot(&db);
     assert!(matches!(
-        Database::from_store(db.clone(), &config.with_mode(OpenMode::CreateNew)),
+        Database::from_store(db.clone(), &config.clone().with_mode(OpenMode::CreateNew)),
         Err(OpenError::AlreadyInitialized)
     ));
-    for change in 0..4 {
-        let mut different = config;
+    for change in 0..6 {
+        let mut different = config.clone();
         match change {
             0 => different.genesis.hash_function = HashAlgorithm::Blake3,
             1 => different.genesis.cell_limits.max_cell_name_len += 1,
             2 => different.genesis.cell_limits.max_str_len += 1,
-            _ => different.genesis.cell_limits.max_bytes_len += 1,
+            3 => different.genesis.cell_limits.max_bytes_len += 1,
+            4 => different.genesis.record_limits.max_cells += 1,
+            _ => different.genesis.record_limits.max_indexed_cells += 1,
         }
         assert!(matches!(
             Database::from_store(db.clone(), &different),
@@ -218,7 +292,7 @@ fn partial_or_foreign_state_is_never_initialized() {
     for table in [
         SUPERBLOCK,
         tables::CELL,
-        tables::CELL_TRIE,
+        tables::CELL_TRIE.table(),
         Table("Foreign"),
     ] {
         for delete in [false, true] {
@@ -275,6 +349,8 @@ fn missing_or_malformed_metadata_and_reserved_cells_fail_without_repair() {
     }
     for key in [
         CellKey::new(system::PARAMS.id, reserved::MAX_STR_LEN),
+        CellKey::new(system::PARAMS.id, reserved::MAX_RECORD_CELLS),
+        CellKey::new(system::PARAMS.id, reserved::MAX_RECORD_INDEXED_CELLS),
         CellKey::new(system::ALLOC.id, reserved::NEXT_RECORD_ID),
         CellKey::new(system::PARAMS.id, reserved::KEY),
         CellKey::new(
@@ -290,7 +366,7 @@ fn missing_or_malformed_metadata_and_reserved_cells_fail_without_repair() {
                 tx.put(
                     tables::CELL,
                     &key.encode(),
-                    CellValue::from_u64(100).encoded_bytes(),
+                    CellValue::from_u64(101).encoded_bytes(),
                 )
                 .unwrap();
             } else {
@@ -325,10 +401,16 @@ fn unsupported_format_ids_and_missing_trie_roots_are_rejected() {
         ));
     }
     let db = MemoryStore::new();
-    let opened = Database::from_store(db.clone(), &config()).unwrap();
-    let root = opened.info().state_root;
+    Database::from_store(db.clone(), &config()).unwrap();
+    // The genesis state root is a branch stored at commit 0, at the empty route.
+    let trie = golemdb_merkle::Trie::<_, { golemdb_cells::CELL_TRIE_PATH_BYTES }>::new(
+        tables::CELL_TRIE,
+        golemdb_cells::CELL_BRANCH_DOMAIN,
+        &Keccak256Hasher,
+    );
+    let root = trie.node_key(0, &[]);
     let mut tx = db.begin_write().unwrap();
-    assert!(tx.delete(tables::CELL_TRIE, &root).unwrap());
+    assert!(tx.delete(tables::CELL_TRIE.table(), &root).unwrap());
     tx.commit().unwrap();
     assert!(Database::from_store(db, &config()).is_err());
 }
@@ -336,7 +418,7 @@ fn unsupported_format_ids_and_missing_trie_roots_are_rejected() {
 fn concurrent(db: impl Store + Clone + Send + Sync + 'static, mode: OpenMode, different: bool) {
     let mut a = config();
     a.mode = mode;
-    let mut b = a;
+    let mut b = a.clone();
     if different {
         b.genesis.cell_limits.max_str_len += 1;
     }
@@ -407,34 +489,38 @@ fn mdbx_genesis_matches_memory_and_reopens_from_disk_after_commit() {
         let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
         let branches = match hash {
             HashAlgorithm::Keccak256 => {
-                let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
-                let record = Records::new(branches.clone());
+                let branches = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
+                let record = Records::new(branches.clone(), pricing(&db, &cfg.genesis));
                 let branch = branches.begin().unwrap();
                 record
                     .create(
                         branch,
                         KEY,
-                        golemdb_record::RecordCells::from([(
+                        create_entries(golemdb_record::RecordCells::from([(
                             CellNameRef::raw(b"price").into(),
                             CellValue::from_i32(50),
-                        )]),
+                        )])),
+                        Budget::Unlimited,
                     )
+                    .result
                     .unwrap();
                 branches.commit(branch).unwrap()
             }
             HashAlgorithm::Blake3 => {
-                let branches = Branches::new(db.clone(), Blake3Hasher).unwrap();
-                let record = Records::new(branches.clone());
+                let branches = Branches::new(db.clone(), Blake3Hasher, None, None).unwrap();
+                let record = Records::new(branches.clone(), pricing(&db, &cfg.genesis));
                 let branch = branches.begin().unwrap();
                 record
                     .create(
                         branch,
                         KEY,
-                        golemdb_record::RecordCells::from([(
+                        create_entries(golemdb_record::RecordCells::from([(
                             CellNameRef::raw(b"price").into(),
                             CellValue::from_i32(50),
-                        )]),
+                        )])),
+                        Budget::Unlimited,
                     )
+                    .result
                     .unwrap();
                 branches.commit(branch).unwrap()
             }
@@ -491,8 +577,8 @@ fn mdbx_modes_limits_and_shared_environment_concurrent_opening() {
     cfg.genesis.cell_limits.max_str_len =
         db.max_key_size() as u32 - cfg.genesis.cell_limits.max_cell_name_len - 2;
     Database::from_store(db.clone(), &cfg).unwrap();
-    let branches = Branches::new(db, Keccak256Hasher).unwrap();
-    let records = Records::new(branches.clone());
+    let branches = Branches::new(db, Keccak256Hasher, None, None).unwrap();
+    let records = Records::new(branches.clone(), pricing(branches.store(), &cfg.genesis));
     let branch = branches.begin().unwrap();
     let name = "a".repeat(cfg.genesis.cell_limits.max_cell_name_len as usize);
     let value = CellValue::from_str(&"v".repeat(cfg.genesis.cell_limits.max_str_len as usize))
@@ -500,7 +586,10 @@ fn mdbx_modes_limits_and_shared_environment_concurrent_opening() {
         .unwrap();
     let cells =
         golemdb_record::RecordCells::from([(CellNameRef::raw(name.as_bytes()).into(), value)]);
-    records.create(branch, KEY, cells).unwrap();
+    records
+        .create(branch, KEY, create_entries(cells), Budget::Unlimited)
+        .result
+        .unwrap();
     branches.commit(branch).unwrap();
 }
 
@@ -528,4 +617,15 @@ fn mdbx_existing_empty_tables_prevent_initialization() {
             (!delete).then(|| b"value".to_vec())
         );
     }
+}
+
+fn create_entries(cells: golemdb_record::RecordCells) -> Vec<golemdb_record::CreateEntry> {
+    cells
+        .into_iter()
+        .map(|(name, value)| golemdb_record::CreateEntry {
+            name,
+            kind: value.kind(),
+            value,
+        })
+        .collect()
 }

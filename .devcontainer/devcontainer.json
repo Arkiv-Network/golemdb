@@ -1,6 +1,6 @@
 {
   // Optional. Nothing in the repo depends on it; native setups keep working.
-  "name": "golem-db",
+  "name": "golemdb",
   "build": {
     "dockerfile": "Dockerfile",
     // The repo root, so the Dockerfile can read rust-toolchain.toml.
@@ -12,11 +12,11 @@
   // bind-mounted workspace: file I/O through the macOS bind mount is what makes
   // container builds slow. The volumes survive container rebuilds.
   "mounts": [
-    "source=golem-db-target,target=${containerWorkspaceFolder}/target,type=volume",
-    "source=golem-db-cargo-registry,target=/usr/local/cargo/registry,type=volume",
-    "source=golem-db-cargo-git,target=/usr/local/cargo/git,type=volume",
+    "source=golemdb-target,target=${containerWorkspaceFolder}/target,type=volume",
+    "source=golemdb-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    "source=golemdb-cargo-git,target=/usr/local/cargo/git,type=volume",
     // Claude Code's login, settings and history, so a rebuild keeps them.
-    "source=golem-db-claude-config,target=/home/vscode/.claude,type=volume"
+    "source=golemdb-claude-config,target=/home/vscode/.claude,type=volume"
   ],
   "containerEnv": {
     // Keep ~/.claude.json inside the volume too, not loose in the home directory.

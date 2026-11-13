@@ -9,6 +9,8 @@ use std::{
 use golemdb_api::*;
 use golemdb_storage::{MemoryStore, StorageError, Store};
 
+/// Clones share the wrapped store and the switches.
+#[derive(Clone)]
 struct FailingStore<S> {
     database: S,
     fail_reads: Arc<AtomicBool>,
@@ -67,7 +69,7 @@ fn diagnostic(error: ApiError) {
     panic!("the backend diagnostic must survive the facade's error conversion");
 }
 
-fn failure_contract(database: impl Store + Send + Sync + 'static) {
+fn failure_contract(database: impl Store + Clone + Send + Sync + 'static) {
     let fail_reads = Arc::new(AtomicBool::new(false));
     let fail_writes = Arc::new(AtomicBool::new(false));
     let config = OpenConfig::new(Genesis::new(
@@ -77,6 +79,12 @@ fn failure_contract(database: impl Store + Send + Sync + 'static) {
             max_str_len: 64,
             max_bytes_len: 128,
         },
+        golemdb_api::RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
+        None,
+        golemdb_api::PricingConfig::zero(),
     ));
     let db = Database::from_store(
         FailingStore {
@@ -91,27 +99,46 @@ fn failure_contract(database: impl Store + Send + Sync + 'static) {
     let branch = db.begin().unwrap();
     db.create(
         branch,
-        RecordOp::create(key)
-            .attribute("price", CellValue::from_i32(50))
-            .unwrap(),
+        RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+            .attribute("price", CellValue::from_i32(50)),
     )
+    .into_result()
     .unwrap();
     let pending = db
-        .get(ReadTarget::Branch(branch), RecordOp::get(key))
+        .get(
+            ReadTarget::Branch(branch),
+            RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
         .unwrap();
     let info = db.branch_info(branch).unwrap();
     fail_reads.store(true, Ordering::SeqCst);
-    diagnostic(db.get(ReadTarget::Head, RecordOp::get(key)).unwrap_err());
     diagnostic(
-        db.patch(branch, RecordOp::patch(key).remove("price").unwrap())
-            .unwrap_err(),
+        db.get(
+            ReadTarget::Head,
+            RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX)),
+        )
+        .into_result()
+        .unwrap_err(),
+    );
+    diagnostic(
+        db.patch(
+            branch,
+            RecordOp::patch(key, golemdb_api::Budget::Limited(u64::MAX)).remove("price"),
+        )
+        .into_result()
+        .unwrap_err(),
     );
     diagnostic(db.head().unwrap_err());
     fail_reads.store(false, Ordering::SeqCst);
     assert_eq!(db.branch_info(branch).unwrap(), info);
     assert_eq!(
-        db.get(ReadTarget::Branch(branch), RecordOp::get(key))
-            .unwrap(),
+        db.get(
+            ReadTarget::Branch(branch),
+            RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))
+        )
+        .into_result()
+        .unwrap(),
         pending
     );
 
@@ -123,7 +150,12 @@ fn failure_contract(database: impl Store + Send + Sync + 'static) {
     fail_writes.store(false, Ordering::SeqCst);
     assert_eq!(db.commit(branch).unwrap(), sealed.commit_id);
     assert_eq!(
-        db.get(ReadTarget::Head, RecordOp::get(key)).unwrap(),
+        db.get(
+            ReadTarget::Head,
+            RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))
+        )
+        .into_result()
+        .unwrap(),
         pending
     );
 }
@@ -158,6 +190,12 @@ fn full_mdbx_store_preserves_head_tables_and_sealed_branch() {
             max_str_len: 64,
             max_bytes_len: 2 * 1024 * 1024,
         },
+        golemdb_api::RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
+        None,
+        golemdb_api::PricingConfig::zero(),
     );
     let db = Database::from_store(store.clone(), &OpenConfig::new(genesis)).unwrap();
     let before = super::opening::snapshot(&store);
@@ -165,10 +203,10 @@ fn full_mdbx_store_preserves_head_tables_and_sealed_branch() {
     let branch = db.begin().unwrap();
     db.create(
         branch,
-        RecordOp::create(key)
-            .field("payload", CellValue::from_bytes(&vec![1; 2 * 1024 * 1024]))
-            .unwrap(),
+        RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+            .field("payload", CellValue::from_bytes(&vec![1; 2 * 1024 * 1024])),
     )
+    .into_result()
     .unwrap();
     let sealed = db.seal(branch).unwrap();
     for _ in 0..2 {
@@ -178,16 +216,24 @@ fn full_mdbx_store_preserves_head_tables_and_sealed_branch() {
         assert_eq!(db.seal(branch).unwrap(), sealed);
         assert!(db.branch_info(branch).unwrap().sealed);
         assert_eq!(
-            db.get(ReadTarget::Branch(branch), RecordOp::get(key))
-                .unwrap()
-                .cells[b"payload".as_slice()]
+            db.get(
+                ReadTarget::Branch(branch),
+                RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result()
+            .unwrap()
+            .cells[b"payload".as_slice()]
             .as_bytes()
             .unwrap()
             .len(),
             2 * 1024 * 1024
         );
         assert!(matches!(
-            db.get(ReadTarget::Head, RecordOp::get(key)),
+            db.get(
+                ReadTarget::Head,
+                RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
             Err(ApiError::NotFound)
         ));
     }
@@ -195,10 +241,10 @@ fn full_mdbx_store_preserves_head_tables_and_sealed_branch() {
     let branch = db.begin().unwrap();
     db.create(
         branch,
-        RecordOp::create(key)
-            .field("payload", CellValue::from_bytes(b"small"))
-            .unwrap(),
+        RecordOp::create(key, golemdb_api::Budget::Limited(u64::MAX))
+            .field("payload", CellValue::from_bytes(b"small")),
     )
+    .into_result()
     .unwrap();
     assert_eq!(db.commit(branch).unwrap(), CommitId::new(1));
 }

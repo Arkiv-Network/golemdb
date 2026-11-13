@@ -1,4 +1,4 @@
-# golemdb
+# GolemDB
 
 A Cargo workspace for GolemDB. Crates live under `crates/`. Production crates
 are registered as workspace members and `[workspace.dependencies]` path entries
@@ -10,6 +10,9 @@ The unpublished integration-test package is a workspace member only.
 - `docs/` - project-wide design and API documentation
 - `crates/cells` (package `golemdb-cells`) — the wire format for "Cells",
   GolemDB's typed value encoding
+- `crates/immutable-data` (package `golemdb-immutable-data`) — typed immutable rows,
+  schemas, projections, genesis declarations, NippyJar/memory shard storage,
+  physical append/read/truncate and transactional key/commit-range mappings ([storage contract](crates/immutable-data/README.md))
 - `crates/storage` (package `golemdb-storage`) — transactional ordered key/value
   traits, bidirectional cursors, range scans and an in-memory implementation
 - `crates/storage-mdbx` (package `golemdb-storage-mdbx`) — MDBX implementation of
@@ -21,7 +24,9 @@ The unpublished integration-test package is a workspace member only.
 - `crates/branch` (package `golemdb-branch`) — head-validated branch IDs and guarded cell
   read/write views, encoded-key prefix scans, atomic writes, checkpoints and undo;
   seal buffers cell/index updates and roots; commit atomically persists them and
-  advances head, with history deferred
+  advances head; independent immutable-data staging supports append/truncate
+  before and after seal, with coordinated file/KV publication and crash recovery;
+  live-state history remains deferred
 - `crates/record` (package `golemdb-record`) — caller-keyed record CRUD, allocation,
   identity and bindings; branch work-in-progress and committed-head reads
 - `crates/api` (package `golemdb-api`) — one public `Api` trait implemented by the
@@ -33,11 +38,11 @@ The unpublished integration-test package is a workspace member only.
 
 ## Documentation
 
-- [Technical context](agent.md): crate boundaries, schema, encoding invariants,
-  operation lifecycle, and extension contracts for contributors and agents.
-- [Technical design](docs/golem-db-design.md): storage architecture, data model,
+- [API](docs/golemdb-api.md): the caller-facing interface and operation semantics.
+- [Technical design](docs/golemdb-design.md): storage architecture, data model,
   commitments, history, and query design.
-- [API](docs/golem-db-api.md): the caller-facing interface and operation semantics.
+- [Metering](docs/golemdb-metering.md): metering specification.
+- [Arkiv tokenomics](docs/arkiv-tokenomics.md): Arkiv fees, storage pricing etc based on GolemDB metering.
 
 ## Adding a crate
 

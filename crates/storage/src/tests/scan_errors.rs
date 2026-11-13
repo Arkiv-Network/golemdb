@@ -19,6 +19,16 @@ impl ReadCursor for FailingCursor {
             ))
         }
     }
+
+    fn with_next<Output>(
+        &mut self,
+        inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> Output,
+    ) -> crate::Result<Output> {
+        let row = self.next()?;
+        Ok(inspect(
+            row.as_ref().map(|(k, v)| (k.as_slice(), v.as_slice())),
+        ))
+    }
 }
 
 impl ReadTransaction for FailingTransaction {
@@ -28,6 +38,17 @@ impl ReadTransaction for FailingTransaction {
     }
     fn cursor(&self, _: Table, _: &[u8]) -> Result<Self::Cursor<'_>> {
         Ok(FailingCursor(self.0.clone()))
+    }
+
+    fn with_value<Output>(
+        &self,
+        table: crate::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> crate::Result<Output> {
+        let _ = (table, key, inspect);
+
+        unreachable!()
     }
 }
 

@@ -2,7 +2,7 @@ use golemdb_cells::{
     CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, CellsUpdate,
     system, tables,
 };
-use golemdb_index::{Index, IndexTerm, IndexUpdate, PostingChange, TermError};
+use golemdb_index::{Index, IndexTerm, IndexUpdate, PostingChange};
 use golemdb_merkle::{Hash, HashProvider};
 use golemdb_storage::ReadTransaction;
 
@@ -11,6 +11,7 @@ use crate::{
     buffer::{Buffered, Writes},
     head::read_head_state,
     overlay::CellOverlay,
+    roots::head_roots,
 };
 
 /// Computed next state, retained in memory until commit or discard.
@@ -39,11 +40,14 @@ pub(crate) fn compute(
         .checked_add(1)
         .map(crate::CommitId::new)
         .ok_or(BranchError::CommitNumberExhausted)?;
+    // New trie rows are keyed by this commit.
+    let commit = commit_id.get();
     let cells = Cells::new(hasher);
     let index = Index::new(hasher);
-    // Reopen against the committed origin, before applying ANY staged cell.
-    let cell_root = cells.reopen(origin, head.state_root)?;
-    let index_root = index.reopen(origin, head.index_root)?;
+    // Validate against the committed origin, before applying ANY staged cell.
+    let roots = head_roots(origin, &head, hasher)?;
+    cells.validate_root(origin, roots.state)?;
+    index.validate_root(origin, roots.index)?;
     let roots_key = CellKey::new(
         system::ROOTS.id,
         CellNameRef::raw(&head.commit_id.get().to_be_bytes()),
@@ -64,7 +68,7 @@ pub(crate) fn compute(
         value: roots_value,
     }]);
     let mut tx = Buffered::new(origin);
-    let cells_update = cells.apply(&mut tx, cell_root, changes)?;
+    let cells_update = cells.apply(&mut tx, commit, roots.state, changes)?;
     let mut postings = Vec::new();
     for change in &cells_update.changed_cells {
         let before = term(&change.key, change.before.as_ref())?;
@@ -80,7 +84,7 @@ pub(crate) fn compute(
             postings.push(PostingChange::Add { term, record_id });
         }
     }
-    let index_update = index.apply(&mut tx, index_root, postings)?;
+    let index_update = index.apply(&mut tx, commit, roots.index, postings)?;
     Ok(SealedCommit {
         commit_id,
         state_root: cells_update.root.hash(hasher),
@@ -96,7 +100,8 @@ fn term(key: &CellKey, value: Option<&CellValue>) -> Result<Option<IndexTerm>> {
         return Ok(None);
     };
     // Binary reserved field names never reach UTF-8/name validation.
-    let name = key.name();
-    let name = std::str::from_utf8(name.as_bytes()).map_err(|_| TermError::InvalidName)?;
-    Ok(IndexTerm::from_cell(name, value.as_view())?)
+    Ok(Some(IndexTerm::from_cell_name(
+        key.name(),
+        value.as_view(),
+    )?))
 }

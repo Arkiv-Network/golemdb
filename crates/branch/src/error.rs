@@ -1,6 +1,9 @@
-/// Failures admitting branch operations, reading cells, or moving through frames.
+/// Failures admitting branch operations, accessing cells or immutable staging,
+/// moving through frames, or publishing a branch.
 #[derive(Debug, thiserror::Error)]
 pub enum BranchError {
+    #[error("invalid branch scan state: {0}")]
+    InvalidScanState(&'static str),
     #[error("branch ID is unknown, discarded, or no longer over the head")]
     HandleInvalid,
     #[error("branch origin is no longer the head; commit lost the publication race")]
@@ -21,6 +24,18 @@ pub enum BranchError {
     MissingHead,
     #[error("Superblock/head must be 72 bytes, got {actual}")]
     InvalidHead { actual: usize },
+    #[error("no Roots row for head commit {0}")]
+    MissingRoots(u64),
+    #[error("Roots row for commit {0} is malformed or does not match the head")]
+    InvalidRoots(u64),
+    #[error("malformed Roots key {0:02x?}")]
+    InvalidRootsKey(Vec<u8>),
+    #[error("commit {commit} is not newer than the latest published commit {latest}")]
+    CommitNotNewer { commit: u64, latest: u64 },
+    #[error("database already has a head; genesis is published once")]
+    HeadExists,
+    #[error(transparent)]
+    Pruning(#[from] golemdb_pruning::PruningError),
     #[error("branch ID space exhausted")]
     BranchNumberExhausted,
     #[error("branch {0} lock poisoned")]
@@ -33,6 +48,18 @@ pub enum BranchError {
     Value(#[from] golemdb_cells::CellValueParseError),
     #[error("no frame remains to roll back")]
     NoFrameToRollback,
+    #[error(transparent)]
+    ImmutableData(#[from] golemdb_immutable_data::ImmutableDataStorageError),
+    #[error(
+        "immutable publication outcome or rollback is unresolved; reopen and recover before continuing"
+    )]
+    RecoveryRequired,
+    #[error("immutable publication failed ({publication}); recovery also failed ({recovery})")]
+    PublicationRecovery {
+        publication: Box<BranchError>,
+        #[source]
+        recovery: Box<BranchError>,
+    },
 }
 
 /// Distinguishes handle/head admission failures from a callback's own error.

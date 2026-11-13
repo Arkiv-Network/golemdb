@@ -1,15 +1,21 @@
+use crate::Metered;
 use crate::open::OpenedStore;
 use std::sync::Arc;
 
-use golemdb_branch::Branches;
+use golemdb_branch::{Branches, read_head};
+use golemdb_immutable_data::{ImmutableDataReader, ImmutableDataStorage};
 use golemdb_merkle::{Blake3Hasher, HashProvider, Keccak256Hasher};
-use golemdb_record::Records;
+use golemdb_metering::{PricingProvider, PricingSnapshot};
+use golemdb_pruning::PruningConfig;
+use golemdb_query::{FetchAndSort, Queries};
+use golemdb_record::{Records, WritePricing};
 use golemdb_storage::Store;
 
 use crate::{
-    Api, ApiError, BranchId, BranchInfo, CommitId, Genesis, HashAlgorithm, ImmutableDataAddress,
-    ImmutableDataKey, ImmutableDataOrdinal, ImmutableDataRow, OpenConfig, OpenInfo, OpenResult,
-    ReadTarget, Record, RecordKey, RecordOp, Result, SealInfo, op,
+    Api, ApiError, BranchId, BranchInfo, CommitId, CountOp, Genesis, HashAlgorithm,
+    ImmutableDataAddress, ImmutableDataKey, ImmutableDataOrdinal, ImmutableDataReadOptions,
+    ImmutableDataRow, ImmutableDataSchema, MeteringModelInfo, ModelWeights, OpenConfig, OpenInfo,
+    OpenResult, QueryOp, QueryPage, ReadTarget, Record, RecordKey, RecordOp, Result, SealInfo, op,
 };
 
 /// Cloneable public database handle. Clones share one engine and branch registry;
@@ -28,25 +34,38 @@ pub struct Database {
 
 impl Database {
     /// Initialize a fresh memory store. Clone the handle to share its branches.
+    /// For host code declarations, use `from_store(MemoryStore::new(), config)`.
     pub fn open_memory(genesis: &Genesis) -> OpenResult<Self> {
-        Self::from_store(
+        crate::open::open_store(
             golemdb_storage::MemoryStore::new(),
-            &OpenConfig::new(*genesis),
-        )
+            &OpenConfig::new(genesis.clone()),
+        )?
+        .into_database(None)
     }
 
     /// Initialize or validate a caller-supplied store. Separate calls create
-    /// separate branch registries, even over shared storage.
-    pub fn from_store<S: Store + Send + Sync + 'static>(
+    /// separate branch registries, even over shared storage. The engine keeps
+    /// clones of `store`, so its clones must share state, as the clones of
+    /// `MemoryStore` and `MdbxStore` do. With immutable segments, supply
+    /// `OpenConfig::with_immutable_data_directory` and use one engine (or its
+    /// clones) for publication; the directory is exclusively owned.
+    pub fn from_store<S: Store + Clone + Send + Sync + 'static>(
         store: S,
         config: &OpenConfig,
     ) -> OpenResult<Self> {
-        crate::open::open_store(store, config)?.into_database()
+        if config.genesis.immutable_data.is_some() && config.immutable_data_directory.is_none() {
+            return Err(crate::OpenError::InvalidConfig(
+                "from_store requires an immutable-data directory for declared segments".into(),
+            ));
+        }
+        crate::open::open_store(store, config)?
+            .into_database(config.immutable_data_directory.clone())
     }
 
     /// Open MDBX storage with default capacity settings. Clone a live handle to
     /// share its environment; close all handles before independently reopening
-    /// the same path.
+    /// the same path. Immutable files default to `<path>/immutable-data` unless
+    /// `OpenConfig` supplies a different directory.
     pub fn open(path: impl AsRef<std::path::Path>, config: &OpenConfig) -> OpenResult<Self> {
         Self::open_with_options(path, config, crate::MdbxOptions::default())
     }
@@ -57,7 +76,11 @@ impl Database {
         config: &OpenConfig,
         options: crate::MdbxOptions,
     ) -> OpenResult<Self> {
-        crate::open::open_mdbx(path, config, options)?.into_database()
+        let directory = config
+            .immutable_data_directory
+            .clone()
+            .unwrap_or_else(|| path.as_ref().join("immutable-data"));
+        crate::open::open_mdbx(path, config, options)?.into_database(Some(directory))
     }
 
     /// Immutable deployment configuration validated at opening.
@@ -71,15 +94,44 @@ impl Database {
         &self.info
     }
 
-    pub(crate) fn from_opened<S: Store + Send + Sync + 'static>(
+    pub(crate) fn from_opened<S: Store + Clone + Send + Sync + 'static>(
         opened: OpenedStore<S>,
+        immutable_data_directory: Option<std::path::PathBuf>,
     ) -> OpenResult<Self> {
-        let genesis = *opened.genesis();
+        let genesis = opened.genesis().clone();
         let info = *opened.info();
-        let store = opened.into_store();
+        let pruning = opened.pruning();
+        let (store, pricing_provider) = opened.into_parts();
+        let immutable_data = genesis
+            .immutable_data
+            .as_ref()
+            .map(|config| match immutable_data_directory {
+                Some(directory) => {
+                    ImmutableDataStorage::open(config.clone(), info.genesis_id, directory)
+                }
+                None => ImmutableDataStorage::in_memory(config.clone(), info.genesis_id),
+            })
+            .transpose()?;
+        let pricing = WritePricing::new(
+            Arc::new(pricing_provider),
+            genesis.cell_limits,
+            genesis.record_limits,
+        );
         let inner: Arc<dyn Api + Send + Sync> = match genesis.hash_function {
-            HashAlgorithm::Keccak256 => Arc::new(Inner::new(store, Keccak256Hasher)?),
-            HashAlgorithm::Blake3 => Arc::new(Inner::new(store, Blake3Hasher)?),
+            HashAlgorithm::Keccak256 => Arc::new(Inner::new(
+                store,
+                Keccak256Hasher,
+                immutable_data,
+                pricing,
+                pruning,
+            )?),
+            HashAlgorithm::Blake3 => Arc::new(Inner::new(
+                store,
+                Blake3Hasher,
+                immutable_data,
+                pricing,
+                pruning,
+            )?),
         };
         Ok(Self {
             inner,
@@ -90,17 +142,33 @@ impl Database {
 }
 
 impl Api for Database {
-    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Result<RecordKey> {
+    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Metered<RecordKey> {
         self.inner.create(branch, operation)
     }
-    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Result<Record> {
+    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Metered<Record> {
         self.inner.get(target, operation)
     }
-    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Result<()> {
+    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Metered<()> {
         self.inner.patch(branch, operation)
     }
-    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()> {
+    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Metered<()> {
         self.inner.delete(branch, operation)
+    }
+    fn query(&self, commit_id: Option<CommitId>, operation: QueryOp) -> Metered<QueryPage> {
+        self.inner.query(commit_id, operation)
+    }
+    fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Metered<u64> {
+        self.inner.count(commit_id, operation)
+    }
+    fn metering_model(&self, commit_id: Option<CommitId>) -> Result<MeteringModelInfo> {
+        self.inner.metering_model(commit_id)
+    }
+    fn model_weights(
+        &self,
+        commit_id: Option<CommitId>,
+        version: Option<u64>,
+    ) -> Result<ModelWeights> {
+        self.inner.model_weights(commit_id, version)
     }
     fn head(&self) -> Result<CommitId> {
         self.inner.head()
@@ -127,6 +195,9 @@ impl Api for Database {
         self.inner.discard(branch)
     }
 
+    fn immutable_data_schema(&self, segment: &str) -> Result<ImmutableDataSchema> {
+        self.inner.immutable_data_schema(segment)
+    }
     fn immutable_data_append(
         &self,
         branch: BranchId,
@@ -136,62 +207,167 @@ impl Api for Database {
     ) -> Result<ImmutableDataOrdinal> {
         self.inner.immutable_data_append(branch, segment, key, row)
     }
+    fn immutable_data_truncate(
+        &self,
+        branch: BranchId,
+        segment: &str,
+        from_ordinal: ImmutableDataOrdinal,
+    ) -> Result<()> {
+        self.inner
+            .immutable_data_truncate(branch, segment, from_ordinal)
+    }
     fn immutable_data_get(
         &self,
         segment: &str,
         address: ImmutableDataAddress,
+        options: &ImmutableDataReadOptions,
     ) -> Result<ImmutableDataRow> {
-        self.inner.immutable_data_get(segment, address)
-    }
-    fn immutable_data_range_of(
-        &self,
-        segment: &str,
-        commit: CommitId,
-    ) -> Result<std::ops::Range<ImmutableDataOrdinal>> {
-        self.inner.immutable_data_range_of(segment, commit)
+        self.inner.immutable_data_get(segment, address, options)
     }
     fn immutable_data_rows_of(
         &self,
         segment: &str,
         commit: CommitId,
+        options: &ImmutableDataReadOptions,
     ) -> Result<Vec<ImmutableDataRow>> {
-        self.inner.immutable_data_rows_of(segment, commit)
+        self.inner.immutable_data_rows_of(segment, commit, options)
     }
 }
 
-/// Both layers reference the same branch registry. Business rules, locking, and
-/// transaction boundaries remain in record and branch, not in this adapter.
+/// The most `And` / `Or` levels a query's filter may nest. Hardcoded for now:
+/// it will be read from genesis (`#maxQueryDepth`) in the scope of issues #48
+/// and #49.
+const MAX_QUERY_DEPTH: u32 = 64;
+
+/// The most records a query returns: a query with no limit that matches more
+/// returns the first ones in query order, and a larger limit fails as
+/// `LimitExceeded`. Hardcoded for now: it will be read from genesis
+/// (`#maxQueryLimit`) in the scope of issues #48 and #49.
+const MAX_QUERY_LIMIT: u32 = 100;
+
+/// The most keys a query sorts by: more fail as `LimitExceeded`. Hardcoded
+/// for now: it will be read from genesis (`#maxSortKeys`) in the scope of
+/// issues #48 and #49.
+const MAX_SORT_KEYS: u32 = 4;
+
+/// All layers share one store, through clones of its handle, and record and
+/// branch share one branch registry. Immutable reads use the store and reader
+/// directly, with head and metadata taken from the same committed snapshot.
+/// Branches own the immutable writer and coordinate publication and recovery.
 struct Inner<S, H> {
+    store: S,
+    immutable_reader: Option<ImmutableDataReader>,
     branches: Branches<S, H>,
     records: Records<S, H>,
+    queries: Queries<S, H>,
+    pricing: Arc<PricingProvider>,
+}
+
+impl<S: Store + Clone, H: HashProvider + Clone> Inner<S, H> {
+    fn new(
+        store: S,
+        hasher: H,
+        immutable_data: Option<ImmutableDataStorage>,
+        pricing: WritePricing,
+        pruning: Option<PruningConfig>,
+    ) -> OpenResult<Self> {
+        let immutable_reader = immutable_data.as_ref().map(ImmutableDataStorage::reader);
+        // Recover before exposing the reader through the completed database handle.
+        let branches = Branches::new(store.clone(), hasher.clone(), immutable_data, pruning)?;
+        let pricing_provider = pricing.provider.clone();
+        let records = Records::new(branches.clone(), pricing);
+        // Every node of a deployment must sort the same way, since the
+        // strategy decides what a sorted query reads, and so its cost.
+        // Hardcoded for now, as the caps are.
+        let queries = Queries::new(
+            store.clone(),
+            hasher,
+            Some(MAX_QUERY_DEPTH),
+            Some(MAX_QUERY_LIMIT),
+            Some(MAX_SORT_KEYS),
+            FetchAndSort,
+        );
+        Ok(Self {
+            store,
+            immutable_reader,
+            branches,
+            records,
+            queries,
+            pricing: pricing_provider,
+        })
+    }
 }
 
 impl<S: Store, H: HashProvider> Inner<S, H> {
-    fn new(store: S, hasher: H) -> OpenResult<Self> {
-        let branches = Branches::new(store, hasher)?;
-        let records = Records::new(branches.clone());
-        Ok(Self { branches, records })
+    fn pricing_snapshot(&self, commit_id: Option<CommitId>) -> Result<PricingSnapshot> {
+        // Resolve selection once. Ordinary commits keep the initial schedule;
+        // the call's commit changes without reloading or copying its weights.
+        let tx = self.store.begin_read().map_err(ApiError::internal)?;
+        let head = read_head(&tx)?;
+        if let Some(requested) = commit_id
+            && requested != head
+        {
+            return Err(ApiError::CommitUnavailable { requested, head });
+        }
+        self.pricing.snapshot(head.get()).map_err(Into::into)
+    }
+    fn immutable_reader(&self) -> Result<&ImmutableDataReader> {
+        self.immutable_reader.as_ref().ok_or(ApiError::NotFound)
     }
 }
 
 impl<S: Store, H: HashProvider> Api for Inner<S, H> {
-    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Result<RecordKey> {
-        let (key, cells) = operation.into_create();
-        self.records.create(branch, key, cells).map_err(Into::into)
+    fn create(&self, branch: BranchId, operation: RecordOp<op::Create>) -> Metered<RecordKey> {
+        let (key, budget, entries) = operation.into_create();
+        self.records.create(branch, key, entries, budget).into()
     }
-    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Result<Record> {
+    fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Metered<Record> {
         self.records
-            .get(target, operation.record_key(), operation.names())
-            .map_err(Into::into)
+            .get(
+                target,
+                operation.record_key(),
+                operation.names(),
+                operation.budget(),
+            )
+            .into()
     }
-    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Result<()> {
-        let (key, patch) = operation.into_patch();
-        self.records.patch(branch, key, patch).map_err(Into::into)
+    fn patch(&self, branch: BranchId, operation: RecordOp<op::Patch>) -> Metered<()> {
+        let (key, budget, entries) = operation.into_patch();
+        self.records.patch(branch, key, entries, budget).into()
     }
-    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Result<()> {
+    fn delete(&self, branch: BranchId, operation: RecordOp<op::Delete>) -> Metered<()> {
         self.records
-            .delete(branch, operation.record_key())
-            .map_err(Into::into)
+            .delete(branch, operation.record_key(), operation.budget())
+            .into()
+    }
+    fn query(&self, commit: Option<CommitId>, operation: QueryOp) -> Metered<QueryPage> {
+        let (request, budget) = operation.into_parts();
+        self.queries.query_report(commit, request, budget).into()
+    }
+    fn count(&self, commit: Option<CommitId>, operation: CountOp) -> Metered<u64> {
+        let (filter, budget) = operation.into_parts();
+        self.queries.count_report(commit, filter, budget).into()
+    }
+    fn metering_model(&self, commit_id: Option<CommitId>) -> Result<MeteringModelInfo> {
+        let snapshot = self.pricing_snapshot(commit_id)?;
+        Ok(MeteringModelInfo {
+            commit_id: CommitId::new(snapshot.commit_id),
+            active: snapshot.model.metadata.into(),
+            pending: self.pricing.pending().map(Into::into),
+        })
+    }
+    fn model_weights(
+        &self,
+        commit_id: Option<CommitId>,
+        version: Option<u64>,
+    ) -> Result<ModelWeights> {
+        let snapshot = self.pricing_snapshot(commit_id)?;
+        let version = version.unwrap_or(snapshot.model.metadata.version);
+        Ok(ModelWeights {
+            commit_id: CommitId::new(snapshot.commit_id),
+            version,
+            weights: self.pricing.model_weights(Some(version))?,
+        })
     }
     fn head(&self) -> Result<CommitId> {
         self.branches.head().map_err(Into::into)
@@ -221,42 +397,66 @@ impl<S: Store, H: HashProvider> Api for Inner<S, H> {
         self.branches.discard(branch).map_err(Into::into)
     }
 
+    fn immutable_data_schema(&self, segment: &str) -> Result<ImmutableDataSchema> {
+        self.immutable_reader()?
+            .schema(segment)
+            .cloned()
+            .map_err(Into::into)
+    }
     fn immutable_data_append(
         &self,
-        _branch: BranchId,
-        _segment: &str,
-        _key: Option<ImmutableDataKey>,
-        _row: ImmutableDataRow,
+        branch: BranchId,
+        segment: &str,
+        key: Option<ImmutableDataKey>,
+        row: ImmutableDataRow,
     ) -> Result<ImmutableDataOrdinal> {
-        Err(ApiError::NotImplemented {
-            operation: "immutable_data_append",
-        })
+        self.branches
+            .immutable_data_append(branch, segment, key, row)
+            .map_err(Into::into)
+    }
+    fn immutable_data_truncate(
+        &self,
+        branch: BranchId,
+        segment: &str,
+        from_ordinal: ImmutableDataOrdinal,
+    ) -> Result<()> {
+        self.branches
+            .immutable_data_truncate(branch, segment, from_ordinal)
+            .map_err(|error| {
+                // This operation's bounds error is caller input. Invalid physical
+                // writer state during publication must remain an internal error.
+                match error {
+                    golemdb_branch::BranchError::ImmutableData(
+                        golemdb_immutable_data::ImmutableDataStorageError::Invalid(message),
+                    ) => ApiError::invalid_argument(message),
+                    error => error.into(),
+                }
+            })
     }
     fn immutable_data_get(
         &self,
-        _segment: &str,
-        _address: ImmutableDataAddress,
+        segment: &str,
+        address: ImmutableDataAddress,
+        options: &ImmutableDataReadOptions,
     ) -> Result<ImmutableDataRow> {
-        Err(ApiError::NotImplemented {
-            operation: "immutable_data_get",
-        })
-    }
-    fn immutable_data_range_of(
-        &self,
-        _segment: &str,
-        _commit: CommitId,
-    ) -> Result<std::ops::Range<ImmutableDataOrdinal>> {
-        Err(ApiError::NotImplemented {
-            operation: "immutable_data_range_of",
-        })
+        let reader = self.immutable_reader()?;
+        let tx = self.store.begin_read().map_err(ApiError::internal)?;
+        let head = read_head(&tx)?;
+        reader
+            .get(&tx, head.get(), segment, address, options)
+            .map_err(Into::into)
     }
     fn immutable_data_rows_of(
         &self,
-        _segment: &str,
-        _commit: CommitId,
+        segment: &str,
+        commit: CommitId,
+        options: &ImmutableDataReadOptions,
     ) -> Result<Vec<ImmutableDataRow>> {
-        Err(ApiError::NotImplemented {
-            operation: "immutable_data_rows_of",
-        })
+        let reader = self.immutable_reader()?;
+        let tx = self.store.begin_read().map_err(ApiError::internal)?;
+        let head = read_head(&tx)?;
+        reader
+            .rows_of(&tx, head.get(), segment, commit.get(), options)
+            .map_err(Into::into)
     }
 }

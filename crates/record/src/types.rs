@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use golemdb_branch::{BranchId, CommitId};
-use golemdb_cells::{CellName, CellValue};
+use golemdb_cells::{CellKind, CellName, CellValue};
 
 /// Caller-assigned logical identity, independent of the internal record ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,13 +26,41 @@ pub enum ReadTarget {
 }
 
 pub type RecordCells = BTreeMap<CellName, CellValue>;
-/// Caller-requested edits to one record, keyed by within-record cell names.
+/// Prepared edits keyed by cell name, produced by execution-time admission.
+/// Callers supply ordered [`PatchEntry`] values to [`crate::Records::patch`].
 pub type RecordPatch = BTreeMap<CellName, CellPatch>;
 
-/// One edit in a record patch, before resolving the record's internal ID.
+/// One unvalidated create entry. `kind` is the requested kind; `value` retains
+/// its original encoding until admission. Names may contain arbitrary bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateEntry {
+    pub name: CellName,
+    pub value: CellValue,
+    pub kind: CellKind,
+}
+
+/// One unvalidated patch entry, preserved in caller order, including duplicates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchEntry {
+    pub name: CellName,
+    pub change: PatchChange,
+}
+
+/// Requested patch action before admission or stored-kind resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatchChange {
+    Write { value: CellValue, kind: CellKind },
+    Set(CellValue),
+    Remove,
+}
+
+/// One prepared edit, before resolving the record's internal ID and stored kind.
 /// Storage-level mutations use `golemdb_cells::CellChange` with complete keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CellPatch {
+    /// Explicitly write both value and kind, creating a missing cell.
+    Write(CellValue),
+    /// Replace an existing value, preserving its stored kind.
     Set(CellValue),
     Remove,
 }

@@ -35,6 +35,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "arraydeque"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -51,6 +57,15 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "bindgen"
@@ -144,6 +159,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f360145194ee8e21db5ee7f3fcd4fe52210864c75c985dae33218202c8bbe040"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex 2.0.1",
 ]
 
@@ -506,14 +523,18 @@ version = "0.1.0"
 dependencies = [
  "golemdb-branch",
  "golemdb-cells",
+ "golemdb-immutable-data",
  "golemdb-index",
  "golemdb-merkle",
+ "golemdb-metering",
+ "golemdb-pruning",
+ "golemdb-query",
  "golemdb-record",
  "golemdb-storage",
  "golemdb-storage-mdbx",
  "serde",
  "serde-saphyr",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -521,11 +542,15 @@ name = "golemdb-branch"
 version = "0.1.0"
 dependencies = [
  "golemdb-cells",
+ "golemdb-immutable-data",
  "golemdb-index",
  "golemdb-merkle",
+ "golemdb-pruning",
  "golemdb-storage",
+ "golemdb-storage-mdbx",
  "proptest",
- "thiserror 1.0.69",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -537,7 +562,20 @@ dependencies = [
  "golemdb-storage",
  "proptest",
  "serde",
- "thiserror 1.0.69",
+ "thiserror",
+]
+
+[[package]]
+name = "golemdb-immutable-data"
+version = "0.1.0"
+dependencies = [
+ "golemdb-cells",
+ "golemdb-storage",
+ "proptest",
+ "reth-nippy-jar",
+ "serde",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -549,7 +587,7 @@ dependencies = [
  "golemdb-storage",
  "proptest",
  "roaring",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -560,8 +598,11 @@ dependencies = [
  "golemdb-api",
  "golemdb-branch",
  "golemdb-cells",
+ "golemdb-immutable-data",
  "golemdb-index",
  "golemdb-merkle",
+ "golemdb-metering",
+ "golemdb-pruning",
  "golemdb-record",
  "golemdb-storage",
  "golemdb-storage-mdbx",
@@ -582,7 +623,44 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "sha3",
- "thiserror 1.0.69",
+ "thiserror",
+]
+
+[[package]]
+name = "golemdb-metering"
+version = "0.1.0"
+dependencies = [
+ "golemdb-cells",
+ "golemdb-storage",
+ "serde",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "golemdb-pruning"
+version = "0.1.0"
+dependencies = [
+ "golemdb-cells",
+ "golemdb-index",
+ "golemdb-storage",
+ "thiserror",
+]
+
+[[package]]
+name = "golemdb-query"
+version = "0.1.0"
+dependencies = [
+ "golemdb-api",
+ "golemdb-branch",
+ "golemdb-cells",
+ "golemdb-index",
+ "golemdb-merkle",
+ "golemdb-metering",
+ "golemdb-record",
+ "golemdb-storage",
+ "proptest",
+ "thiserror",
 ]
 
 [[package]]
@@ -592,8 +670,10 @@ dependencies = [
  "golemdb-branch",
  "golemdb-cells",
  "golemdb-merkle",
+ "golemdb-metering",
  "golemdb-storage",
- "thiserror 1.0.69",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -689,6 +769,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -737,7 +827,7 @@ dependencies = [
  "mdbx-sys",
  "parking_lot",
  "sealed",
- "thiserror 2.0.21",
+ "thiserror",
 ]
 
 [[package]]
@@ -756,6 +846,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lz4_flex"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90071f8077f8e40adfc4b7fe9cd495ce316263f19e75c2211eeff3fdf475a3d9"
+
+[[package]]
 name = "mdbx-sys"
 version = "13.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -771,6 +867,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "minimal-lexical"
@@ -843,6 +948,12 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pkg-config"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "plotters"
@@ -1031,6 +1142,33 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "reth-fs-util"
+version = "2.1.0"
+source = "git+https://github.com/paradigmxyz/reth?rev=d58c6e3d0723a28f655e89da83c3738e47dcc364#d58c6e3d0723a28f655e89da83c3738e47dcc364"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "reth-nippy-jar"
+version = "2.1.0"
+source = "git+https://github.com/paradigmxyz/reth?rev=d58c6e3d0723a28f655e89da83c3738e47dcc364#d58c6e3d0723a28f655e89da83c3738e47dcc364"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "derive_more",
+ "lz4_flex",
+ "memmap2",
+ "reth-fs-util",
+ "serde",
+ "thiserror",
+ "tracing",
+ "zstd",
+]
 
 [[package]]
 name = "roaring"
@@ -1254,31 +1392,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
-dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl 2.0.21",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
+ "thiserror-impl",
 ]
 
 [[package]]
@@ -1300,6 +1418,37 @@ checksum = "be4d6b5f19ff7664e8c98d03e2139cb510db9b0a60b55f8e8709b689d939b6bc"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tracing"
+version = "0.1.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
+dependencies = [
+ "pin-project-lite",
+ "tracing-attributes",
+ "tracing-core",
+]
+
+[[package]]
+name = "tracing-attributes"
+version = "0.1.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7490cfa5ec963746568740651ac6781f701c9c5ea257c58e057f3ba8cf69e8da"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "tracing-core"
+version = "0.1.36"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+dependencies = [
+ "once_cell",
 ]
 
 [[package]]
@@ -1482,3 +1631,31 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zstd"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.1+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeec9eaf2dffbbd09201e23bd0ffcbaa33bb8e9266a10734fd7ed90a85eca078"
+dependencies = [
+ "cc",
+ "pkg-config",
+]

@@ -4,8 +4,8 @@
 //! a writer sees its own changes and publishes them atomically on commit. Drop
 //! aborts an uncommitted writer.
 //!
-//! [`MemoryStore`] is the initial backend. The traits intentionally expose
-//! owned bytes and no backend-specific handles or threading requirements.
+//! [`MemoryStore`] is the initial backend. The traits expose owned bytes and borrowed inspection callbacks,
+//! without backend-specific handles or threading requirements.
 //! The separate `golemdb-storage-mdbx` crate implements these traits for MDBX.
 //!
 //! ```
@@ -33,11 +33,13 @@
 mod error;
 mod memory;
 mod scan;
+mod stats;
 mod table;
 
 pub use error::StorageError;
 pub use memory::{MemoryCursor, MemoryReadTransaction, MemoryStore, MemoryWriteTransaction};
 pub use scan::{Scan, scan, scan_prefix};
+pub use stats::StoreStats;
 pub use table::Table;
 
 pub type Entry = (Vec<u8>, Vec<u8>);
@@ -55,6 +57,11 @@ pub trait Store {
     }
     fn max_value_size(&self) -> usize {
         usize::MAX
+    }
+    /// Physical storage stats, or `None` if the backend has no physical storage,
+    /// like [`MemoryStore`]. Readable while a writer is active.
+    fn stats(&self) -> Result<Option<StoreStats>> {
+        Ok(None)
     }
 
     type Read<'db>: ReadTransaction
@@ -76,6 +83,15 @@ pub trait ReadTransaction {
 
     /// Return `None` for an absent key or a table not yet written.
     fn get(&self, table: Table, key: &[u8]) -> Result<Option<Vec<u8>>>;
+    /// Inspect encoded bytes before allocating or copying the value. The view
+    /// cannot escape the callback. Read-only backends must borrow their storage;
+    /// adapters must forward this method without first calling owned `get`.
+    fn with_value<T>(
+        &self,
+        table: Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> T,
+    ) -> Result<T>;
     /// Create a cursor starting at `key`, without consuming its first row.
     /// The first `next` returns the smallest key >= it; the first `prev` returns
     /// the largest key <= it. Use `b""` to scan forward from the first row.
@@ -94,6 +110,9 @@ pub trait ReadTransaction {
 pub trait ReadCursor {
     fn next(&mut self) -> Result<Option<Entry>>;
     fn prev(&mut self) -> Result<Option<Entry>>;
+    /// Advance with the same semantics as `next`, exposing the row before
+    /// copying its value. Returning from the callback releases the view.
+    fn with_next<T>(&mut self, inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> T) -> Result<T>;
 }
 
 /// Mutations borrow this write transaction exclusively, not the store.
@@ -121,6 +140,12 @@ pub trait WriteTransaction: ReadTransaction {
     /// Insert only, creating the table transactionally if needed.
     /// Existing keys return `AlreadyExists`, preserving the row.
     fn insert(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()>;
+    /// Insert a row whose key sorts after every key in the table, creating the
+    /// table transactionally if needed. A key equal to the last returns
+    /// `AlreadyExists`; backends may return `OutOfOrder` for an earlier key.
+    fn append(&mut self, table: Table, key: &[u8], value: &[u8]) -> Result<()> {
+        self.insert(table, key, value)
+    }
     /// Return whether a row was removed. An absent table returns `false`
     /// without creating it.
     fn delete(&mut self, table: Table, key: &[u8]) -> Result<bool>;

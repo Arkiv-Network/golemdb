@@ -3,13 +3,17 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use crate::{CellPatch, RecordKey, Records};
+use super::crud_tests::{create_entries, patch_entries, setup, zero_pricing};
+use crate::{CellPatch, Effects, ReadTarget, RecordError, RecordKey, Records};
 use golemdb_branch::Branches;
 use golemdb_cells::{
     CellKey, CellNameRef, CellType, CellValue, CellValueRef, Width, reserved, system, tables,
 };
 use golemdb_merkle::Keccak256Hasher;
-use golemdb_storage::{MemoryStore, ReadTransaction, StorageError, Store, Table, WriteTransaction};
+use golemdb_metering::Budget;
+use golemdb_storage::{
+    MemoryStore, ReadCursor, ReadTransaction, StorageError, Store, Table, WriteTransaction,
+};
 
 struct FaultDatabase {
     inner: MemoryStore,
@@ -17,6 +21,11 @@ struct FaultDatabase {
 }
 struct FaultRead<R> {
     inner: R,
+    fail: Arc<AtomicBool>,
+}
+struct FaultCursor<C> {
+    inner: C,
+    table: Table,
     fail: Arc<AtomicBool>,
 }
 impl Store for FaultDatabase {
@@ -34,7 +43,7 @@ impl Store for FaultDatabase {
 }
 impl<R: ReadTransaction> ReadTransaction for FaultRead<R> {
     type Cursor<'a>
-        = R::Cursor<'a>
+        = FaultCursor<R::Cursor<'a>>
     where
         Self: 'a;
     fn get(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Option<Vec<u8>>> {
@@ -49,7 +58,68 @@ impl<R: ReadTransaction> ReadTransaction for FaultRead<R> {
         self.inner.get(table, key)
     }
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
-        self.inner.cursor(table, key)
+        Ok(FaultCursor {
+            inner: self.inner.cursor(table, key)?,
+            table,
+            fail: self.fail.clone(),
+        })
+    }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if self.fail.load(Ordering::Relaxed)
+            && table == tables::CELL
+            && key == CellKey::new(64, CellNameRef::raw(b"z")).encode()
+        {
+            return Err(StorageError::Backend(
+                "injected late patch read failure".into(),
+            ));
+        }
+        self.inner.with_value(table, key, inspect)
+    }
+}
+
+impl<C: ReadCursor> ReadCursor for FaultCursor<C> {
+    fn next(&mut self) -> golemdb_storage::Result<Option<golemdb_storage::Entry>> {
+        let row = self.inner.next()?;
+        if self.fail.load(Ordering::Relaxed)
+            && self.table == tables::CELL
+            && row
+                .as_ref()
+                .is_some_and(|(key, _)| *key == CellKey::new(64, CellNameRef::raw(b"z")).encode())
+        {
+            return Err(StorageError::Backend(
+                "injected late delete scan failure".into(),
+            ));
+        }
+        Ok(row)
+    }
+
+    fn prev(&mut self) -> golemdb_storage::Result<Option<golemdb_storage::Entry>> {
+        self.inner.prev()
+    }
+
+    fn with_next<Output>(
+        &mut self,
+        inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        self.inner.with_next(|row| {
+            if self.fail.load(Ordering::Relaxed)
+                && self.table == tables::CELL
+                && row.as_ref().is_some_and(|(key, _)| {
+                    *key == CellKey::new(64, CellNameRef::raw(b"z")).encode()
+                })
+            {
+                return Err(StorageError::Backend(
+                    "injected late delete scan failure".into(),
+                ));
+            }
+            Ok(inspect(row))
+        })?
     }
 }
 
@@ -58,7 +128,7 @@ fn value(ty: CellType, bytes: &[u8]) -> CellValue {
 }
 
 #[test]
-fn late_storage_failure_restores_earlier_patch_writes_and_checkpoint_state() {
+fn late_storage_failure_preserves_cells_metadata_and_checkpoint_state() {
     late_patch_failure(false);
     late_patch_failure(true);
 }
@@ -68,15 +138,26 @@ fn late_patch_failure(remove: bool) {
     // Minimal read-only origin fixture; this test never seals or commits it.
     let mut tx = db.begin_write().unwrap();
     tx.put(Table("Superblock"), b"head", &[0; 72]).unwrap();
-    for name in [
-        reserved::MAX_STR_LEN,
-        reserved::MAX_BYTES_LEN,
-        reserved::MAX_CELL_NAME_LEN,
+    for (name, limit) in [
+        (reserved::MAX_STR_LEN, 64u32),
+        (reserved::MAX_BYTES_LEN, 128),
+        (reserved::MAX_CELL_NAME_LEN, 32),
     ] {
         tx.put(
             tables::CELL,
             &CellKey::new(system::PARAMS.id, name).encode(),
-            value(CellType::Uint(Width::W4), &64u32.to_be_bytes()).encoded_bytes(),
+            value(CellType::Uint(Width::W4), &limit.to_be_bytes()).encoded_bytes(),
+        )
+        .unwrap();
+    }
+    for name in [
+        reserved::MAX_RECORD_CELLS,
+        reserved::MAX_RECORD_INDEXED_CELLS,
+    ] {
+        tx.put(
+            tables::CELL,
+            &CellKey::new(system::PARAMS.id, name).encode(),
+            CellValue::from_u64(100).encoded_bytes(),
         )
         .unwrap();
     }
@@ -89,6 +170,16 @@ fn late_patch_failure(remove: bool) {
         (
             CellKey::new(64, reserved::KEY),
             value(CellType::FixedBytes(Width::W32), &key.0),
+        ),
+        (
+            CellKey::new(64, reserved::META),
+            crate::RecordMeta {
+                cells: 1,
+                cell_bytes: 18,
+                indexed_cells: 0,
+                index_bytes: 0,
+            }
+            .encode(),
         ),
         (
             CellKey::new(64, CellNameRef::raw(b"a")),
@@ -107,9 +198,11 @@ fn late_patch_failure(remove: bool) {
             fail: fail.clone(),
         },
         Keccak256Hasher,
+        None,
+        None,
     )
     .unwrap();
-    let records = Records::new(branches.clone());
+    let records = Records::new(branches.clone(), zero_pricing());
     let b = branches.begin().unwrap();
     branches.checkpoint(b).unwrap();
     branches.rollback(b).unwrap();
@@ -123,13 +216,15 @@ fn late_patch_failure(remove: bool) {
                 if remove {
                     CellPatch::Remove
                 } else {
-                    CellPatch::Set(value(CellType::Str, bytes))
+                    CellPatch::Write(value(CellType::Str, bytes))
                 },
             )
         })
         .collect();
     assert!(matches!(
-        records.patch(b, key, changes),
+        records
+            .patch(b, key, patch_entries(changes), Budget::Unlimited)
+            .result,
         Err(crate::RecordError::Branch(
             golemdb_branch::BranchError::Storage(_)
         ))
@@ -137,13 +232,108 @@ fn late_patch_failure(remove: bool) {
     fail.store(false, Ordering::Relaxed);
     assert_eq!(branches.branch_info(b).unwrap(), before);
     let read = records
-        .get(crate::ReadTarget::Branch(b), key, None)
+        .get(crate::ReadTarget::Branch(b), key, None, Budget::Unlimited)
+        .result
         .unwrap();
     assert_eq!(read.cells[b"a".as_slice()].as_str(), Some("original"));
     assert!(!read.cells.contains_key(b"z".as_slice()));
+    assert_eq!(read.meta().unwrap().cell_bytes, 18);
     // Failed patch did not reactivate the rolled-back frame: one rollback now
     // consumes the previous frame, then there are no frames left.
     branches.rollback(b).unwrap();
+    assert!(matches!(
+        branches.rollback(b),
+        Err(golemdb_branch::BranchError::NoFrameToRollback)
+    ));
+}
+
+#[test]
+fn late_delete_scan_failure_preserves_cells_effects_and_checkpoint_state() {
+    let (db, branches, records) = setup();
+    let key = RecordKey([7; 32]);
+    let b = branches.begin().unwrap();
+    let cells = [
+        (
+            CellNameRef::raw(b"a").into(),
+            CellValue::from_str("original"),
+        ),
+        (CellNameRef::raw(b"z").into(), CellValue::from_str("last")),
+    ]
+    .into();
+    records
+        .create(b, key, create_entries(cells), Budget::Unlimited)
+        .result
+        .unwrap();
+    let head = branches.commit(b).unwrap();
+
+    let fail = Arc::new(AtomicBool::new(false));
+    let branches = Branches::new(
+        FaultDatabase {
+            inner: db,
+            fail: fail.clone(),
+        },
+        Keccak256Hasher,
+        None,
+        None,
+    )
+    .unwrap();
+    let records = Records::new(branches.clone(), zero_pricing());
+    let b = branches.begin().unwrap();
+    records
+        .patch(
+            b,
+            key,
+            patch_entries(
+                [
+                    (
+                        CellNameRef::raw(b"a").into(),
+                        CellPatch::Write(CellValue::from_str("changed")),
+                    ),
+                    (
+                        CellNameRef::raw(b"m").into(),
+                        CellPatch::Write(CellValue::from_str("pending")),
+                    ),
+                ]
+                .into(),
+            ),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
+    branches.checkpoint(b).unwrap();
+    branches.rollback(b).unwrap();
+    let info = branches.branch_info(b).unwrap();
+    let before = records
+        .get(ReadTarget::Branch(b), key, None, Budget::Unlimited)
+        .result
+        .unwrap();
+
+    fail.store(true, Ordering::Relaxed);
+    let failed = records.delete(b, key, Budget::Unlimited);
+    assert!(matches!(
+        failed.result,
+        Err(RecordError::Branch(golemdb_branch::BranchError::Storage(_)))
+    ));
+    assert_eq!(failed.priced_at, Some(head));
+    assert_eq!(failed.effects, Effects::default());
+    fail.store(false, Ordering::Relaxed);
+    assert_eq!(branches.branch_info(b).unwrap(), info);
+    assert_eq!(
+        records
+            .get(ReadTarget::Branch(b), key, None, Budget::Unlimited)
+            .result
+            .unwrap(),
+        before
+    );
+
+    // A failed scan must not reactivate the already rolled-back frame.
+    branches.rollback(b).unwrap();
+    let restored = records
+        .get(ReadTarget::Branch(b), key, None, Budget::Unlimited)
+        .result
+        .unwrap();
+    assert_eq!(restored.cells[b"a".as_slice()].as_str(), Some("original"));
+    assert!(!restored.cells.contains_key(b"m".as_slice()));
     assert!(matches!(
         branches.rollback(b),
         Err(golemdb_branch::BranchError::NoFrameToRollback)

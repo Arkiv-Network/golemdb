@@ -16,9 +16,12 @@
 use std::path::Path;
 
 use golemdb_api::{
-    Api, ApiError, BranchId, CellLimits, CellValue, Database, Genesis, HashAlgorithm, OpenConfig,
-    OpenMode, OpenResult, RecordKey, RecordOp, op,
+    Api, ApiError, BranchId, Budget, CellLimits, CellValue, Database, Genesis, HashAlgorithm,
+    OpenConfig, OpenMode, OpenResult, PricingConfig, RecordKey, RecordLimits, RecordOp, op,
 };
+
+/// Benchmarks measure the work itself, so operations are never cut short by gas.
+const BUDGET: Budget = Budget::Unlimited;
 
 pub fn open(dir: &Path) -> OpenResult<Database> {
     let limits = CellLimits {
@@ -26,7 +29,17 @@ pub fn open(dir: &Path) -> OpenResult<Database> {
         max_str_len: 128,
         max_bytes_len: 128 * 1024,
     };
-    let genesis = Genesis::new(HashAlgorithm::Keccak256, limits);
+    let records = RecordLimits {
+        max_cells: 16,
+        max_indexed_cells: 16,
+    };
+    let genesis = Genesis::new(
+        HashAlgorithm::Keccak256,
+        limits,
+        records,
+        None,
+        PricingConfig::zero(),
+    );
     Database::open(
         dir,
         &OpenConfig::new(genesis).with_mode(OpenMode::CreateNew),
@@ -74,7 +87,7 @@ impl Workload {
 
         let first = (self.first + batch.deletes).min(self.next);
         for n in self.first..first {
-            ops.push(Op::Delete(RecordOp::delete(key(n))));
+            ops.push(Op::Delete(RecordOp::delete(key(n), BUDGET)));
         }
 
         let remaining = self.next - first;
@@ -118,9 +131,9 @@ pub fn execute(db: &Database, ops: Vec<Op>) -> Result<BranchId, ApiError> {
     for op in ops {
         db.checkpoint(branch)?;
         match op {
-            Op::Create(op) => db.create(branch, op).map(drop)?,
-            Op::Patch(op) => db.patch(branch, op)?,
-            Op::Delete(op) => db.delete(branch, op)?,
+            Op::Create(op) => db.create(branch, op).into_result().map(drop)?,
+            Op::Patch(op) => db.patch(branch, op).into_result()?,
+            Op::Delete(op) => db.delete(branch, op).into_result()?,
         }
     }
     Ok(branch)
@@ -135,29 +148,21 @@ pub fn key(n: u64) -> RecordKey {
 }
 
 fn create(n: u64, commit: u64) -> RecordOp<op::Create> {
-    RecordOp::create(key(n))
+    RecordOp::create(key(n), BUDGET)
         .attribute("one_of_5", CellValue::from_u64(n % 5))
-        .unwrap()
         .attribute("one_of_1000", CellValue::from_u64(n % 1_000))
-        .unwrap()
         .attribute("last_commit", CellValue::from_u64(commit))
-        .unwrap()
         .attribute("unique", CellValue::from_u64(n))
-        .unwrap()
         .field("payload", payload(commit))
-        .unwrap()
 }
 
 fn patch(n: u64, commit: u64) -> RecordOp<op::Patch> {
-    RecordOp::patch(key(n))
+    RecordOp::patch(key(n), BUDGET)
         // The new value usually differs, which moves the record between two large
         // index terms.
         .attribute("one_of_5", CellValue::from_u64((n + commit) % 5))
-        .unwrap()
         .attribute("last_commit", CellValue::from_u64(commit))
-        .unwrap()
         .field("payload", payload(commit))
-        .unwrap()
 }
 
 /// Returns 1 KiB of bytes that depend on the commit, so that every patch writes

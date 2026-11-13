@@ -11,8 +11,6 @@ pub enum MerkleError {
     MissingBranch(Hash),
     #[error("Merkle branch does not match its content hash")]
     HashMismatch,
-    #[error("different branch bytes already stored under the same hash")]
-    ConflictingBranch,
 }
 
 pub type Result<T> = std::result::Result<T, MerkleError>;

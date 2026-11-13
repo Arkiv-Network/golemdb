@@ -1,11 +1,14 @@
-use crate::{CellPatch, ReadTarget, RecordCells, RecordError, RecordKey, Records};
+use crate::{
+    CellPatch, ReadTarget, RecordCells, RecordError, RecordKey, RecordLimits, Records, WritePricing,
+};
 use golemdb_branch::Branches;
 use golemdb_cells::{
-    CellChange, CellKey, CellName, CellNameRef, CellType, CellValue, CellValueRef, Cells, Width,
-    reserved, system,
+    CellChange, CellKey, CellLimits, CellName, CellNameRef, CellType, CellValue, CellValueRef,
+    Cells, Width, reserved, system,
 };
-use golemdb_merkle::{HashProvider, Keccak256Hasher, RootRef};
-use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction};
+use golemdb_merkle::{Keccak256Hasher, RootRef};
+use golemdb_metering::{Budget, ModelMetadata, PricingProvider, Schedule, model_cells};
+use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
 const OTHER: RecordKey = RecordKey([0x43; 32]);
@@ -43,15 +46,25 @@ fn head_selection_and_record_read_share_one_snapshot() {
 
     let (db, branches, records) = setup();
     let first = branches.begin().unwrap();
-    records.create(first, KEY, values("before")).unwrap();
+    records
+        .create(
+            first,
+            KEY,
+            create_entries(values("before")),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
     branches.commit(first).unwrap();
     let next = branches.begin().unwrap();
     records
         .patch(
             next,
             KEY,
-            [(name(b"name"), CellPatch::Set(text("after", true)))].into(),
+            patch_entries([(name(b"name"), CellPatch::Write(text("after", true)))].into()),
+            Budget::Unlimited,
         )
+        .result
         .unwrap();
     let reader_branches = Branches::new(
         AdvancingReadDb {
@@ -60,22 +73,30 @@ fn head_selection_and_record_read_share_one_snapshot() {
             reads: std::sync::atomic::AtomicUsize::new(0),
         },
         Keccak256Hasher,
+        None,
+        None,
     )
     .unwrap();
-    let reader = Records::new(reader_branches.clone());
+    let reader = Records::new(reader_branches.clone(), zero_pricing());
     let writer = branches.clone();
     *reader_branches.store().after_snapshot.lock().unwrap() = Some(Box::new(move || {
         writer.commit(next).unwrap();
     }));
     reader_branches.store().reads.store(0, Ordering::SeqCst);
-    let snapshot = reader.get(ReadTarget::Head, KEY, None).unwrap();
+    let snapshot = reader
+        .get(ReadTarget::Head, KEY, None, Budget::Unlimited)
+        .result
+        .unwrap();
     assert_eq!(snapshot.cells[b"name".as_slice()].as_str(), Some("before"));
     assert_eq!(reader_branches.store().reads.load(Ordering::SeqCst), 1);
     assert_eq!(branches.head().unwrap(), golemdb_branch::CommitId::new(2));
-    let latest = reader.get(ReadTarget::Head, KEY, None).unwrap();
+    let latest = reader
+        .get(ReadTarget::Head, KEY, None, Budget::Unlimited)
+        .result
+        .unwrap();
     assert_eq!(latest.cells[b"name".as_slice()].as_str(), Some("after"));
     assert!(matches!(
-        reader.get(ReadTarget::Commit(golemdb_branch::CommitId::new(1)), KEY, None),
+        reader.get(ReadTarget::Commit(golemdb_branch::CommitId::new(1)), KEY, None, Budget::Unlimited).result,
         Err(RecordError::CommitUnavailable {
             requested, head
         }) if requested.get() == 1 && head.get() == 2
@@ -85,8 +106,10 @@ fn head_selection_and_record_read_share_one_snapshot() {
             .get(
                 ReadTarget::Commit(golemdb_branch::CommitId::new(2)),
                 KEY,
-                None
+                None,
+                Budget::Unlimited
             )
+            .result
             .unwrap(),
         latest
     );
@@ -146,35 +169,89 @@ fn initialize(db: &impl Store) {
             field(CellType::Uint(Width::W4), &value.to_be_bytes()),
         );
     }
+    for name in [
+        reserved::MAX_RECORD_CELLS,
+        reserved::MAX_RECORD_INDEXED_CELLS,
+    ] {
+        put(system::PARAMS.id, name, u64_value(100));
+    }
     put(system::ALLOC.id, reserved::NEXT_RECORD_ID, u64_value(64));
     let hash = Keccak256Hasher;
     let mut tx = db.begin_write().unwrap();
     let update = Cells::new(&hash)
-        .apply(&mut tx, RootRef::Empty, changes)
+        .apply(&mut tx, 0, RootRef::Empty, changes)
         .unwrap();
-    tx.put(
-        Table("Superblock"),
-        b"head",
-        &[
-            0u64.to_be_bytes().as_slice(),
-            &update.root.hash(&hash),
-            &hash.hash(&[]),
-        ]
-        .concat(),
-    )
-    .unwrap();
+    let roots = golemdb_branch::Roots {
+        state: update.root,
+        index: RootRef::Empty,
+    };
+    golemdb_branch::init_head(&mut tx, &roots, &hash).unwrap();
     tx.commit().unwrap();
 }
 
-fn setup() -> (
+pub(super) fn zero_pricing() -> WritePricing {
+    WritePricing::new(
+        pricing_provider(
+            Schedule::new(
+                golemdb_metering::WRITE_CODE_VERSION,
+                golemdb_metering::PricingConfig::zero()
+                    .weights
+                    .into_iter()
+                    .map(|(name, value)| (name.into(), value)),
+            )
+            .unwrap(),
+        ),
+        CellLimits {
+            max_cell_name_len: 32,
+            max_str_len: 64,
+            max_bytes_len: 128,
+        },
+        RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
+    )
+}
+
+// An isolated persisted pricing fixture lets record tests vary prices without
+// changing the data/commitment fixture or adding a second execution path.
+pub(super) fn pricing_provider(schedule: Schedule) -> std::sync::Arc<PricingProvider> {
+    let store = MemoryStore::new();
+    let mut tx = store.begin_write().unwrap();
+    let metadata = ModelMetadata {
+        version: 1,
+        activation_commit: 0,
+        golemdb_code_version: schedule.code_version(),
+        host_code_version: 0,
+    };
+    let weights = schedule
+        .weights()
+        .map(|(name, weight)| (name.to_string(), weight))
+        .collect();
+    for (key, value) in model_cells(&metadata, &weights) {
+        tx.put(
+            golemdb_cells::tables::CELL,
+            &key.encode(),
+            value.encoded_bytes(),
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let tx = store.begin_read().unwrap();
+    std::sync::Arc::new(
+        PricingProvider::load(&golemdb_cells::CellReader::new(&tx), 0, &[]).unwrap(),
+    )
+}
+
+pub(super) fn setup() -> (
     MemoryStore,
     Branches<MemoryStore, Keccak256Hasher>,
     Records<MemoryStore, Keccak256Hasher>,
 ) {
     let db = MemoryStore::new();
     initialize(&db);
-    let branches = Branches::new(db.clone(), Keccak256Hasher).unwrap();
-    let records = Records::new(branches.clone());
+    let branches = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
+    let records = Records::new(branches.clone(), zero_pricing());
     (db, branches, records)
 }
 fn snapshot<S: Store>(
@@ -220,10 +297,19 @@ fn work_in_progress_is_isolated_and_projection_preserves_identity() {
     let (_, branches, records) = setup();
     let a = branches.begin().unwrap();
     let b = branches.begin().unwrap();
-    assert_eq!(records.create(a, KEY, values("Alice")).unwrap(), KEY);
+    assert_eq!(
+        records
+            .create(a, KEY, create_entries(values("Alice")), Budget::Unlimited)
+            .result
+            .unwrap(),
+        KEY
+    );
     assert_eq!(id(&branches, a, KEY), 64);
-    let full = records.get(ReadTarget::Branch(a), KEY, None).unwrap();
-    assert_eq!(full.cells.len(), 2);
+    let full = records
+        .get(ReadTarget::Branch(a), KEY, None, Budget::Unlimited)
+        .result
+        .unwrap();
+    assert_eq!(full.cells.len(), 3);
     assert_eq!(full.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
     assert!(!full.cells[b"#key".as_slice()].is_indexable());
     for target in [
@@ -231,40 +317,57 @@ fn work_in_progress_is_isolated_and_projection_preserves_identity() {
         ReadTarget::Commit(golemdb_branch::CommitId::new(0)),
     ] {
         assert!(matches!(
-            records.get(target, KEY, None),
+            records.get(target, KEY, None, Budget::Unlimited).result,
             Err(RecordError::NotFound)
         ));
     }
     let projection = [name(b"name"), name(b"missing"), name(b"name")];
     let projected = records
-        .get(ReadTarget::Branch(a), KEY, Some(&projection))
+        .get(
+            ReadTarget::Branch(a),
+            KEY,
+            Some(&projection),
+            Budget::Unlimited,
+        )
+        .result
         .unwrap();
     assert_eq!(projected.cells, values("Alice"));
     assert!(
         records
-            .get(ReadTarget::Branch(a), KEY, Some(&[]))
+            .get(ReadTarget::Branch(a), KEY, Some(&[]), Budget::Unlimited)
+            .result
             .unwrap()
             .cells
             .is_empty()
     );
     assert!(matches!(
-        records.get(ReadTarget::Branch(a), OTHER, Some(&[])),
+        records
+            .get(ReadTarget::Branch(a), OTHER, Some(&[]), Budget::Unlimited)
+            .result,
         Err(RecordError::NotFound)
     ));
     records
         .patch(
             a,
             KEY,
-            [(name(b"name"), CellPatch::Set(text("Bob", false)))].into(),
+            patch_entries([(name(b"name"), CellPatch::Write(text("Bob", false)))].into()),
+            Budget::Unlimited,
         )
+        .result
         .unwrap();
     assert_eq!(
-        records.get(ReadTarget::Branch(a), KEY, None).unwrap().cells[b"name".as_slice()],
+        records
+            .get(ReadTarget::Branch(a), KEY, None, Budget::Unlimited)
+            .result
+            .unwrap()
+            .cells[b"name".as_slice()],
         text("Bob", false)
     );
-    records.delete(a, KEY).unwrap();
+    records.delete(a, KEY, Budget::Unlimited).result.unwrap();
     assert!(matches!(
-        records.get(ReadTarget::Branch(a), KEY, None),
+        records
+            .get(ReadTarget::Branch(a), KEY, None, Budget::Unlimited)
+            .result,
         Err(RecordError::NotFound)
     ));
 }
@@ -276,18 +379,28 @@ fn reserved_records_are_readable_but_only_exact_keys_are_protected() {
     let before = snapshot(&branches, b);
     for reserved in system::ALL {
         let key = RecordKey(reserved.key);
-        let result = records.get(ReadTarget::Branch(b), key, None).unwrap();
+        let result = records
+            .get(ReadTarget::Branch(b), key, None, Budget::Unlimited)
+            .result
+            .unwrap();
         assert_eq!(result.cells[b"#key".as_slice()].as_bytes32(), Some(key.0));
         assert!(result.cells.values().all(|value| !value.is_indexable()));
         assert!(matches!(
-            records.create(b, key, values("x")),
+            records
+                .create(b, key, create_entries(values("x")), Budget::Unlimited)
+                .result,
             Err(RecordError::Reserved)
         ));
         assert!(matches!(
-            records.patch(b, key, Default::default()),
+            records
+                .patch(b, key, patch_entries(Default::default()), Budget::Unlimited)
+                .result,
             Err(RecordError::Reserved)
         ));
-        assert!(matches!(records.delete(b, key), Err(RecordError::Reserved)));
+        assert!(matches!(
+            records.delete(b, key, Budget::Unlimited).result,
+            Err(RecordError::Reserved)
+        ));
     }
     assert_eq!(snapshot(&branches, b), before);
     assert_eq!(branches.branch_info(b).unwrap().version, 0);
@@ -297,7 +410,9 @@ fn reserved_records_are_readable_but_only_exact_keys_are_protected() {
             ReadTarget::Commit(golemdb_branch::CommitId::new(0)),
             RecordKey(system::RECORD_KEYS.key),
             Some(&projection),
+            Budget::Unlimited,
         )
+        .result
         .unwrap();
     assert_eq!(
         bindings.cells[system::ALLOC.key.as_slice()].as_u64(),
@@ -306,7 +421,13 @@ fn reserved_records_are_readable_but_only_exact_keys_are_protected() {
     let mut similar = system::PARAMS.key;
     similar[31] = 1;
     records
-        .create(b, RecordKey(similar), values("ordinary"))
+        .create(
+            b,
+            RecordKey(similar),
+            create_entries(values("ordinary")),
+            Budget::Unlimited,
+        )
+        .result
         .unwrap();
 }
 
@@ -314,11 +435,21 @@ fn reserved_records_are_readable_but_only_exact_keys_are_protected() {
 fn invalid_operations_leave_cells_allocator_and_version_unchanged() {
     let (_, branches, records) = setup();
     let b = branches.begin().unwrap();
-    records.create(b, KEY, values("Alice")).unwrap();
+    records
+        .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+        .result
+        .unwrap();
     let before = snapshot(&branches, b);
     let info = branches.branch_info(b).unwrap();
     assert!(matches!(
-        records.create(b, KEY, values("duplicate")),
+        records
+            .create(
+                b,
+                KEY,
+                create_entries(values("duplicate")),
+                Budget::Unlimited
+            )
+            .result,
         Err(RecordError::AlreadyExists)
     ));
     for invalid in [
@@ -330,12 +461,26 @@ fn invalid_operations_leave_cells_allocator_and_version_unchanged() {
         &[b'a'; 33],
     ] {
         assert!(matches!(
-            records.create(b, OTHER, [(name(invalid), text("x", false))].into()),
-            Err(RecordError::InvalidArgument(_))
+            records
+                .create(
+                    b,
+                    OTHER,
+                    create_entries([(name(invalid), text("x", false))].into()),
+                    Budget::Unlimited
+                )
+                .result,
+            Err(RecordError::InvalidInput { .. })
         ));
         assert!(matches!(
-            records.patch(b, KEY, [(name(invalid), CellPatch::Remove)].into()),
-            Err(RecordError::InvalidArgument(_))
+            records
+                .patch(
+                    b,
+                    KEY,
+                    patch_entries([(name(invalid), CellPatch::Remove)].into()),
+                    Budget::Unlimited
+                )
+                .result,
+            Err(RecordError::InvalidInput { .. })
         ));
     }
     for value in [
@@ -343,20 +488,41 @@ fn invalid_operations_leave_cells_allocator_and_version_unchanged() {
         field(CellType::Bytes, &[0; 129]),
     ] {
         assert!(matches!(
-            records.create(b, OTHER, [(name(b"value"), value.clone())].into()),
-            Err(RecordError::InvalidArgument(_))
+            records
+                .create(
+                    b,
+                    OTHER,
+                    create_entries([(name(b"value"), value.clone())].into()),
+                    Budget::Unlimited
+                )
+                .result,
+            Err(RecordError::InvalidInput { .. })
         ));
         assert!(matches!(
-            records.patch(b, KEY, [(name(b"value"), CellPatch::Set(value))].into()),
-            Err(RecordError::InvalidArgument(_))
+            records
+                .patch(
+                    b,
+                    KEY,
+                    patch_entries([(name(b"value"), CellPatch::Write(value))].into()),
+                    Budget::Unlimited
+                )
+                .result,
+            Err(RecordError::InvalidInput { .. })
         ));
     }
     assert!(matches!(
-        records.patch(b, OTHER, Default::default()),
+        records
+            .patch(
+                b,
+                OTHER,
+                patch_entries(Default::default()),
+                Budget::Unlimited
+            )
+            .result,
         Err(RecordError::NotFound)
     ));
     assert!(matches!(
-        records.delete(b, OTHER),
+        records.delete(b, OTHER, Budget::Unlimited).result,
         Err(RecordError::NotFound)
     ));
     assert_eq!(snapshot(&branches, b), before);
@@ -367,37 +533,125 @@ fn invalid_operations_leave_cells_allocator_and_version_unchanged() {
 fn patches_update_cells_and_no_ops_add_no_journal_entries() {
     let (_, branches, records) = setup();
     let b = branches.begin().unwrap();
-    records.create(b, KEY, values("Alice")).unwrap();
+    records
+        .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+        .result
+        .unwrap();
     branches.commit(b).unwrap();
     let b = branches.begin().unwrap();
     let info = branches.branch_info(b).unwrap();
-    records.patch(b, KEY, Default::default()).unwrap();
+    records
+        .patch(b, KEY, patch_entries(Default::default()), Budget::Unlimited)
+        .result
+        .unwrap();
     records
         .patch(
             b,
             KEY,
-            [
-                (name(b"missing"), CellPatch::Remove),
-                (name(b"name"), CellPatch::Set(text("Alice", true))),
-            ]
-            .into(),
+            patch_entries(
+                [
+                    (name(b"missing"), CellPatch::Remove),
+                    (name(b"name"), CellPatch::Write(text("Alice", true))),
+                ]
+                .into(),
+            ),
+            Budget::Unlimited,
         )
+        .result
         .unwrap();
     assert_eq!(branches.branch_info(b).unwrap(), info);
     records
         .patch(
             b,
             KEY,
-            [
-                (name(b"name"), CellPatch::Remove),
-                (name(b"replacement"), CellPatch::Set(u64_value(7))),
-            ]
-            .into(),
+            patch_entries(
+                [
+                    (name(b"name"), CellPatch::Remove),
+                    (name(b"replacement"), CellPatch::Write(u64_value(7))),
+                ]
+                .into(),
+            ),
+            Budget::Unlimited,
         )
+        .result
         .unwrap();
-    let record = records.get(ReadTarget::Branch(b), KEY, None).unwrap();
-    assert_eq!(record.cells.len(), 2);
+    let record = records
+        .get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited)
+        .result
+        .unwrap();
+    assert_eq!(record.cells.len(), 3);
     assert_eq!(record.cells[b"replacement".as_slice()].as_u64(), Some(7));
+}
+
+#[test]
+fn deletion_counts_live_committed_and_pending_cells_and_rolls_back() {
+    let (_, branches, records) = setup();
+    let b = branches.begin().unwrap();
+    records
+        .create(
+            b,
+            KEY,
+            create_entries(
+                [
+                    (name(b"a"), text("one", true)),
+                    (name(b"b"), text("dropped", false)),
+                    (name(b"c"), text("old", true)),
+                ]
+                .into(),
+            ),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
+    branches.commit(b).unwrap();
+    let b = branches.begin().unwrap();
+    records
+        .patch(
+            b,
+            KEY,
+            patch_entries(
+                [
+                    (name(b"b"), CellPatch::Remove),
+                    (name(b"c"), CellPatch::Write(text("new", false))),
+                    (name(b"d"), CellPatch::Write(text("fresh", true))),
+                ]
+                .into(),
+            ),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
+    let before = snapshot(&branches, b);
+    branches.checkpoint(b).unwrap();
+
+    let deleted = records.delete(b, KEY, Budget::Unlimited);
+    deleted.result.unwrap();
+    assert_eq!(
+        deleted.effects,
+        crate::Effects {
+            cells_deleted: 3,
+            cell_bytes_deleted: 41,
+            index_leaves: 2,
+            index_bytes_deleted: 14,
+            ..crate::Effects::default()
+        }
+    );
+    assert!(
+        branches
+            .read(b, |reader| reader
+                .scan_prefix(&64u64.to_be_bytes())?
+                .collect::<golemdb_branch::Result<Vec<_>>>())
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        records
+            .get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited)
+            .result,
+        Err(RecordError::NotFound)
+    ));
+    branches.rollback(b).unwrap();
+    assert_eq!(snapshot(&branches, b), before);
 }
 
 #[test]
@@ -405,18 +659,33 @@ fn rollback_restores_records_bindings_allocator_and_incarnations() {
     let (_, branches, records) = setup();
     let b = branches.begin().unwrap();
     let genesis = snapshot(&branches, b);
-    records.create(b, KEY, values("original")).unwrap();
+    records
+        .create(
+            b,
+            KEY,
+            create_entries(values("original")),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
     let original = snapshot(&branches, b);
     branches.checkpoint(b).unwrap();
-    records.delete(b, KEY).unwrap();
+    records.delete(b, KEY, Budget::Unlimited).result.unwrap();
     records
-        .create(b, KEY, [(name(b"new"), text("new", false))].into())
+        .create(
+            b,
+            KEY,
+            create_entries([(name(b"new"), text("new", false))].into()),
+            Budget::Unlimited,
+        )
+        .result
         .unwrap();
     assert_eq!(id(&branches, b, KEY), 65);
     assert_eq!(allocated(&branches, b), 66);
     assert!(
         !records
-            .get(ReadTarget::Branch(b), KEY, None)
+            .get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited)
+            .result
             .unwrap()
             .cells
             .contains_key(b"name".as_slice())
@@ -426,7 +695,13 @@ fn rollback_restores_records_bindings_allocator_and_incarnations() {
     branches.rollback(b).unwrap();
     assert_eq!(snapshot(&branches, b), genesis);
     records
-        .create(b, OTHER, values("reused uncommitted allocation"))
+        .create(
+            b,
+            OTHER,
+            create_entries(values("reused uncommitted allocation")),
+            Budget::Unlimited,
+        )
+        .result
         .unwrap();
     assert_eq!(id(&branches, b, OTHER), 64);
 }
@@ -454,7 +729,9 @@ fn corrupt_system_state_never_defaults_or_overwrites_records() {
         let before = snapshot(&branches, b);
         let info = branches.branch_info(b).unwrap();
         assert!(matches!(
-            records.create(b, KEY, values("x")),
+            records
+                .create(b, KEY, create_entries(values("x")), Budget::Unlimited)
+                .result,
             Err(RecordError::CorruptState(_)) | Err(RecordError::RecordIdExhausted)
         ));
         assert_eq!(snapshot(&branches, b), before);
@@ -462,7 +739,15 @@ fn corrupt_system_state_never_defaults_or_overwrites_records() {
     }
     let (_, branches, records) = setup();
     let b = branches.begin().unwrap();
-    records.create(b, KEY, values("existing")).unwrap();
+    records
+        .create(
+            b,
+            KEY,
+            create_entries(values("existing")),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
     branches
         .write(b, |cell_writer| {
             cell_writer.put(
@@ -474,27 +759,22 @@ fn corrupt_system_state_never_defaults_or_overwrites_records() {
         .unwrap();
     let before = snapshot(&branches, b);
     assert!(matches!(
-        records.create(b, OTHER, values("x")),
+        records
+            .create(b, OTHER, create_entries(values("x")), Budget::Unlimited)
+            .result,
         Err(RecordError::CorruptState(_))
     ));
     assert_eq!(snapshot(&branches, b), before);
-    branches
-        .write(b, |cell_writer| {
-            cell_writer.delete(CellKey::new(system::PARAMS.id, reserved::MAX_STR_LEN));
-            Ok::<_, RecordError>(())
-        })
-        .unwrap();
-    assert!(matches!(
-        records.create(b, OTHER, values("x")),
-        Err(RecordError::CorruptState(_))
-    ));
 }
 
 #[test]
 fn inconsistent_identity_and_reserved_id_aliases_are_rejected() {
     let (_, branches, records) = setup();
     let b = branches.begin().unwrap();
-    records.create(b, KEY, values("Alice")).unwrap();
+    records
+        .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+        .result
+        .unwrap();
     for bad_id in [0, 32, 63, 65] {
         branches
             .write(b, |cell_writer| {
@@ -504,11 +784,13 @@ fn inconsistent_identity_and_reserved_id_aliases_are_rejected() {
             .unwrap();
         let before = snapshot(&branches, b);
         assert!(matches!(
-            records.get(ReadTarget::Branch(b), OTHER, None),
+            records
+                .get(ReadTarget::Branch(b), OTHER, None, Budget::Unlimited)
+                .result,
             Err(RecordError::CorruptState(_))
         ));
         assert!(matches!(
-            records.delete(b, OTHER),
+            records.delete(b, OTHER, Budget::Unlimited).result,
             Err(RecordError::CorruptState(_))
         ));
         assert_eq!(snapshot(&branches, b), before);
@@ -520,7 +802,14 @@ fn inconsistent_identity_and_reserved_id_aliases_are_rejected() {
         })
         .unwrap();
     assert!(matches!(
-        records.get(ReadTarget::Branch(b), OTHER, Some(&[])),
+        records
+            .get(
+                ReadTarget::Branch(b),
+                OTHER,
+                Some(&[name(b"#key")]),
+                Budget::Unlimited
+            )
+            .result,
         Err(RecordError::CorruptState(_))
     ));
 }
@@ -529,15 +818,20 @@ fn inconsistent_identity_and_reserved_id_aliases_are_rejected() {
 fn committed_cell_reader_keeps_one_snapshot_when_head_advances() {
     let (db, branches, records) = setup();
     let b = branches.begin().unwrap();
-    records.create(b, KEY, values("before")).unwrap();
+    records
+        .create(b, KEY, create_entries(values("before")), Budget::Unlimited)
+        .result
+        .unwrap();
     branches.commit(b).unwrap();
     let b = branches.begin().unwrap();
     records
         .patch(
             b,
             KEY,
-            [(name(b"name"), CellPatch::Set(text("after", true)))].into(),
+            patch_entries([(name(b"name"), CellPatch::Write(text("after", true)))].into()),
+            Budget::Unlimited,
         )
+        .result
         .unwrap();
     let tx = db.begin_read().unwrap();
     assert_eq!(
@@ -555,17 +849,352 @@ fn committed_cell_reader_keeps_one_snapshot_when_head_advances() {
         .unwrap()
         .collect::<golemdb_cells::Result<Vec<_>>>()
         .unwrap();
-    assert_eq!(stored.len(), 2);
-    assert_eq!(stored[1].1, text("before", true));
+    assert_eq!(stored.len(), 3);
+    assert_eq!(stored[2].1, text("before", true));
     assert_eq!(
         records
             .get(
                 ReadTarget::Commit(golemdb_branch::CommitId::new(2)),
                 KEY,
-                None
+                None,
+                Budget::Unlimited
             )
+            .result
             .unwrap()
             .cells[b"name".as_slice()],
         text("after", true)
     );
+}
+
+#[test]
+fn committed_reads_by_id_match_get_and_check_the_commit() {
+    let (db, branches, records) = setup();
+    let b = branches.begin().unwrap();
+    records
+        .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+        .result
+        .unwrap();
+    let head = branches.commit(b).unwrap();
+
+    let (tx, at) = crate::committed_snapshot(&db, None).unwrap();
+    assert_eq!(at, head);
+    let cell_reader = golemdb_cells::CellReader::new(&tx);
+    let only_name = [name(b"name")];
+    for projection in [None, Some(&only_name[..]), Some(&[][..])] {
+        assert_eq!(
+            crate::read_committed_by_id(&cell_reader, 64, projection).unwrap(),
+            records
+                .get(ReadTarget::Head, KEY, projection, Budget::Unlimited)
+                .result
+                .unwrap()
+        );
+    }
+
+    assert_eq!(crate::committed_snapshot(&db, Some(head)).unwrap().1, head);
+    let older = golemdb_branch::CommitId::new(head.get() - 1);
+    assert!(matches!(
+        crate::committed_snapshot(&db, Some(older)),
+        Err(RecordError::CommitUnavailable { requested, head: got })
+            if requested == older && got == head
+    ));
+}
+
+/// Callers pass IDs they know are live, so a record without a valid `#key`
+/// is corrupt state, never an absent record.
+#[test]
+fn committed_reads_by_id_reject_a_missing_or_invalid_key_cell() {
+    let key_cell = CellKey::new(64, reserved::KEY);
+    for bad in [
+        None,
+        Some(text("not a key", false)),
+        Some(field(CellType::FixedBytes(Width::W16), &[0x42; 16])),
+    ] {
+        let (db, branches, records) = setup();
+        let b = branches.begin().unwrap();
+        records
+            .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+            .result
+            .unwrap();
+        branches
+            .write(b, |cell_writer| {
+                match bad.clone() {
+                    Some(value) => cell_writer.put(key_cell.clone(), value),
+                    None => cell_writer.delete(key_cell.clone()),
+                }
+                Ok::<_, RecordError>(())
+            })
+            .unwrap();
+        branches.commit(b).unwrap();
+
+        let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
+        let cell_reader = golemdb_cells::CellReader::new(&tx);
+        assert!(
+            matches!(
+                crate::read_committed_by_id(&cell_reader, 64, None),
+                Err(RecordError::CorruptState(_))
+            ),
+            "{bad:?}"
+        );
+    }
+    let (db, _, _) = setup();
+    let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
+    assert!(matches!(
+        crate::read_committed_by_id(&golemdb_cells::CellReader::new(&tx), 64, None),
+        Err(RecordError::CorruptState("record has no #key"))
+    ));
+}
+
+pub(super) fn create_entries(cells: RecordCells) -> Vec<crate::CreateEntry> {
+    cells
+        .into_iter()
+        .map(|(name, value)| crate::CreateEntry {
+            name,
+            kind: value.kind(),
+            value,
+        })
+        .collect()
+}
+
+pub(super) fn patch_entries(changes: crate::RecordPatch) -> Vec<crate::PatchEntry> {
+    use crate::{PatchChange, PatchEntry};
+    changes
+        .into_iter()
+        .map(|(name, change)| PatchEntry {
+            name,
+            change: match change {
+                CellPatch::Write(value) => PatchChange::Write {
+                    kind: value.kind(),
+                    value,
+                },
+                CellPatch::Set(value) => PatchChange::Set(value),
+                CellPatch::Remove => PatchChange::Remove,
+            },
+        })
+        .collect()
+}
+
+#[test]
+fn metadata_has_the_specified_encoding_and_equal_size_updates_do_not_rewrite_it() {
+    use crate::RecordMeta;
+    let (_, branches, records) = setup();
+    let b = branches.begin().unwrap();
+    records
+        .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+        .result
+        .unwrap();
+    let record = records
+        .get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited)
+        .result
+        .unwrap();
+    let expected = RecordMeta {
+        cells: 1,
+        cell_bytes: 18,
+        indexed_cells: 1,
+        index_bytes: 11,
+    };
+    assert_eq!(record.meta(), Some(expected));
+    // Literal wire fixture checks field order, byte order and the bytes32 field tag.
+    assert_eq!(
+        record.cells[b"#meta".as_slice()],
+        CellValue::from_bytes32([
+            0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+            0, 0, 11,
+        ])
+    );
+    branches.commit(b).unwrap();
+    let b = branches.begin().unwrap();
+    records
+        .patch(
+            b,
+            KEY,
+            patch_entries([(name(b"name"), CellPatch::Write(text("Bobby", true)))].into()),
+            Budget::Unlimited,
+        )
+        .result
+        .unwrap();
+    // Only the user cell is journaled; an identical put to an untouched #meta
+    // would add another undo entry even though its persisted bytes were equal.
+    assert_eq!(branches.branch_info(b).unwrap().version, 1);
+    assert_eq!(
+        records
+            .get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited)
+            .result
+            .unwrap()
+            .meta(),
+        Some(expected)
+    );
+}
+
+#[test]
+fn projections_return_stored_metadata_while_full_reads_and_writes_require_valid_counts() {
+    use crate::RecordMeta;
+    let valid = RecordMeta {
+        cells: 1,
+        cell_bytes: 18,
+        indexed_cells: 1,
+        index_bytes: 11,
+    };
+    for bad in [
+        None,
+        Some(text("wrong type", false)),
+        Some(CellValue::from_bytes(&[0; 32])),
+        Some(
+            valid
+                .encode()
+                .with_kind(golemdb_cells::CellKind::Attribute)
+                .unwrap(),
+        ),
+        Some(
+            RecordMeta {
+                indexed_cells: 2,
+                ..valid
+            }
+            .encode(),
+        ),
+        Some(
+            RecordMeta {
+                cell_bytes: 0,
+                ..valid
+            }
+            .encode(),
+        ),
+    ] {
+        let (db, branches, records) = setup();
+        let b = branches.begin().unwrap();
+        records
+            .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+            .result
+            .unwrap();
+        branches.commit(b).unwrap();
+        let b = branches.begin().unwrap();
+        branches
+            .write(b, |writer| {
+                match bad.clone() {
+                    Some(value) => writer.put(CellKey::new(64, reserved::META), value),
+                    None => writer.delete(CellKey::new(64, reserved::META)),
+                }
+                Ok::<_, RecordError>(())
+            })
+            .unwrap();
+        let before = snapshot(&branches, b);
+        let info = branches.branch_info(b).unwrap();
+        let meta_projection = [name(b"#meta")];
+        let projections = [Some(meta_projection.as_slice())];
+        assert!(matches!(
+            records
+                .get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited)
+                .result,
+            Err(RecordError::CorruptState(_))
+        ));
+        for projection in projections {
+            let record = records
+                .get(ReadTarget::Branch(b), KEY, projection, Budget::Unlimited)
+                .result
+                .unwrap();
+            assert_eq!(record.cells.get(b"#meta".as_slice()), bad.as_ref());
+            assert_eq!(record.meta(), None);
+        }
+        assert!(matches!(
+            records
+                .patch(b, KEY, patch_entries(Default::default()), Budget::Unlimited)
+                .result,
+            Err(RecordError::CorruptState(_))
+        ));
+        assert!(matches!(
+            records.delete(b, KEY, Budget::Unlimited).result,
+            Err(RecordError::CorruptState(_))
+        ));
+        assert_eq!(snapshot(&branches, b), before);
+        assert_eq!(branches.branch_info(b).unwrap(), info);
+        // Inject committed corruption directly: sealing itself rejects an
+        // indexed system name before it can reach committed storage.
+        let mut tx = db.begin_write().unwrap();
+        let key = CellKey::new(64, reserved::META).encode();
+        match &bad {
+            Some(value) => tx
+                .put(golemdb_cells::tables::CELL, &key, value.encoded_bytes())
+                .unwrap(),
+            None => {
+                tx.delete(golemdb_cells::tables::CELL, &key).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
+        let reader = golemdb_cells::CellReader::new(&tx);
+        assert!(matches!(
+            records
+                .get(ReadTarget::Head, KEY, None, Budget::Unlimited)
+                .result,
+            Err(RecordError::CorruptState(_))
+        ));
+        for projection in projections {
+            let record = records
+                .get(ReadTarget::Head, KEY, projection, Budget::Unlimited)
+                .result
+                .unwrap();
+            assert_eq!(record.cells.get(b"#meta".as_slice()), bad.as_ref());
+            assert_eq!(record.meta(), None);
+            assert_eq!(
+                crate::read_committed_by_id(&reader, 64, projection).unwrap(),
+                record
+            );
+        }
+    }
+}
+
+#[test]
+fn metadata_underflow_and_delete_mismatch_fail_atomically() {
+    use crate::RecordMeta;
+    for bad in [
+        // All are well-formed metadata; the operation discovers disagreement
+        // with the actual stored cells. Additions must not mask underflow.
+        RecordMeta {
+            cells: 1,
+            cell_bytes: 1,
+            indexed_cells: 1,
+            index_bytes: 1,
+        },
+        RecordMeta {
+            cells: 2,
+            cell_bytes: 18,
+            indexed_cells: 1,
+            index_bytes: 11,
+        },
+    ] {
+        let (_, branches, records) = setup();
+        let b = branches.begin().unwrap();
+        records
+            .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+            .result
+            .unwrap();
+        branches
+            .write(b, |writer| {
+                writer.put(CellKey::new(64, reserved::META), bad.encode());
+                Ok::<_, RecordError>(())
+            })
+            .unwrap();
+        let before = snapshot(&branches, b);
+        let info = branches.branch_info(b).unwrap();
+        if bad.cells == 1 {
+            assert!(matches!(
+                records
+                    .patch(
+                        b,
+                        KEY,
+                        patch_entries(
+                            [(name(b"name"), CellPatch::Write(text("Bobby", true)))].into()
+                        ),
+                        Budget::Unlimited
+                    )
+                    .result,
+                Err(RecordError::CorruptState(_))
+            ));
+        }
+        assert!(matches!(
+            records.delete(b, KEY, Budget::Unlimited).result,
+            Err(RecordError::CorruptState(_))
+        ));
+        assert_eq!(snapshot(&branches, b), before);
+        assert_eq!(branches.branch_info(b).unwrap(), info);
+    }
 }

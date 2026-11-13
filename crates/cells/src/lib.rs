@@ -66,6 +66,12 @@
 //! The former two-argument `from_u64`/`from_bytes32` constructors now take only
 //! the value; use `with_kind(CellKind::Attribute)` to request an attribute.
 //!
+//! The [`marker`] module names each cell type at compile time, one zero-sized
+//! marker per type (`marker::Dec32`, `marker::Date32`, …), where a Rust type is
+//! ambiguous: an `i32` is the value of an `i32`, a `dec32` or a `date32` cell.
+//! Code generic over one marker builds values of exactly one cell type. Float
+//! markers take [`NotNan32`] / [`NotNan64`], checked once, so no marker can fail.
+//!
 //! # Addressing and ownership
 //!
 //! [`CellName`] is the within-record name (including raw reserved-record keys).
@@ -107,13 +113,13 @@
 //! let cells = Cells::new(&hasher);
 //! let key = CellKey::new(42, CellNameRef::parse_user(b"status", 64)?);
 //! let mut tx = store.begin_write()?;
-//! let update = cells.apply(&mut tx, RootRef::Empty, [CellChange::Put {
+//! let update = cells.apply(&mut tx, 1, RootRef::Empty, [CellChange::Put {
 //!     key: key.clone(), value: CellValue::parse(b"\x02ready".to_vec())?,
 //! }])?;
 //! tx.commit()?;
 //! let read = store.begin_read()?;
 //! assert_eq!(cells.get(&read, &key)?.unwrap().as_str(), Some("ready"));
-//! assert_eq!(cells.reopen(&read, update.root.hash(&hasher))?, update.root);
+//! cells.validate_root(&read, update.root)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -127,7 +133,9 @@ mod cells;
 mod config;
 mod error;
 mod key;
+pub mod marker;
 mod name;
+mod not_nan;
 mod order;
 pub mod system;
 pub mod tables;
@@ -142,12 +150,14 @@ pub use config::{CellLimitError, CellLimits};
 pub use error::{CellError, CellValueParseError, Result};
 pub use key::{CellKey, CellKeyError};
 pub use name::{CellName, CellNameError, CellNameRef, reserved};
+pub use not_nan::{NotNan32, NotNan64};
 pub use order::{decode_float, encode_float, flip_sign};
 pub use types::{CellKind, CellType, FloatWidth, Width};
 pub use value::{CellValue, CellValueRef};
 
-/// Cell trie paths are full hash digests of the encoded cell key.
-pub const CELL_TRIE_PATH_BYTES: usize = size_of::<golemdb_merkle::Hash>();
+/// Cell trie paths are the record ID (eight bytes BE) followed by the full hash
+/// digest of the encoded cell key, so each record's cells share one subtree.
+pub const CELL_TRIE_PATH_BYTES: usize = size_of::<u64>() + size_of::<golemdb_merkle::Hash>();
 
 /// The metadata byte's high bit: whether the cell is indexable. The low 7
 /// bits are the type id.

@@ -177,6 +177,39 @@ fn materializes_across_roaring_partition_boundaries() {
     assert_eq!(union.len(), 11);
 }
 
+/// A bitmap of `ids`, assembled from containers as storage would.
+fn bitmap_of(ids: impl IntoIterator<Item = u64>) -> Bitmap {
+    let mut chunks: BTreeMap<u64, Vec<u16>> = BTreeMap::new();
+    for id in ids {
+        let (hi, lo) = path::split(id);
+        chunks.entry(hi).or_default().push(lo);
+    }
+    Bitmap::from_containers(
+        chunks
+            .into_iter()
+            .map(|(p, v)| BitmapContainer::from_values(p, v).unwrap()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn union_merges_overlapping_and_disjoint_containers() {
+    let mut union = bitmap_of([1, 2, 1 << 40]);
+    union |= bitmap_of([2, 3, u64::MAX]);
+    assert_eq!(union, bitmap_of([1, 2, 3, 1 << 40, u64::MAX]));
+}
+
+#[test]
+fn union_with_the_empty_bitmap_is_identity() {
+    let ids = bitmap_of([7, 1 << 32]);
+    let mut left = Bitmap::default();
+    left |= ids.clone();
+    assert_eq!(left, ids);
+    let mut right = ids.clone();
+    right |= Bitmap::default();
+    assert_eq!(right, ids);
+}
+
 #[test]
 fn assembly_rejects_ambiguous_input_and_omits_empties() {
     assert!(matches!(
@@ -212,6 +245,16 @@ proptest! {
     }
 
     #[test]
+    fn union_is_set_union(
+        a in prop::collection::vec(any::<u64>(), 0..100),
+        b in prop::collection::vec(any::<u64>(), 0..100),
+    ) {
+        let mut union = bitmap_of(a.iter().copied());
+        union |= bitmap_of(b.iter().copied());
+        prop_assert_eq!(union, bitmap_of(a.into_iter().chain(b)));
+    }
+
+    #[test]
     fn arbitrary_chunk_roundtrip_and_order_independence(path in 0u64..(1 << 48), offsets in prop::collection::vec(any::<u16>(), 1..500)) {
         let forward = BitmapContainer::from_values(path, offsets.iter().copied()).unwrap();
         let reverse = BitmapContainer::from_values(path, offsets.iter().rev().copied()).unwrap();
@@ -225,18 +268,18 @@ proptest! {
 fn bitmap_trie_rejects_containers_out_of_order() {
     let db = golemdb_storage::MemoryStore::new();
     let mut tx = golemdb_storage::Store::begin_write(&db).unwrap();
-    let trie = crate::bitmap_trie::BitmapTrie::new(&golemdb_merkle::Keccak256Hasher);
+    let trie = crate::bitmap_trie::BitmapTrie::new(&golemdb_merkle::Keccak256Hasher, &[0; 32]);
     // Batching reads every container from the original root, so a container
     // visited twice would lose its first changes.
     assert!(matches!(
-        trie.apply(&mut tx, None, [(1, 0, true), (0, 0, true)]),
+        trie.apply(&mut tx, 0, None, [(1, 0, true), (0, 0, true)],),
         Err(crate::IndexError::Bitmap(BitmapError::UnsortedPaths {
             previous: 1,
             path: 0
         }))
     ));
     assert!(matches!(
-        trie.apply(&mut tx, None, [(1, 0, true), (2, 0, true), (1, 1, true)]),
+        trie.apply(&mut tx, 0, None, [(1, 0, true), (2, 0, true), (1, 1, true)],),
         Err(crate::IndexError::Bitmap(BitmapError::UnsortedPaths {
             previous: 2,
             path: 1

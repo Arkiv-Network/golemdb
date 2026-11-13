@@ -1,8 +1,13 @@
 use crate::{CELL_BRANCH_DOMAIN, CELL_LEAF_DOMAIN};
-use golemdb_merkle::{Hash, HashProvider, LeafRef, RootRef, Trie};
+use golemdb_merkle::{HashProvider, LeafRef, RootRef, Trie, TrieUpdate};
 use golemdb_storage::{ReadCursor, ReadTransaction, WriteTransaction};
 
 use crate::{CELL_TRIE_PATH_BYTES, CellError, CellKey, CellValue, Result, tables};
+
+/// A cell's routing path, `recordID || H(encoded CellKey)`. Only
+/// [`CellTrie::path`] builds one, so every trie access is routed from a `CellKey`.
+#[derive(Clone, Copy)]
+pub(crate) struct CellPath([u8; CELL_TRIE_PATH_BYTES]);
 
 /// Cell-specific routing, leaf hashing and recovery over branch-only storage.
 pub(crate) struct CellTrie<'h, H: HashProvider> {
@@ -20,19 +25,30 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         }
     }
 
-    /// Construct a virtual leaf binding the complete routing path to the tagged
-    /// cell value: `H(CELL_LEAF_DOMAIN || path || typeTag || value)`.
-    /// The caller supplies `path = H(encoded CellKey)`; no leaf row is written.
-    fn leaf(&self, path: Hash, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
-        LeafRef {
-            path,
-            hash: self
-                .hasher
-                .hash_parts(&[&[CELL_LEAF_DOMAIN], &path, value.encoded_bytes()]),
-        }
+    /// Route a cell by its record ID, then by the hash of its encoded key, so
+    /// each record's cells share one subtree.
+    pub(crate) fn path(&self, key: &CellKey) -> CellPath {
+        let record_id = key.record_id().to_be_bytes();
+        // The encoded key is `recordID || name`; hashing its parts avoids allocating it.
+        let digest = self.hasher.hash_parts(&[&record_id, key.name().as_bytes()]);
+        let mut path = [0; CELL_TRIE_PATH_BYTES];
+        path[..record_id.len()].copy_from_slice(&record_id);
+        path[record_id.len()..].copy_from_slice(&digest);
+        CellPath(path)
     }
 
-    /// Verify that the leaf at `H(key)` commits to the value read from the `Cell` table.
+    /// Construct a virtual leaf binding the complete routing path to the tagged
+    /// cell value: `H(CELL_LEAF_DOMAIN || path || typeTag || value)`.
+    /// No leaf row is written.
+    fn leaf(&self, CellPath(path): CellPath, value: &CellValue) -> LeafRef<CELL_TRIE_PATH_BYTES> {
+        LeafRef::new(
+            path,
+            self.hasher
+                .hash_parts(&[&[CELL_LEAF_DOMAIN], &path, value.encoded_bytes()]),
+        )
+    }
+
+    /// Verify that the leaf at `path` commits to the value read from the `Cell` table.
     /// `None` requires absence from the trie. A different or missing commitment
     /// returns `RootMismatch`; storage and branch-validation errors propagate.
     /// This checks one address, not the entire state, and also applies to no-ops.
@@ -40,70 +56,63 @@ impl<'h, H: HashProvider> CellTrie<'h, H> {
         &self,
         tx: &impl ReadTransaction,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
-        key: &[u8],
+        path: CellPath,
         before: Option<&CellValue>,
     ) -> Result<()> {
-        let path = self.hasher.hash(key);
-        if self.trie.get(tx, root, &path)? != before.map(|value| self.leaf(path, value)) {
+        if self.trie.get(tx, root, &path.0)? != before.map(|value| self.leaf(path, value)) {
             return Err(CellError::RootMismatch);
         }
         Ok(())
     }
 
-    /// For each key, insert or replace the leaf at `H(key)`, or remove it when
-    /// the value is `None`, in one batched trie update. Returns the updated root
-    /// and retains old branches for copy-on-write history. The caller updates
-    /// the `Cell` table in the same transaction and must abort that transaction
-    /// if a mutation fails.
+    /// For each path, insert or replace its leaf, or remove it when the value
+    /// is `None`, in one batched trie update. Returns the updated root and the
+    /// rows it superseded; older commits' rows stay for their roots, and rows
+    /// this commit wrote and then replaced are deleted. The caller updates the
+    /// `Cell` table in the same transaction and must abort that transaction if
+    /// a mutation fails.
     pub(crate) fn set<'a>(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
-        changes: impl IntoIterator<Item = (&'a [u8], Option<&'a CellValue>)>,
-    ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
-        let edits = changes.into_iter().map(|(key, value)| {
-            let path = self.hasher.hash(key);
-            (path, value.map(|value| self.leaf(path, value).hash))
-        });
-        Ok(self.trie.apply(tx, root, edits)?)
+        changes: impl IntoIterator<Item = (CellPath, Option<&'a CellValue>)>,
+    ) -> Result<TrieUpdate<CELL_TRIE_PATH_BYTES>> {
+        let edits = (changes.into_iter())
+            .map(|(path, value)| (path.0, value.map(|value| self.leaf(path, value).hash)));
+        Ok(self.trie.apply(tx, commit, root, edits)?)
     }
 
-    /// Recover root metadata from a digest and the transaction's snapshot.
-    /// The empty-root digest requires an empty `Cell` table. An existing branch
-    /// is validated at its root row only, without auditing its subtree or the
-    /// `Cell` table. Otherwise the `Cell` table must contain exactly one valid
-    /// row whose key and value reconstruct the singleton hash.
-    /// Historical singleton recovery needs historical cell data or a retained
-    /// `RootRef`; an absent branch row alone never establishes a singleton.
-    pub(crate) fn reopen(
+    /// Validate a stored root against the transaction's snapshot.
+    /// An empty root requires an empty `Cell` table. A branch is validated at
+    /// its root row only, without auditing its subtree or the `Cell` table. A
+    /// singleton needs exactly one valid `Cell` row that reconstructs its leaf.
+    /// Historical singletons need historical cell data.
+    pub(crate) fn validate_root(
         &self,
         tx: &impl ReadTransaction,
-        hash: Hash,
-    ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
-        if hash == self.hasher.hash(&[]) {
-            if tx.cursor(tables::CELL, b"")?.next()?.is_some() {
-                return Err(CellError::RootMismatch);
+        root: RootRef<CELL_TRIE_PATH_BYTES>,
+    ) -> Result<()> {
+        match root {
+            RootRef::Branch(_) => self.trie.validate_root(tx, root)?,
+            RootRef::Empty => {
+                if tx.cursor(tables::CELL, b"")?.next()?.is_some() {
+                    return Err(CellError::RootMismatch);
+                }
             }
-            return Ok(RootRef::Empty);
+            RootRef::Leaf(leaf) => {
+                let mut cursor = tx.cursor(tables::CELL, b"")?;
+                let (key, value) = cursor.next()?.ok_or(CellError::RootMismatch)?;
+                if cursor.next()?.is_some() {
+                    return Err(CellError::RootMismatch);
+                }
+                let key = CellKey::decode(&key)?;
+                let value = CellValue::parse(value)?;
+                if self.leaf(self.path(&key), &value) != leaf {
+                    return Err(CellError::RootMismatch);
+                }
+            }
         }
-        if tx.get(tables::CELL_TRIE, &hash)?.is_some() {
-            let root = RootRef::Branch(hash);
-            self.trie.validate_root(tx, root)?;
-            return Ok(root);
-        }
-        // A missing branch is a singleton only when exactly one current row
-        // independently reconstructs the requested digest.
-        let mut cursor = tx.cursor(tables::CELL, b"")?;
-        let (key, value) = cursor.next()?.ok_or(CellError::RootMismatch)?;
-        if cursor.next()?.is_some() {
-            return Err(CellError::RootMismatch);
-        }
-        CellKey::decode(&key)?;
-        let value = CellValue::parse(value)?;
-        let leaf = self.leaf(self.hasher.hash(&key), &value);
-        if leaf.hash != hash {
-            return Err(CellError::RootMismatch);
-        }
-        Ok(RootRef::Leaf(leaf))
+        Ok(())
     }
 }

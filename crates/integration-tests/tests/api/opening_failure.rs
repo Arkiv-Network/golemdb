@@ -9,7 +9,7 @@ use std::{
 use golemdb_api::{CellLimits, Database, Genesis, HashAlgorithm, OpenConfig, OpenError};
 use golemdb_storage::{MemoryStore, ReadTransaction, StorageError, Store, Table, WriteTransaction};
 
-fn config() -> OpenConfig {
+fn config(directory: &std::path::Path) -> OpenConfig {
     OpenConfig::new(Genesis::new(
         HashAlgorithm::Keccak256,
         CellLimits {
@@ -17,7 +17,21 @@ fn config() -> OpenConfig {
             max_str_len: 64,
             max_bytes_len: 128,
         },
+        golemdb_api::RecordLimits {
+            max_cells: 100,
+            max_indexed_cells: 100,
+        },
+        Some(golemdb_api::ImmutableDataConfig::new(
+            500_000,
+            vec![golemdb_api::ImmutableDataSegment {
+                name: "events".into(),
+                columns: vec![golemdb_api::ImmutableDataColumn::new("payload")],
+                compression: golemdb_api::ImmutableDataCompression::Lz4,
+            }],
+        )),
+        golemdb_api::PricingConfig::zero(),
     ))
+    .with_immutable_data_directory(directory)
 }
 
 #[derive(Clone, Copy)]
@@ -27,8 +41,11 @@ enum Fault {
     Panic(usize),
     Commit,
     Read,
+    PricingReadPanic,
 }
 
+/// Clones share the wrapped store and the switches.
+#[derive(Clone)]
 struct Controlled<S> {
     inner: S,
     fault: Fault,
@@ -100,7 +117,25 @@ impl<W: ReadTransaction> ReadTransaction for ControlledWrite<W> {
         self.inner.get(table, key)
     }
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
+        if matches!(self.fault, Fault::PricingReadPanic)
+            && table == golemdb_cells::tables::CELL
+            && key == golemdb_cells::system::METERING_MODEL.id.to_be_bytes()
+        {
+            panic!("injected pricing load panic");
+        }
         self.inner.cursor(table, key)
+    }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if matches!(self.fault, Fault::Read) {
+            return Err(injected());
+        }
+        self.inner.with_value(table, key, inspect)
     }
 }
 
@@ -142,16 +177,19 @@ impl<W: WriteTransaction> WriteTransaction for ControlledWrite<W> {
 }
 
 fn failures(db: impl Store + Clone + Send + Sync + 'static) {
+    let files = tempfile::tempdir().unwrap();
     let baseline = Controlled::new(MemoryStore::new(), Fault::None);
     let count = baseline.mutations.clone();
-    let expected = *Database::from_store(baseline, &config()).unwrap().info();
+    let expected = *Database::from_store(baseline, &config(files.path()))
+        .unwrap()
+        .info();
     let writes = count.load(Ordering::SeqCst);
     assert!(writes > 10);
     for fault in (1..=writes)
         .map(Fault::Write)
         .chain([Fault::Commit, Fault::Read])
     {
-        let error = Database::from_store(Controlled::new(db.clone(), fault), &config())
+        let error = Database::from_store(Controlled::new(db.clone(), fault), &config(files.path()))
             .err()
             .expect("injected failure must abort opening");
         assert!(
@@ -164,7 +202,7 @@ fn failures(db: impl Store + Clone + Send + Sync + 'static) {
         assert!(
             std::panic::catch_unwind(AssertUnwindSafe(|| Database::from_store(
                 Controlled::new(db.clone(), Fault::Panic(step)),
-                &config()
+                &config(files.path())
             )))
             .is_err()
         );
@@ -172,14 +210,16 @@ fn failures(db: impl Store + Clone + Send + Sync + 'static) {
         assert!(db.begin_write().unwrap().is_empty().unwrap());
     }
     assert_eq!(
-        *Database::from_store(db.clone(), &config()).unwrap().info(),
+        *Database::from_store(db.clone(), &config(files.path()))
+            .unwrap()
+            .info(),
         expected
     );
     for fault in [Fault::Write(1), Fault::Commit] {
         let observed = Controlled::new(db.clone(), fault);
         let count = observed.mutations.clone();
         assert!(
-            !Database::from_store(observed, &config())
+            !Database::from_store(observed, &config(files.path()))
                 .unwrap()
                 .info()
                 .created
@@ -200,8 +240,29 @@ fn mdbx_genesis_is_atomic_at_every_write_and_reopen_is_read_only() {
 }
 
 #[test]
+fn panic_loading_initial_pricing_aborts_genesis_without_poisoning_the_store() {
+    let store = MemoryStore::new();
+    let files = tempfile::tempdir().unwrap();
+    assert!(
+        std::panic::catch_unwind(AssertUnwindSafe(|| Database::from_store(
+            Controlled::new(store.clone(), Fault::PricingReadPanic),
+            &config(files.path())
+        )))
+        .is_err()
+    );
+    assert!(store.begin_write().unwrap().is_empty().unwrap());
+    assert!(
+        Database::from_store(store, &config(files.path()))
+            .unwrap()
+            .info()
+            .created
+    );
+}
+
+#[test]
 fn physical_limits_cover_full_index_keys_fixed_values_and_size_overflow() {
-    let mut cfg = config();
+    let files = tempfile::tempdir().unwrap();
+    let mut cfg = config(files.path());
     for (name, string, bytes, max_key, max_value) in [
         (0, 64, 128, usize::MAX, usize::MAX),
         (32, 64, 128, 97, usize::MAX), // index needs 32 + 2 + 64
@@ -228,5 +289,34 @@ fn physical_limits_cover_full_index_keys_fixed_values_and_size_overflow() {
     let mut bounded = Controlled::new(MemoryStore::new(), Fault::None);
     bounded.max_key = 98;
     bounded.max_value = 16384;
-    assert!(Database::from_store(bounded, &config()).is_ok());
+    assert!(Database::from_store(bounded, &config(files.path())).is_ok());
+}
+
+#[test]
+fn invalid_typed_immutable_configuration_is_rejected_before_mutation() {
+    let files = tempfile::tempdir().unwrap();
+    for change in 0..6 {
+        let mut cfg = config(files.path());
+        let immutable_data = cfg.genesis.immutable_data.as_mut().unwrap();
+        match change {
+            0 => immutable_data.shard_span = 0,
+            1 => immutable_data.segments[0].columns.clear(),
+            2 => immutable_data.segments[0].name = "#system".into(),
+            3 => {
+                let segment = immutable_data.segments[0].clone();
+                immutable_data.segments.push(segment);
+            }
+            4 => immutable_data.segments[0].columns[0].name = "x".repeat(16 * 1024),
+            _ => immutable_data.segments.clear(),
+        }
+        let store = MemoryStore::new();
+        let controlled = Controlled::new(store.clone(), Fault::None);
+        let mutations = controlled.mutations.clone();
+        assert!(matches!(
+            Database::from_store(controlled, &cfg),
+            Err(OpenError::InvalidConfig(_))
+        ));
+        assert_eq!(mutations.load(Ordering::SeqCst), 0);
+        assert!(store.begin_write().unwrap().is_empty().unwrap());
+    }
 }

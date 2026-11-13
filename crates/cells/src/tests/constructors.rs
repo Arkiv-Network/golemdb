@@ -166,7 +166,10 @@ fn float_construction_normalizes_zero_and_rejects_nan_but_parsing_stays_strict()
     );
     let mut bytes = vec![0x19, 0x7f];
     bytes.extend([0xff; 7]);
-    assert_eq!(CellValue::parse(bytes), Err(CellValueParseError::NegativeZero));
+    assert_eq!(
+        CellValue::parse(bytes),
+        Err(CellValueParseError::NegativeZero)
+    );
 
     let mut previous: Option<CellValue> = None;
     for value in [

@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
-use golemdb_branch::{Head, read_head_state, write_head};
+use golemdb_branch::{CommitId, Head, Roots, head_roots, init_head, read_head_state};
 use golemdb_cells::{CellChange, CellKey, CellNameRef, CellValue, Cells, reserved, system, tables};
 use golemdb_index::Index;
 use golemdb_merkle::{Hash, HashAlgorithm, HashProvider, RootRef};
+use golemdb_metering::{ModelMetadata, PricingConfig, model_cells};
 use golemdb_storage::{ReadCursor, ReadTransaction, Table, WriteTransaction};
 
 use crate::{Genesis, OpenConfig, OpenError, OpenInfo, OpenMode, OpenResult};
@@ -19,7 +20,7 @@ fn hash_id(algorithm: HashAlgorithm) -> u16 {
     }
 }
 
-fn initial_cells(config: &Genesis) -> BTreeMap<CellKey, CellValue> {
+fn initial_cells(config: &Genesis) -> OpenResult<BTreeMap<CellKey, CellValue>> {
     let mut cells = BTreeMap::new();
     for record in system::ALL {
         cells.insert(
@@ -42,11 +43,51 @@ fn initial_cells(config: &Genesis) -> BTreeMap<CellKey, CellValue> {
             CellValue::from_u32(value),
         );
     }
+    for (name, value) in [
+        (reserved::MAX_RECORD_CELLS, config.record_limits.max_cells),
+        (
+            reserved::MAX_RECORD_INDEXED_CELLS,
+            config.record_limits.max_indexed_cells,
+        ),
+    ] {
+        cells.insert(
+            CellKey::new(system::PARAMS.id, name),
+            CellValue::from_u64(value),
+        );
+    }
     cells.insert(
         allocator_key(),
         CellValue::from_u64(system::FIRST_USER_RECORD_ID),
     );
-    cells
+    cells.extend(pricing_cells(&config.metering));
+    if let Some(immutable_data) = &config.immutable_data {
+        cells.insert(
+            CellKey::new(system::PARAMS.id, reserved::SHARD_SPAN),
+            CellValue::from_u64(immutable_data.shard_span),
+        );
+        let segments = immutable_data
+            .encode_segments()
+            .map_err(|error| OpenError::InvalidConfig(error.to_string()))?;
+        cells.insert(
+            CellKey::new(system::PARAMS.id, reserved::IMMUTABLE_DATA_SEGMENTS),
+            CellValue::from_bytes(&segments),
+        );
+    }
+    Ok(cells)
+}
+
+/// Genesis owns the initial model identity; PricingConfig itself can describe
+/// other models without imposing a version or activation commit.
+pub(crate) fn pricing_cells(config: &PricingConfig) -> Vec<(CellKey, CellValue)> {
+    model_cells(
+        &ModelMetadata {
+            version: 1,
+            activation_commit: CommitId::GENESIS.get(),
+            golemdb_code_version: config.golemdb_code_version,
+            host_code_version: config.host_code_version,
+        },
+        &config.weights,
+    )
 }
 
 fn allocator_key() -> CellKey {
@@ -81,7 +122,7 @@ pub(crate) fn prepare(
     config: &OpenConfig,
     hasher: &impl HashProvider,
 ) -> OpenResult<OpenInfo> {
-    let cells = initial_cells(&config.genesis);
+    let cells = initial_cells(&config.genesis)?;
     let genesis_id = identity(&config.genesis, &cells, hasher);
     if tx.get(SUPERBLOCK, b"head")?.is_none() {
         if !tx.is_empty()? {
@@ -92,6 +133,9 @@ pub(crate) fn prepare(
         if config.mode == OpenMode::ExistingOnly {
             return Err(OpenError::NotInitialized);
         }
+        // Only a new deployment needs code for its genesis model. Reopening
+        // validates the active committed model instead (old host code may retire).
+        config.genesis.metering.validate(&config.host_schemas)?;
         tx.put(SUPERBLOCK, b"format", &FORMAT.to_be_bytes())?;
         tx.put(
             SUPERBLOCK,
@@ -100,8 +144,10 @@ pub(crate) fn prepare(
         )?;
         tx.put(SUPERBLOCK, b"roaring", &ROARING.to_be_bytes())?;
         tx.put(SUPERBLOCK, b"genesis_id", &genesis_id)?;
+        let commit_id = CommitId::GENESIS;
         let update = Cells::new(hasher).apply(
             tx,
+            commit_id.get(),
             RootRef::Empty,
             cells
                 .into_iter()
@@ -109,12 +155,11 @@ pub(crate) fn prepare(
         )?;
         // Every genesis cell is a field, so IndexRoot is the canonical empty root.
         // #roots cannot contain its own roots and has no history entries at commit 0.
-        let head = Head {
-            commit_id: crate::CommitId::GENESIS,
-            state_root: update.root.hash(hasher),
-            index_root: hasher.hash(&[]),
+        let roots = Roots {
+            state: update.root,
+            index: RootRef::Empty,
         };
-        write_head(tx, &head)?;
+        let head = init_head(tx, &roots, hasher)?;
         return Ok(OpenInfo::new(true, head, genesis_id));
     }
 
@@ -158,8 +203,9 @@ fn validate_state(
     hasher: &impl HashProvider,
 ) -> OpenResult<()> {
     let cells = Cells::new(hasher);
-    let root = cells.reopen(tx, head.state_root)?;
-    Index::new(hasher).reopen(tx, head.index_root)?;
+    let roots = head_roots(tx, head, hasher)?;
+    cells.validate_root(tx, roots.state)?;
+    Index::new(hasher).validate_root(tx, roots.index)?;
     let allocator = cells
         .get(tx, &allocator_key())?
         .ok_or(OpenError::CorruptState("missing allocator"))?;
@@ -182,10 +228,27 @@ fn validate_state(
         ));
     }
     expected.insert(allocator_key(), allocator);
+    // Admin values may change after genesis; their current contents are validated
+    // by the owning component (e.g. the pricing loader), not compared to genesis.
+    // Keep permanent #key identities and bindings in #recordKeys in this check.
+    if head.commit_id != CommitId::GENESIS {
+        expected.retain(|key, _| {
+            !system::is_admin_record(key.record_id()) || key.name() == reserved::KEY
+        });
+    }
     for (key, value) in &expected {
         if cells.get(tx, key)?.as_ref() != Some(value) {
             return Err(OpenError::CorruptState(
                 "missing or inconsistent reserved identity, binding, or parameter",
+            ));
+        }
+    }
+    // Disabled immutable data has no parameter cells, including after genesis.
+    for name in [reserved::SHARD_SPAN, reserved::IMMUTABLE_DATA_SEGMENTS] {
+        let key = CellKey::new(system::PARAMS.id, name);
+        if !expected.contains_key(&key) && cells.get(tx, &key)?.is_some() {
+            return Err(OpenError::CorruptState(
+                "immutable-data parameter present while disabled",
             ));
         }
     }
@@ -216,7 +279,8 @@ fn validate_state(
     // committed trie paths. This performs no writes and does not rebuild genesis.
     cells.apply(
         tx,
-        root,
+        head.commit_id.get(),
+        roots.state,
         expected
             .into_iter()
             .map(|(key, value)| CellChange::Put { key, value }),

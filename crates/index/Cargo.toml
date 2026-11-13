@@ -10,12 +10,7 @@ golemdb-cells.workspace = true
 golemdb-merkle.workspace = true
 golemdb-storage.workspace = true
 thiserror.workspace = true
-# Pinned exactly, not `0.11`. Roaring's internal representation rules — the 4096
-# array/bitset threshold, `optimize()`'s size comparisons, the serialized header
-# layout — decide the bytes we hash into the Merkle trie, and none of them are
-# covered by its public API contract. A patch bump can therefore change every root
-# hash. 
-roaring = "=0.11.5"
+roaring.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

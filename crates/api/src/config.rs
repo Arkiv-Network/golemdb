@@ -1,33 +1,56 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use golemdb_cells::CellLimits;
+use golemdb_immutable_data::ImmutableDataConfig;
 use golemdb_merkle::HashAlgorithm;
+use golemdb_metering::{HostMeteringSchema, PricingConfig};
+use golemdb_pruning::PruningConfig;
+use golemdb_record::RecordLimits;
 use serde::{Deserialize, Serialize};
 
 use crate::{OpenError, OpenResult};
 
 /// Immutable startup values written at commit zero and validated on reopening.
-/// Every YAML field is required; no admission limit or hash algorithm is silently
+/// Omitted or null `immutable_data` disables immutable storage. Other YAML fields
+/// are required except a column's type (defaults to bytes).
+/// No admission limit, shard span, compression or hash algorithm is silently
 /// selected by the opener. Unknown fields are rejected so unsupported settings
 /// cannot be silently ignored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Genesis {
     pub hash_function: HashAlgorithm,
     pub cell_limits: CellLimits,
+    pub record_limits: RecordLimits,
+    /// Initial model 1 and explicit weights; missing weights remain unpriced.
+    pub metering: PricingConfig,
+    /// None disables immutable storage. Some requires at least one segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub immutable_data: Option<ImmutableDataConfig>,
 }
 
 impl Genesis {
-    pub const fn new(hash_function: HashAlgorithm, cell_limits: CellLimits) -> Self {
+    pub const fn new(
+        hash_function: HashAlgorithm,
+        cell_limits: CellLimits,
+        record_limits: RecordLimits,
+        immutable_data: Option<ImmutableDataConfig>,
+        metering: PricingConfig,
+    ) -> Self {
         Self {
             hash_function,
             cell_limits,
+            record_limits,
+            immutable_data,
+            metering,
         }
     }
 
     pub fn from_yaml(yaml: &str) -> OpenResult<Self> {
-        serde_saphyr::from_str(yaml).map_err(OpenError::Yaml)
+        let genesis: Self = serde_saphyr::from_str(yaml).map_err(OpenError::Yaml)?;
+        genesis.validate_immutable_data()?;
+        Ok(genesis)
     }
 
     /// Read only this explicit path; no environment or implicit file search.
@@ -36,6 +59,7 @@ impl Genesis {
     }
 
     pub(crate) fn validate(&self, max_key: usize, max_value: usize) -> OpenResult<()> {
+        self.validate_immutable_data()?;
         let limits = self.cell_limits;
         if limits.max_cell_name_len == 0 {
             return Err(OpenError::InvalidConfig(
@@ -48,7 +72,7 @@ impl Genesis {
         let key = (name + 8)
             .max(name + 2 + u64::from(limits.max_str_len).max(32))
             .max(40);
-        // Format 1 reserves 16 KiB for fixed engine values: trie nodes, metadata,
+        // The format reserves 16 KiB for fixed engine values: trie nodes, metadata,
         // root pairs, and canonical single-u16-domain Roaring containers.
         let value = (1 + u64::from(limits.max_bytes_len.max(limits.max_str_len))).max(16 * 1024);
         if key > max_key as u64 {
@@ -60,6 +84,30 @@ impl Genesis {
             return Err(OpenError::InvalidConfig(format!(
                 "configured cells and engine rows need {value}-byte values; backend supports {max_value}"
             )));
+        }
+        // Reserved pricing names are not subject to user-cell caps, but their
+        // actual encodings must fit this backend (including long host names).
+        for (key, value) in crate::genesis::pricing_cells(&self.metering) {
+            if key.encode().len() > max_key || value.encoded_bytes().len() > max_value {
+                return Err(OpenError::InvalidConfig(
+                    "metering cells exceed backend key/value limits".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_immutable_data(&self) -> OpenResult<()> {
+        if let Some(config) = &self.immutable_data {
+            config
+                .validate()
+                .map_err(|error| OpenError::InvalidConfig(error.to_string()))?;
+            if config.segments.is_empty() {
+                return Err(OpenError::InvalidConfig(
+                    "immutable_data needs at least one segment; use None or omit it to disable"
+                        .into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -76,11 +124,19 @@ pub enum OpenMode {
     CreateNew,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OpenConfig {
     pub genesis: Genesis,
     pub mode: OpenMode,
+    /// Local binary capabilities; names/versions, not persisted weight values.
+    pub host_schemas: Vec<HostMeteringSchema>,
+    /// Local immutable-file directory; does not affect genesis identity.
+    /// `Database::open` defaults to `<database>/immutable-data`. `from_store`
+    /// requires an explicit directory when genesis declares immutable segments.
+    pub immutable_data_directory: Option<PathBuf>,
+    /// Prune inside every commit with these settings; `None` turns pruning off.
+    pub pruning: Option<PruningConfig>,
 }
 
 impl OpenConfig {
@@ -88,11 +144,30 @@ impl OpenConfig {
         Self {
             genesis,
             mode: OpenMode::CreateIfMissing,
+            host_schemas: Vec::new(),
+            immutable_data_directory: None,
+            pruning: None,
         }
     }
 
     pub const fn with_mode(mut self, mode: OpenMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    pub fn with_host_schemas(mut self, schemas: Vec<HostMeteringSchema>) -> Self {
+        self.host_schemas = schemas;
+        self
+    }
+
+    pub fn with_immutable_data_directory(mut self, directory: impl AsRef<Path>) -> Self {
+        self.immutable_data_directory = Some(directory.as_ref().to_path_buf());
+        self
+    }
+
+    /// Prune inside every commit with `pruning`.
+    pub const fn with_pruning(mut self, pruning: PruningConfig) -> Self {
+        self.pruning = Some(pruning);
         self
     }
 }

@@ -13,9 +13,11 @@ and adapters.
 | Crate | Responsibility |
 | --- | --- |
 | `api` | Public `Api` trait, `Database` handle, typed CRUD requests, opening, genesis initialization and validation. |
-| `record` | Record identity, key bindings, allocation, admission checks, and atomic CRUD over branch cell views. |
+| `metering` | `Budget`, immutable named schedules, checked write pricing, `WriteMeter` and per-weight ledgers; persisted model loading and shared pricing snapshots over `cells`/`storage`. Calculations remain storage-independent. |
+| `record` | Record identity, admission, metered CUD planning against the shared persisted provider, final approval and atomic plan application over branch cell views. |
 | `branch` | Branch registry, overlays, undo frames, guarded reads and writes, sealing, and atomic publication. |
 | `cells` | Cell names, keys, types, canonical values, deployment limits, reserved-record constants, `Cell` storage and its commitment. |
+| `immutable-data` | Typed rows and genesis schemas using cell codecs, NippyJar/memory files, physical reads/recovery and transactional log metadata. |
 | `index` | Ordered terms, bitmap containers, posting updates, index queries, and the two index commitment tiers. |
 | `merkle` | Generic compressed hexary Patricia tries, branch codecs, traversal, immutable branch mutation, and hash providers. |
 | `storage` | Transactional ordered KV traits, cursors, shared scans, and `MemoryStore`. |
@@ -57,16 +59,16 @@ with zeroes. Every listed record has its own `#key` and a binding in `#recordKey
 
 | ID | Record | Contents and role |
 | --- | --- | --- |
-| 0 | `#params` | `u32` fields `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`. |
+| 0 | `#params` | `u32` fields `#maxCellNameLen`, `#maxStrLen`, `#maxBytesLen`; `u64` `#shardSpan` and bytes `#immutableDataSegments` only when immutable data is enabled. |
 | 1 | `#alloc` | `u64` field `#nextRecordID`, initially 64. |
 | 2 | `#roots` | Previous-commit roots, addressed by raw big-endian commit IDs. |
 | 3 | `#recordKeys` | Public-key-to-record-ID bindings. |
 | 4 | `#rootIndex` | Reserved identity for index-root-related schema. |
-| 32 | `@meteringModel` | Reserved identity for metering models. |
-| 33 | `@modelWeight` | Reserved identity for pricing weights. |
+| 32 | `@meteringModel` | Model version (u64 BE) → bytes field of activation commit, GolemDB code, host code (three u64 BE). |
+| 33 | `@modelWeight` | Model version (u64 BE) ‖ weight name → non-indexed u64, including host values. |
 
 Genesis initializes the catalogue, identities, bindings, limits, and allocator.
-The root and metering records start with identity cells only. Reserved cells are
+Root records start with identity cells only. Metering installs model 1 at commit 0 and the explicit genesis weights. Reserved cells are
 fields and do not produce attribute index terms.
 
 ### Canonical cell and term encoding
@@ -110,7 +112,7 @@ Ordered comparisons and scans are meaningful within a single name/type prefix.
 | --- | --- | --- |
 | `Superblock` | Metadata name | Format identifiers, genesis identity, or head. |
 | `Cell` | Encoded `CellKey` | Tagged canonical cell value. |
-| `CellTrie` | Branch hash | Compact branch bytes for 32-byte paths. |
+| `CellTrie` | Branch hash | Compact branch bytes for 40-byte paths. |
 | `Index` | Ordered index term | Nonempty bitmap root hash. |
 | `IndexTrie` | Branch hash | Compact branch bytes for 32-byte paths. |
 | `BitmapTrie` | Branch hash | Compact branch bytes for 6-byte paths. |
@@ -152,7 +154,7 @@ dispatch. The same provider supplies routing, leaf, and branch hashes.
 `hash_parts` concatenates its arguments without implicit framing.
 
 ```text
-cell_path        = H(encoded_cell_key)
+cell_path        = record_id_be || H(encoded_cell_key)
 cell_leaf        = H(00 || cell_path || tagged_cell_value)
 cell_branch      = H(01 || branch_payload)
 term_path        = H(encoded_index_term)
@@ -163,8 +165,10 @@ bitmap_branch    = H(05 || branch_payload)
 ```
 
 Domains are single bytes written above in hexadecimal. Tries are compressed
-16-way Patricia trees, visiting each byte's high nibble first. Cell and index paths
-are 32 bytes; bitmap paths are 6 bytes. The generic trie supports 1–32-byte paths.
+16-way Patricia trees, visiting each byte's high nibble first. Cell paths are
+40 bytes and lead with the record ID, so a record's cells share one subtree;
+index paths are 32 bytes; bitmap paths are 6 bytes. The generic trie supports
+1–127-byte paths.
 
 ```text
 branch_payload = prefix_len:u8
@@ -246,9 +250,9 @@ undo entries and can decrease on rollback; it is not an OCC revision token.
 
 Seal computes a net cell diff and derives index posting changes from actual old
 and new attribute values. It applies both to buffered storage, computes the roots,
-and freezes the branch without opening a durable writer. Repeated seal reuses the
-result after checking head. Sealed branches allow reads but reject writes,
-checkpoints, and rollback.
+and freezes live cell state without opening a durable writer. Repeated seal reuses
+the result after checking head. Sealed branches allow reads but reject cell writes,
+checkpoints, and rollback; independent immutable batches remain editable.
 
 Sealing commit `n + 1` also adds `#roots[n] = state_root(n) || index_root(n)` as a
 non-indexed bytes cell. Its name is `n:u64_be`. This avoids committing a root to
@@ -268,24 +272,91 @@ operations and can bypass record invariants.
 ### Public API and opening
 
 One synchronous, dyn-compatible `Api` trait covers CRUD, branch lifecycle, and
-immutable-data signatures. Consumers can use `&dyn Api` or
+typed immutable-data operations. Consumers can use `&dyn Api` or
 `Arc<dyn Api + Send + Sync>`. `Database` clones share the engine and branch registry.
 Results own their data and expose no storage transactions or cell writers.
 
 | Call | Request | Result |
 | --- | --- | --- |
-| `create(branch, operation)` | `RecordOp<op::Create>` | `RecordKey` |
-| `get(target, operation)` | `RecordOp<op::Get>` | `Record` |
-| `patch(branch, operation)` | `RecordOp<op::Patch>` | `()` |
-| `delete(branch, operation)` | `RecordOp<op::Delete>` | `()` |
+| `create(branch, operation)` | `RecordOp<op::Create>` | `Metered<RecordKey>` |
+| `get(target, operation)` | `RecordOp<op::Get>` | `Metered<Record>` |
+| `patch(branch, operation)` | `RecordOp<op::Patch>` | `Metered<()>` |
+| `delete(branch, operation)` | `RecordOp<op::Delete>` | `Metered<()>` |
+| `query(commit, operation)` | `QueryOp` | `Metered<QueryPage>` |
+| `count(commit, operation)` | `CountOp` | `Metered<u64>` |
 
-Each constructor requires a key: `RecordOp::create(key)`, `get(key)`, `patch(key)`,
-or `delete(key)`. Write helpers accept explicit `CellValue`s and immediately return
-`Result<Self>` on invalid names, incompatible kinds, or duplicate names.
-`.attribute()` and `.field()` select kind; create's `.insert()` and patch's `.set()`
-preserve the supplied value's kind. Patch also has `.remove()`. Operations implement
-`Clone`, `PartialEq`, and `Eq` and provide inspection methods for mocks and adapters.
-Raw record maps and patch enums are not re-exported by the API.
+Record constructors require a key and explicit `Budget`: `RecordOp::create(key, budget)`,
+`get(key, budget)`, `patch(key, budget)` and `delete(key, budget)`. Query/count constructors
+likewise require a budget. Record builders only collect input, preserving caller order,
+duplicates, names and original values. They provide no `validate()` or saved error.
+The record-owned `CreateEntry` / `PatchEntry` slices are exposed by `entries()` and
+passed with the budget to record execution. Requested kinds remain separate from
+original value kinds until admission. The private record `admission` module checks
+reserved keys, then each entry's lengths, name grammar, requested kind and duplicate
+names before record lookup. Every write uses `WriteMeter` directly with the pricing
+context supplied at construction. Meter checkpoints guard admission checks, with
+genesis-configured lengths checked before byte traversal; resulting records obey
+the configured cell-count caps. There are no
+additional request-entry or total-input-byte caps. Input errors retain typed causes.
+Patch `.set()` resolves the stored kind during execution and fails with `CellNotFound`
+for a missing cell. Reads retain raw projections until target selection, then normalize.
+There is no create `.insert()`. Patch also has `.remove()`. Operations implement
+`Clone`, `PartialEq`, and `Eq`.
+
+`Budget` is defined in `golemdb-metering` and re-exported by both `golemdb-api` and
+`golemdb-query`. API owns `QueryOp` and `CountOp`, as it owns `RecordOp`.
+`QueryOp` wraps a query-owned `QueryRequest` and a separate budget; `CountOp`
+holds a filter and budget. API unwraps these into query execution arguments.
+Query owns the filter and typed operands, sort keys, result pages, admission
+and execution. Query projections keep their existing builder normalization.
+
+`Metered<T>` holds a result and a receipt on every outcome. CRUD costs use the
+committed pricing snapshot captured at the selected origin/head; query/count budgets
+remain unenforced. User effects exclude system cells, failed writes and
+no-ops. `priced_at` comes from the same validated branch origin or committed snapshot
+as execution; unavailable history uses the captured head. Unknown/stale handles and
+sealed writes have no pricing snapshot. `.into_result()` explicitly drops a receipt;
+`map` and `map_err` preserve it. Write budget failures map to `OutOfBudget { required }`;
+only explicit zero prices make charged work free. Missing prices never default to zero.
+
+The metering core prices `PlanningStep` and `MutationCharge` against an immutable
+`Schedule`. `WriteMeter::run_step` checks and records a complete charge before its
+action, including failed validation; the record base combines `read.key` and
+`write.record.{op}` atomically. Prospective mutations are separate until `finish`.
+Missing weights and checked cost/count overflow stop the meter, even with Unlimited.
+`INITIAL_DEPTHS` supplies temporary cell/index depth 6; fixtures may supply others.
+Population counters/depth selection remain deferred; weights persist at genesis.
+`Outcome.accounting` carries cost and `Ledger` through API conversion. Receipts
+always have a ledger keyed by `WeightName`, re-exported by API; failed effects stay
+zero while charged work survives. Database writes use the same `Arc<PricingProvider>`
+as API inspection. Record captures a snapshot inside the branch guard before admission,
+with no extra head read or model scan. Missing-weight failures log the weight name.
+`get` uses `ReadStep`/`ReadMeter`; query and count remain unmetered.
+Projected values are inspected through borrowed storage/cell callbacks before copying.
+Full user scans are prepaid from #meta; reserved scans charge per traversal attempt,
+including terminal probes and tombstones. Target selection remains before admission.
+Read `evaluated_at` changes are deferred.
+
+CUD executes one read-only `WritePlan` followed by approval and application under
+the same branch guard. `Records::new(branches, WritePricing)` requires immutable
+configuration containing the shared provider, depths and validated genesis limits.
+Admission and planning use the metering crate's `WriteMeter` directly, with no
+record-side meter adapter or unpriced path. Patch/delete read #meta
+and then #key before user cells. Every indexed leave/join reads its term at the
+committed origin, without loading postings. The term-creation surcharge uses that
+origin even after earlier joins in the branch. Application has no storage reads.
+
+`RecordScan` skips tombstones using a live-overlay-key set and coalesced intervals
+of hidden origin rows. It is read-only. Branch `locate_cell` returns an opaque
+`CellLocation` describing a key's committed position; it neither plans nor applies
+a mutation. Record obtains it within the cell-read checkpoint and stores it in a
+record-owned `PlannedDelete`. After budget approval, branch `delete_at` applies the
+tombstone and maintains the scan indexes without storage reads. The undo journal
+restores this auxiliary state. Each scan step reads at most two origin rows and
+one overlay value, and location discovery at most two further rows; calibration
+must cover this bounded bookkeeping. Raw user-cell tombstones are rejected by this
+interface; the existing general `CellScan` is unchanged. Delete scans #meta's user-cell count,
+then performs one bounded end probe covered by its record base.
 
 Get reads all cells, including `#key`, unless `.only(names)` selects a projection.
 Names may be text or raw bytes; selections are deduplicated and sorted. Missing
@@ -302,10 +373,15 @@ available through `Error::source()`.
 `Database::open(path, &OpenConfig)` opens MDBX directly. `open_with_options` accepts
 `MdbxOptions`; `open_memory(&Genesis)` creates a memory-backed database;
 `from_store(store, &OpenConfig)` accepts a supplied store. `OpenConfig` contains
-`Genesis` and `OpenMode::{CreateIfMissing, ExistingOnly, CreateNew}`.
+`Genesis`, `OpenMode::{CreateIfMissing, ExistingOnly, CreateNew}`, host code declarations and the optional immutable-data directory.
 
-`Genesis` contains the hash algorithm and cell limits. YAML loading uses an explicit
-path and rejects missing, duplicate, or unknown fields. Backend capacity and paths
+`Genesis` contains the hash algorithm, cell/record limits, required `PricingConfig`
+(`metering` in YAML) and optional immutable-data configuration. `Genesis::new` takes
+initial pricing as its fifth argument; `PricingConfig::zero()` is an explicit
+development/test choice, never an implicit default. `None`, omitted YAML or `immutable_data: null` disables the feature.
+An enabled configuration requires a positive shard span and at least one segment.
+YAML loading uses an explicit path and rejects missing required, duplicate or
+unknown fields; an omitted immutable column type resolves to bytes. Backend capacity and paths
 are separate from genesis identity. The opener checks physical key/value ceilings,
 including index keys and a 16 KiB engine-value requirement.
 
@@ -348,6 +424,27 @@ metadata encoding require a single consistent contract across API, record, and
 branch layers. Detailed formulas and schedule semantics belong in
 `docs/golem-db-metering.md`.
 
+`metering::PricingProvider` loads model/weight records directly through `CellReader`
+in the same serialized view used by opening. It has no dependency on record/query/branch.
+The loader receives the commit number from its caller. Models contain declared GolemDB
+and host weights; absent values remain unpriced, while missing/ignored names produce
+warning logs. Unsupported active GolemDB/host code versions or
+malformed pricing fail opening. New genesis rejects undeclared weight names. Host
+capabilities (`OpenConfig::with_host_schemas`) are local and do not alter genesis identity.
+`HostMeteringSchema` declares a host code version's weight names; `PricingConfig`
+contains selected code versions and actual values for both GolemDB and host weights.
+API genesis chooses model 1/commit 0 and uses metering's shared `model_cells` codec.
+
+`Api::metering_model(commit_id)` and `model_weights(commit_id, version)` are unmetered
+inspection: absent commit means head; explicit non-head commits are unavailable. Results
+carry the resolved commit; absent version means active, unknown versions return NotFound.
+Active and pending models share API `MeteringModelMetadata`, converting the numeric
+activation commit from metering's metadata into `CommitId`. No diagnostics list is exposed.
+Weight maps and models are shared through Arc. Ordinary commits change the call's commit
+context but do not reread schedules. Runtime admin writes and activation refresh remain
+iteration 8; low-level price changes and any rewind require reopening/reloading. Public
+CRUD enforces persisted prices and budgets; query metering remains deferred.
+
 ### Generated record keys and typed input conversion
 
 Deterministic key generation requires a specified hash domain, derivation inputs,
@@ -362,19 +459,124 @@ parsing belongs to CLI, HTTP, and TCP adapters rather than record logic.
 
 ### Immutable data
 
-Immutable data is organized into named segments of rows, with each row represented
-by one opaque byte array per column. Every row has a dense segment-local ordinal;
-an optional 32-byte `ImmutableDataKey` adds segment-local unique addressing.
-Record keys and immutable-data keys are distinct types.
+The `immutable-data` crate defines validated named schemas with ordered, typed
+columns (default `bytes`), owned `CellValue` rows, `u64` ordinals and optional
+32-byte keys. It reuses cell payload codecs directly, normalizes values to fields,
+and omits cell tags from storage payloads. Cell size limits do not apply. Projections
+reject empty, duplicate or unknown selections and decode in caller order. Read rows
+share owned layout metadata: `get::<T>(name)` checks exact logical types,
+`value(name)` borrows a cell value, and `iter()` yields named values in projection
+order. Unknown and unselected columns are distinct errors. Append rows remain
+unnamed ordered values; named access on them returns an error.
 
-`immutable_data_append` targets a sealed branch and returns a provisional ordinal.
-The publication contract makes row data and key bindings visible together at commit;
-discarded or losing branches publish neither. Duplicate keys are errors.
-`immutable_data_get` addresses a committed row by ordinal or key.
-`immutable_data_range_of` and `immutable_data_rows_of` identify a commit's appended
-range and rows. The `Database` entry points return `ApiError::NotImplemented`
-without validation, I/O, or state changes. Segment declarations, column arity,
-persistence, pruning, and rewind must preserve ordinal/key consistency.
+Genesis accepts `Option<ImmutableDataConfig>`: `None` disables immutable data;
+`Some` requires a positive u64 shard span and nonempty segment declarations.
+Segments sort by name for stable zero-based u32 IDs; column order stays significant.
+Segment names match `[a-z][a-z0-9_]{0,63}` and are validated without normalization
+in schema construction and genesis configuration before file access. Column names
+use the cell user-name grammar, independent of deployment cell limits.
+The current format supports at most 64 user segments, 1–64 columns each, and a
+16,383-byte encoded schema payload. Compression is explicitly none, LZ4 or Zstd.
+When enabled, `#params.#shardSpan` and `#params.#immutableDataSegments` commit this
+configuration; the opener compares their exact values and verifies their trie
+paths on reopen. Both cells are absent when disabled, and enabling/disabling
+changes genesis identity.
+Formatting, segment order and omitted versus explicit bytes types do not change
+identity. Genesis/OpenConfig now own declarations and are Clone, not Copy.
+
+The concrete `ImmutableDataStorage` exposes `in_memory(config, genesis_id)` and
+`open(config, genesis_id, directory)`. It provides physical append, ordinal get,
+end_ordinal, truncate and sync. Commit numbers supplied to append only route files;
+there is no branch state, database head, system segment, shard group or stage_commit.
+Memory/NippyJar dispatch is private. NippyJar remains pinned to Reth v2.1.0 commit
+`d58c6e3d0723a28f655e89da83c3738e47dcc364`.
+
+`shard_span` counts commits. Segments independently create files on their first
+append in each nonempty span; ordinals remain contiguous across those files.
+Filenames are `segment-{name}-{start_commit}-{end_commit}.jar`, with unpadded decimal
+commit numbers sorted numerically during discovery, an
+exclusive end, `.conf`/`.off` companions and no active/closed rename. Custom headers
+store format, genesis identity, segment ID, first commit and first ordinal.
+NippyJar supplies row count, arity and compression. Active writers are retained
+across appends; explicit sync makes their changes durable. Physical reads may
+flush a selected writer and inspect older configurations newest-first;
+no historical reader/configuration cache is retained.
+
+Caller-owned transaction helpers bind keys, get by key, record commit ranges and
+read rows_of(commit). `ImmutableDataKeys` stores forward key-to-ordinal and reverse
+ordinal-to-key entries, without commit IDs. `ImmutableDataCommitRanges` maps
+`segment:u32 || commit:u64` to `first_ordinal:u64 || end_ordinal:u64`; integer
+components are big endian. Only nonempty batches produce range entries. Metadata
+is outside the commitment and publishes only when the caller commits its writer.
+The caller checks whether a commit exists/is visible; the file layer validates
+range bounds within its span, not exact per-commit provenance.
+
+Physical truncate removes files/rows from a supplied global ordinal onward and
+reuses those ordinals; it never changes metadata. Physical reads do not enforce
+committed visibility. `recover(tx, commit)` restores physical tails to the supplied
+durable commit ranges without accessing head or changing metadata. It rejects
+missing committed data, trims unpublished tails and removes unpublished files.
+Recovery trims/syncs offsets before data, then adjusts the native configuration;
+it is repeatable after interruption. NippyJar atomically replaces configuration
+after syncing data/offsets, so recovery needs no additional journal.
+Directory ownership uses an OS lock, and file validation precedes NippyJar's
+self-healing writer. Reads check basic file layout but do not scan interior column
+offsets separately; malformed interior offsets may panic inside NippyJar.
+See `crates/immutable-data/README.md` for details.
+
+`Branches::new(store, hasher, None)` disables immutable data. Pass
+`Some(storage)` to transfer ownership of an opened `ImmutableDataStorage` and
+use its configuration for staging. The caller obtains `storage.reader()` before
+transferring ownership and uses it only after construction succeeds. Missing or
+invalid head metadata is rejected before recovery. The API validates the database
+before opening immutable storage.
+Append accepts an owned typed row and optional key; truncate
+removes only the branch's pending suffix. Both work before/after seal, leave sealed
+roots unchanged, and do not affect cell checkpoints, rollback or branch version.
+Each batch’s `first_ordinal` is resolved lazily using `metadata::end_ordinal_at` from the
+latest published range at/before origin in the same snapshot as the head check.
+Key uniqueness covers committed bindings and that branch's own batch; competing
+branches may reserve the same key/ordinal. Discard/stale invalidation release rows
+and keys. Errors leave staging unchanged. No files or KV metadata are written.
+
+The constructor owns the supplied storage and recovers under a store writer
+before use.
+Only this manager and its clones may publish head or immutable metadata. A shared
+lock covers file mutation, synchronization, KV publication and rollback. Cells,
+index, keys, commit ranges and head publish in one transaction after syncing files.
+On errors a fresh writer snapshot resolves the outcome: published means success;
+a known abort restores files to durable ranges and retains the sealed branch for
+retry. Unresolved outcomes, failed recovery and publication panics block further
+publication until reopen and recovery. The manager owns an optional locked immutable
+writer alongside the store, and `commit.rs` implements the procedure; there is no
+separate coordinator layer. Without immutable storage, commits rely on the store's
+own writer serialization.
+The API owns an independent `ImmutableDataReader` and a shared store handle;
+branches own only the immutable writer. The reader's projected `get` and `rows_of`
+take one caller-owned published snapshot and the
+commit number from that snapshot, enforcing key/range/ordinal visibility without
+locking or flushing the writer. Ordinal/key reads route through commit-range
+metadata, seeking before shard boundaries to skip older populated shards and
+empty spans. Only the selected shard's
+configuration is opened by path; committed reads do not list the directory.
+NippyJar's cursor uses EOF for its last column, so committed
+reads use native offsets/codecs with stored terminal offsets and tolerate extra
+unpublished bytes. Only destructive cleanup waits for read mappings. Reader clones
+retain directory ownership; close them before reopening files. Future commits are
+rejected. Store commits must be durable and outcome snapshots
+authoritative. There is no staging-only constructor.
+The `Database` facade exposes schema discovery, branch append/staged truncate,
+projected get by ordinal/key and projected rows_of(commit), re-exporting the typed
+immutable-data rows, schemas, options and native value trait. The API opens immutable
+storage once, keeps its reader and transfers storage into the branch manager.
+Reads use the API's store handle directly and the head from that same snapshot. Existing empty
+commits return no rows; future commits are unavailable. Input errors, duplicate
+keys and absent rows map to public domain errors; corrupt payloads remain internal.
+`Database::open` defaults immutable files to `<database>/immutable-data`, overridable
+through `OpenConfig::with_immutable_data_directory`. `open_memory` uses memory.
+`from_store` requires an explicit directory when segments are declared. Paths are
+local settings outside genesis identity. `None` disables immutable storage. Close all database clones before reopening the immutable directory.
+Retention/pruning, key expiry and digests remain deferred.
 
 ### History, proofs, and storage evolution
 
@@ -427,8 +629,9 @@ can use typed request options where appropriate.
 
 Rust edition is 2024; `rust-toolchain.toml` selects Rust 1.97 with rustfmt and Clippy.
 MDBX's pinned bindings are `libmdbx = 0.6.6` and `mdbx-sys = 13.11.0`; native builds
-require a C compiler and libclang. Unit tests live under crate `src/tests` trees;
-cross-component tests and benchmarks live in `crates/integration-tests`.
+require a C compiler and libclang. Unit tests live in the file they test, in an inline
+`#[cfg(test)] mod tests`; some crates keep older ones under `src/tests`. Cross-component tests
+and benchmarks live in `crates/integration-tests`.
 
 ```sh
 cargo build --workspace --all-targets --all-features

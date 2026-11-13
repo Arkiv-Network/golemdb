@@ -1,9 +1,13 @@
 use std::iter::FusedIterator;
 
-use golemdb_merkle::{Hash, HashProvider, RootRef};
-use golemdb_storage::{ReadCursor, ReadTransaction, Scan, WriteTransaction, scan_prefix};
+use golemdb_merkle::{HashProvider, RootRef};
+use golemdb_storage::{ReadCursor, ReadTransaction, Scan, Table, WriteTransaction, scan_prefix};
 
-use crate::{CELL_TRIE_PATH_BYTES, CellKey, CellValue, Result, cell_trie::CellTrie, tables};
+use crate::{
+    CELL_TRIE_PATH_BYTES, CellKey, CellValue, Result,
+    cell_trie::{CellPath, CellTrie},
+    tables,
+};
 
 /// Cell storage and commitment over caller-owned transactions.
 ///
@@ -32,11 +36,21 @@ pub struct CellValueChange {
     pub after: Option<CellValue>,
 }
 
+/// A net change with its encoded key, which addresses the `Cell` table, and its
+/// path, which addresses the trie.
+struct RoutedChange {
+    encoded_key: Vec<u8>,
+    path: CellPath,
+    change: CellValueChange,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellsUpdate {
     pub root: RootRef<CELL_TRIE_PATH_BYTES>,
     /// Actual changes only, ordered by complete key, spanning the input batch.
     pub changed_cells: Vec<CellValueChange>,
+    /// Stored trie rows this batch replaced, which only older roots reach.
+    pub superseded: Vec<(Table, Vec<u8>)>,
 }
 
 impl<'h, H: HashProvider> Cells<'h, H> {
@@ -62,25 +76,29 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         CellReader::new(tx).scan_record(record_id)
     }
 
-    /// Recover root metadata. Empty/singleton recovery uses the `Cell` table from
-    /// the same snapshot; a branch root's own row is validated, not its entire
-    /// subtree or correspondence with all `Cell` rows. Historical singleton
-    /// recovery needs historical values or retained `RootRef` metadata.
-    pub fn reopen(
+    /// Validate a stored root, such as one read from `Roots`. Empty/singleton
+    /// roots are checked against the `Cell` table from the same snapshot; a
+    /// branch root's own row is validated, not its entire subtree or
+    /// correspondence with all `Cell` rows.
+    pub fn validate_root(
         &self,
         tx: &impl ReadTransaction,
-        hash: Hash,
-    ) -> Result<RootRef<CELL_TRIE_PATH_BYTES>> {
-        self.trie.reopen(tx, hash)
+        root: RootRef<CELL_TRIE_PATH_BYTES>,
+    ) -> Result<()> {
+        self.trie.validate_root(tx, root)
     }
 
     /// Apply each key's final value once, skipping no-ops and absent deletions.
     /// Affected commitments are checked against the original `Cell` values even
     /// for no-ops. This is not a whole-state audit; the caller must supply the
-    /// matching root. Errors require aborting the enclosing transaction.
+    /// matching root. New trie rows are stored under `commit`, the commit this
+    /// batch publishes; a second batch at the same commit replaces rows, so
+    /// only its root stays valid. Errors require aborting the enclosing
+    /// transaction.
     pub fn apply(
         &self,
         tx: &mut impl WriteTransaction,
+        commit: u64,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
         changes: impl IntoIterator<Item = CellChange>,
     ) -> Result<CellsUpdate> {
@@ -92,33 +110,39 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         }
         // One trie update for the whole batch writes each touched branch once.
         let edits =
-            (changes_by_key.iter()).map(|(key, change)| (key.as_slice(), change.after.as_ref()));
-        let root = self.trie.set(tx, root, edits)?;
+            (changes_by_key.iter()).map(|routed| (routed.path, routed.change.after.as_ref()));
+        let update = self.trie.set(tx, commit, root, edits)?;
         write_values(tx, &changes_by_key)?;
         Ok(CellsUpdate {
-            root,
+            root: update.root,
+            superseded: update.superseded,
             changed_cells: changes_by_key
                 .into_iter()
-                .map(|(_, change)| change)
+                .map(|routed| routed.change)
                 .collect(),
         })
     }
 
     /// Check the original commitment for one net change. No-ops are checked
     /// but produce no change. Keys are unique within a batch, so the original
-    /// root answers as the evolving root would. Returns the encoded key with
-    /// the change, so each key is encoded once. Any error requires a tx abort.
+    /// root answers as the evolving root would. Returns the change with its
+    /// encoded key and path. Any error requires a tx abort.
     fn check_change(
         &self,
         tx: &impl ReadTransaction,
         root: RootRef<CELL_TRIE_PATH_BYTES>,
         key: CellKey,
         after: Option<CellValue>,
-    ) -> Result<Option<(Vec<u8>, CellValueChange)>> {
+    ) -> Result<Option<RoutedChange>> {
         let encoded_key = key.encode();
+        let path = self.trie.path(&key);
         let before = read_value(tx, &encoded_key)?;
-        self.trie.check(tx, root, &encoded_key, before.as_ref())?;
-        Ok((before != after).then_some((encoded_key, CellValueChange { key, before, after })))
+        self.trie.check(tx, root, path, before.as_ref())?;
+        Ok((before != after).then_some(RoutedChange {
+            encoded_key,
+            path,
+            change: CellValueChange { key, before, after },
+        }))
     }
 }
 
@@ -163,6 +187,16 @@ impl<'tx, R: ReadTransaction> CellReader<'tx, R> {
         read_value(self.tx, &key.encode())
     }
 
+    /// Borrow the encoded value before validation or allocation. The caller can
+    /// inspect its length and refuse further work without copying its payload.
+    pub fn with_encoded_value<T>(
+        &self,
+        key: &CellKey,
+        inspect: impl FnOnce(Option<&[u8]>) -> T,
+    ) -> Result<T> {
+        Ok(self.tx.with_value(tables::CELL, &key.encode(), inspect)?)
+    }
+
     /// Scan one record in name-byte order. Rows are owned; the iterator borrows
     /// the snapshot and preserves raw reserved-record names.
     pub fn scan_record(&self, record_id: u64) -> Result<CellScan<R::Cursor<'tx>>> {
@@ -181,12 +215,10 @@ fn read_value(tx: &impl ReadTransaction, key: &[u8]) -> Result<Option<CellValue>
 }
 
 /// Write each change's final value under its encoded key, or delete the row.
-fn write_values(
-    tx: &mut impl WriteTransaction,
-    changes_by_key: &[(Vec<u8>, CellValueChange)],
-) -> Result<()> {
-    for (key, change) in changes_by_key {
-        match &change.after {
+fn write_values(tx: &mut impl WriteTransaction, changes_by_key: &[RoutedChange]) -> Result<()> {
+    for routed in changes_by_key {
+        let key = &routed.encoded_key;
+        match &routed.change.after {
             Some(value) => tx.put(tables::CELL, key, value.encoded_bytes())?,
             None => {
                 tx.delete(tables::CELL, key)?;

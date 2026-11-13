@@ -228,3 +228,14 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn projections_are_raw_deduplicated_and_bytewise() {
+    let names = CellName::projection(["status", "#key", "Owner", "status", "\u{ff}"]);
+    let bytes: Vec<&[u8]> = names.iter().map(CellName::as_bytes).collect();
+    assert_eq!(
+        bytes,
+        [&b"#key"[..], b"Owner", b"status", "\u{ff}".as_bytes()]
+    );
+    assert!(CellName::projection(Vec::<&str>::new()).is_empty());
+}
