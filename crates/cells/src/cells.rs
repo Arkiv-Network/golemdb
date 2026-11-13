@@ -3,7 +3,10 @@ use std::iter::FusedIterator;
 use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::{ReadCursor, ReadTransaction, Scan, Table, WriteTransaction, scan_prefix};
 
-use crate::{CELL_TRIE_PATH_BYTES, CellKey, CellValue, Result, cell_trie::CellTrie, tables};
+use crate::{
+    CELL_TRIE_PATH_BYTES, CellError, CellKey, CellValue, CellValueRef, Result, cell_trie::CellTrie,
+    history, tables,
+};
 
 /// Cell storage and commitment over caller-owned transactions.
 ///
@@ -138,30 +141,60 @@ fn normalize_changes(
 /// branch overlay. Read any associated head metadata from the same transaction.
 pub struct CellReader<'tx, R: ReadTransaction> {
     tx: &'tx R,
+    target: Option<u64>,
 }
 
 impl<'tx, R: ReadTransaction> CellReader<'tx, R> {
     pub fn new(tx: &'tx R) -> Self {
-        Self { tx }
+        Self { tx, target: None }
+    }
+
+    /// Read state after `commit` using this transaction's history and live cells.
+    /// The caller must validate the target against head and retention coverage
+    /// in the same snapshot. Missing history alone cannot establish coverage.
+    /// These are flat reads, not proofs against a historical root.
+    pub fn at(tx: &'tx R, commit: u64) -> Self {
+        Self {
+            tx,
+            target: Some(commit),
+        }
     }
 
     pub fn get(&self, key: &CellKey) -> Result<Option<CellValue>> {
-        read_value(self.tx, &key.encode())
+        if self.target.is_none() {
+            return read_value(self.tx, &key.encode());
+        }
+        self.with_encoded_value(key, |bytes| {
+            bytes
+                .map(|bytes| CellValueRef::parse(bytes).map(CellValue::from))
+                .transpose()
+                .map_err(Into::into)
+        })?
     }
 
     /// Borrow the encoded value before validation or allocation. The caller can
     /// inspect its length and refuse further work without copying its payload.
+    /// Empty historical pre-images become `None`; missing selected changesets
+    /// fail. Empty live rows remain present and will fail typed parsing.
     pub fn with_encoded_value<T>(
         &self,
         key: &CellKey,
         inspect: impl FnOnce(Option<&[u8]>) -> T,
     ) -> Result<T> {
-        Ok(self.tx.with_value(tables::CELL, &key.encode(), inspect)?)
+        match self.target {
+            None => Ok(self.tx.with_value(tables::CELL, &key.encode(), inspect)?),
+            Some(target) => history::with_encoded_value(self.tx, &key.encode(), target, inspect),
+        }
     }
 
     /// Scan one record in name-byte order. Rows are owned; the iterator borrows
     /// the snapshot and preserves raw reserved-record names.
+    /// Historical readers return `HistoricalScanUnavailable` until historical
+    /// enumeration is implemented; they never silently scan live state.
     pub fn scan_record(&self, record_id: u64) -> Result<CellScan<R::Cursor<'tx>>> {
+        if self.target.is_some() {
+            return Err(CellError::HistoricalScanUnavailable);
+        }
         Ok(CellScan {
             scan: scan_prefix(self.tx, tables::CELL, record_id.to_be_bytes().to_vec())?,
             done: false,

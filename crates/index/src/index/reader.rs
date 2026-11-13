@@ -5,9 +5,59 @@ use golemdb_storage::{Entry, ReadCursor, ReadTransaction, Scan, scan, scan_prefi
 
 use super::Index;
 use crate::{
-    Bitmap, BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Result, TermRange, key,
-    tables,
+    Bitmap, BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Result, TermRange,
+    history, key, tables,
 };
+
+/// Committed container reads from one caller-owned snapshot, without a hash
+/// provider. These flat reads validate codecs but do not authenticate a root.
+/// Historical term assembly requires discovery of both live and deleted
+/// containers; this reader currently exposes only individual container reads.
+pub struct IndexReader<'tx, R: ReadTransaction> {
+    tx: &'tx R,
+    target: Option<u64>,
+}
+
+impl<'tx, R: ReadTransaction> IndexReader<'tx, R> {
+    pub fn new(tx: &'tx R) -> Self {
+        Self { tx, target: None }
+    }
+
+    /// Read state after `commit`. The caller must validate target/head and
+    /// retention coverage using this same snapshot before using the reader.
+    pub fn at(tx: &'tx R, commit: u64) -> Self {
+        Self {
+            tx,
+            target: Some(commit),
+        }
+    }
+
+    pub fn container(&self, key: &IndexKey) -> Result<Option<BitmapContainer>> {
+        self.with_encoded_container(key, |bytes| {
+            bytes
+                .map(|bytes| BitmapContainer::decode(key.container_id, bytes))
+                .transpose()
+                .map_err(Into::into)
+        })?
+    }
+
+    /// Inspect raw bytes before validation or allocation. The callback may
+    /// charge/refuse further work before decoding. An empty historical pre-image
+    /// becomes `None`; a missing selected changeset is an error. Empty live rows
+    /// remain `Some(empty)` so typed decoding rejects them as malformed.
+    pub fn with_encoded_container<T>(
+        &self,
+        key: &IndexKey,
+        inspect: impl FnOnce(Option<&[u8]>) -> T,
+    ) -> Result<T> {
+        match self.target {
+            None => Ok(self.tx.with_value(tables::INDEX, &key.encode(), inspect)?),
+            Some(target) => {
+                history::with_encoded_container(self.tx, &key.encode(), target, inspect)
+            }
+        }
+    }
+}
 
 /// Whether `term` has postings: one seek to its first container row, decoding
 /// only its key without copying the container, and without traversing the

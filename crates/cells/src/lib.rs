@@ -132,6 +132,7 @@ mod cell_trie;
 mod cells;
 mod config;
 mod error;
+pub mod history;
 mod key;
 pub mod marker;
 mod name;
