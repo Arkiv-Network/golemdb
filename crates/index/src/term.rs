@@ -2,6 +2,9 @@ use golemdb_cells::{CellNameRef, CellType, CellValueParseError, CellValueRef, Fl
 use golemdb_merkle::{Hash, HashProvider};
 use std::{error::Error, fmt};
 
+/// The flag set on a term's type tag, above the 7-bit type id.
+const TAG_FLAG: u8 = 0x80;
+
 /// Canonical ordered index term:
 /// `name || 0x00 || attribute_tag || ordered_value [|| 0x00]`.
 ///
@@ -93,7 +96,7 @@ impl IndexTerm {
     pub fn prefix(name: &str, ty: CellType) -> Result<Vec<u8>, TermError> {
         let mut out = name_prefix(name)?;
         supported(ty)?;
-        out.push(0x80 | ty.id());
+        out.push(TAG_FLAG | ty.id());
         Ok(out)
     }
 
@@ -110,10 +113,10 @@ impl IndexTerm {
         let (&tag, value) = bytes[split + 1..]
             .split_first()
             .ok_or(TermError::InvalidEncoding)?;
-        if tag & 0x80 == 0 {
+        if tag & TAG_FLAG == 0 {
             return Err(TermError::InvalidEncoding);
         }
-        let ty = CellType::from_id(tag & 0x7f).map_err(TermError::Value)?;
+        let ty = CellType::from_id(tag & !TAG_FLAG).map_err(TermError::Value)?;
         supported(ty)?;
         let value = match ty.width() {
             Some(_) => value,

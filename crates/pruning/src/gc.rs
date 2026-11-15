@@ -6,6 +6,9 @@ use crate::{PruningError, Result};
 /// an empty value; `commit` is the one that superseded the row.
 pub const STALE: Table = Table("Stale");
 
+/// Bytes of the big-endian commit a `Stale` key starts with.
+const COMMIT_BYTES: usize = size_of::<u64>();
+
 /// The versioned tables, by their code in `Stale` keys. The codes are
 /// persisted: append only, never reorder.
 const TABLES: [Table; 2] = [
@@ -76,12 +79,12 @@ pub(crate) fn sweep(tx: &mut impl WriteTransaction, cutoff: u64, batch: Batch) -
 
 /// The commit a `Stale` key starts with.
 fn commit(key: &[u8]) -> Option<u64> {
-    Some(u64::from_be_bytes(*key.first_chunk::<8>()?))
+    Some(u64::from_be_bytes(*key.first_chunk::<COMMIT_BYTES>()?))
 }
 
 /// The table and key of the row a `Stale` key lists.
 fn row(key: &[u8]) -> Option<(Table, &[u8])> {
-    let (code, row) = key.get(8..)?.split_first()?;
+    let (code, row) = key.get(COMMIT_BYTES..)?.split_first()?;
     Some((*TABLES.get(*code as usize)?, row))
 }
 

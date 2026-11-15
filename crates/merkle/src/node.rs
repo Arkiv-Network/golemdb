@@ -11,7 +11,7 @@ const MIN_BRANCH_CHILDREN: u32 = 2;
 
 /// The widest routing path a trie supports. Branch prefix and route lengths
 /// count nibbles in one byte.
-pub const MAX_PATH_BYTES: usize = 127;
+pub const MAX_PATH_BYTES: usize = u8::MAX as usize / NIBBLES_PER_BYTE;
 
 /// Rejects path widths outside `1..=MAX_PATH_BYTES`. Call it inside `const { }`
 /// so a bad width fails at compile time.

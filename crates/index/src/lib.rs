@@ -50,11 +50,11 @@ pub use term::{IndexTerm, TermError};
 pub use term_range::{RangeError, TermRange};
 
 /// Bits of a record ID held by one container, as offsets below its path.
-pub(crate) const CHUNK_BITS: u8 = 16;
+pub(crate) const CHUNK_BITS: u8 = u16::BITS as u8;
 
 /// Bytes of `hi48`, the record ID's bits above its 16-bit offset, big-endian:
 /// a container's path.
-pub const HI48_BYTES: usize = PATH_BITS.div_ceil(8) as usize;
+pub const HI48_BYTES: usize = PATH_BITS.div_ceil(u8::BITS as u8) as usize;
 
 /// The index trie routes a container by its term's digest, then its `hi48`.
 /// This is a byte width, not the compressed trie's depth.
@@ -72,8 +72,8 @@ pub const INDEX_BRANCH_DOMAIN: u8 = 0x03;
 /// leaf's complete trie path.
 pub const CONTAINER_LEAF_DOMAIN: u8 = 0x04;
 
-pub(crate) const PATH_BITS: u8 = 64 - CHUNK_BITS;
-pub(crate) const PATH_BYTE_OFFSET: usize = 8 - HI48_BYTES;
+pub(crate) const PATH_BITS: u8 = u64::BITS as u8 - CHUNK_BITS;
+pub(crate) const PATH_BYTE_OFFSET: usize = size_of::<u64>() - HI48_BYTES;
 pub(crate) const MAX_PATH: u64 = (1 << PATH_BITS) - 1;
 pub(crate) const MAX_OFFSET: u32 = (1 << CHUNK_BITS) - 1;
 

@@ -1,8 +1,14 @@
 use std::ops::Bound;
 
+use golemdb_cells::Width;
+
 use crate::{
     HI48_BYTES, IndexError, IndexTerm, PATH_BYTE_OFFSET, TermError, path, term_range::past,
 };
+
+/// The widest fixed-width attribute value: 256-bit numbers and 32-byte fixed
+/// bytes.
+const MAX_FIXED_WIDTH: usize = Width::W32.bytes();
 
 /// A container's `Index` key, decoded: its term and its `container_id`, the
 /// `hi48` its record IDs share. Encoded, it is the term's bytes, then `hi48`.
@@ -33,11 +39,12 @@ impl IndexKey {
     }
 
     /// The longest key of a term whose name has `name_len` bytes and whose
-    /// value has at most `value_len` bytes, or 32 if fixed-width: a string's
-    /// terminator, then `hi48`, follow the value.
+    /// value has at most `value_len` bytes, or the widest fixed width:
+    /// `name ‖ 0x00 ‖ tag ‖ value [‖ 0x00] ‖ hi48`.
     pub const fn max_len(name_len: u64, value_len: u64) -> u64 {
         let string = value_len + 1;
-        let value = if string > 32 { string } else { 32 };
+        let fixed = MAX_FIXED_WIDTH as u64;
+        let value = if string > fixed { string } else { fixed };
         name_len + 2 + value + HI48_BYTES as u64
     }
 }
@@ -83,7 +90,7 @@ fn after(term: &[u8]) -> Bound<Vec<u8>> {
 pub(crate) fn container_id(hi48: &[u8]) -> crate::Result<u64> {
     let hi48: [u8; HI48_BYTES] =
         (hi48.try_into()).map_err(|_| IndexError::Corruption("malformed container key"))?;
-    let mut be = [0; 8];
+    let mut be = [0; size_of::<u64>()];
     be[PATH_BYTE_OFFSET..].copy_from_slice(&hi48);
     Ok(u64::from_be_bytes(be))
 }

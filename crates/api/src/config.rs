@@ -67,12 +67,11 @@ impl Genesis {
                 "max_cell_name_len must be positive".into(),
             ));
         }
-        // A cell key is `recordID ‖ name`; the longest index key is
-        // `IndexKey::max_len`.
+        // A user cell's longest key is its index key, longer than its cell key
+        // (`recordID ‖ name`). Engine keys are fixed and assumed to fit; metering
+        // cell keys are checked below.
         let name = u64::from(limits.max_cell_name_len);
-        let key = (name + 8)
-            .max(IndexKey::max_len(name, limits.max_str_len.into()))
-            .max(40);
+        let key = IndexKey::max_len(name, limits.max_str_len.into());
         // The format reserves 16 KiB for fixed engine values: trie nodes, metadata,
         // root pairs, and canonical single-u16-domain Roaring containers.
         let value = (1 + u64::from(limits.max_bytes_len.max(limits.max_str_len))).max(16 * 1024);
