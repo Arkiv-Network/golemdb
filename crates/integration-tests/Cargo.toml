@@ -6,11 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
-[dependencies]
-# For the shared workload in src/workload.rs, used by tests and benches.
-golemdb-api.workspace = true
-
 [dev-dependencies]
+golemdb-api.workspace = true
 golemdb-immutable-data.workspace = true
 golemdb-branch.workspace = true
 golemdb-cells.workspace = true
@@ -23,14 +20,10 @@ golemdb-storage.workspace = true
 golemdb-storage-mdbx.workspace = true
 proptest.workspace = true
 criterion.workspace = true
-# CPU time for the batch benchmark.
-libc = "0.2"
-# Reads Criterion's saved results for the batch benchmark's summary.
-serde_json = "1"
 tempfile = "3"
 
 [[bench]]
-name = "batch"
+name = "write"
 harness = false
 
 [[bench]]

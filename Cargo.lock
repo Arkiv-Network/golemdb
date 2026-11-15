@@ -606,9 +606,7 @@ dependencies = [
  "golemdb-record",
  "golemdb-storage",
  "golemdb-storage-mdbx",
- "libc",
  "proptest",
- "serde_json",
  "tempfile",
 ]
 

@@ -34,7 +34,7 @@ The unpublished integration-test package is a workspace member only.
   atomic memory/MDBX opening from typed or YAML genesis
   ([scope and usage](crates/api/README.md))
 - `crates/integration-tests` (package `golemdb-integration-tests`) — backend and
-  cross-layer integration tests, plus the index backend and batch benchmarks
+  cross-layer integration tests, plus the index backend and write benchmarks
 
 ## Documentation
 
