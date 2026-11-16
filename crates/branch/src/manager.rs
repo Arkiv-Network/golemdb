@@ -5,6 +5,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::Instant,
 };
 
 use golemdb_immutable_data::{ImmutableDataKey, ImmutableDataRow, ImmutableDataStorage};
@@ -48,8 +49,14 @@ impl BranchState {
         if let Some(sealed) = &self.sealed {
             return Ok(Arc::clone(sealed));
         }
+        let started = Instant::now();
         let sealed = Arc::new(crate::seal::compute(origin, &self.overlay, hasher)?);
         self.sealed = Some(Arc::clone(&sealed));
+        tracing::info!(
+            commit_id = sealed.commit_id.get(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "seal completed"
+        );
         Ok(sealed)
     }
 }
@@ -381,7 +388,8 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
     /// A panic during file/metadata publication blocks further publication;
     /// reopen to recover.
     pub fn commit(&self, branch_id: BranchId) -> Result<CommitId> {
-        self.with_slot(branch_id, BranchError::Conflict, |slot, origin| {
+        let started = Instant::now();
+        let commit_id = self.with_slot(branch_id, BranchError::Conflict, |slot, origin| {
             let state = slot.as_mut().ok_or(BranchError::HandleInvalid)?;
             let sealed = state.seal(origin, &self.inner.hasher)?;
             let outcome = if let Some(writer) = &self.inner.immutable_writer {
@@ -433,7 +441,13 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
                 }
                 Err(error) => Err(error),
             }
-        })?
+        })??;
+        tracing::info!(
+            commit_id = commit_id.get(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "commit completed"
+        );
+        Ok(commit_id)
     }
 
     /// Consume a live branch without reverse replay. A stale or already

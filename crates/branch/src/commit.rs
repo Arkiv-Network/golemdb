@@ -1,4 +1,7 @@
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
+    time::Instant,
+};
 
 use golemdb_immutable_data::{ImmutableDataStorageError as DataError, metadata};
 use golemdb_merkle::HashProvider;
@@ -70,6 +73,7 @@ pub(crate) fn stage(
         index: sealed.index.root,
     };
     if let Some(pruner) = pruner {
+        let started = Instant::now();
         let commit = sealed.commit_id.get();
         let superseded = (sealed.cells.superseded.iter())
             .chain(&sealed.index.superseded)
@@ -77,6 +81,11 @@ pub(crate) fn stage(
         pruner.register_tries(tx, commit, superseded)?;
         pruner.sweep_tries(tx, commit)?;
         pruner.prune_commit_keyed_rows(tx, crate::ROOTS, commit)?;
+        tracing::info!(
+            commit_id = commit,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "pruning staged"
+        );
     }
     // Publishes `origin + 1`, the commit seal wrote these rows under.
     advance_head(tx, origin, &roots, hasher)?;
@@ -109,6 +118,7 @@ pub(crate) fn publish(
     let mut attempted_commit = false;
     let outcome = (|| -> Result<()> {
         crate::commit::stage(&mut tx, origin, sealed, hasher, pruner)?;
+        let started = Instant::now();
         for (id, batch) in staged.batches() {
             let name = segments.by_id(id).schema.name();
             if metadata::end_ordinal_at(&tx, id, origin.get())? != batch.first_ordinal
@@ -139,6 +149,11 @@ pub(crate) fn publish(
         }
         if !staged.is_empty() {
             storage.sync()?;
+            tracing::info!(
+                commit_id = sealed.commit_id.get(),
+                elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "immutable_data write and sync completed"
+            );
         }
         attempted_commit = true;
         tx.commit()?;
