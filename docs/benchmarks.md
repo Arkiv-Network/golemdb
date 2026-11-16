@@ -40,8 +40,16 @@ cargo bench -p golemdb-integration-tests --bench index -- --test
 Criterion writes results under `target/criterion` (ignored by Git). For a deliberate
 comparison, use the same command, features and filter with `--save-baseline before`,
 then after the change use `--baseline before`. Keep machine, build settings and
-background load comparable. CI compiles the suites; timing regressions are not
-automatic pass/fail gates.
+background load comparable.
+
+### CI
+
+The `Benchmarks` workflow runs the write and query suites. Pushes to `main` save
+the results as the baseline, and pull requests compare against the latest one,
+in the job summary. A pull request gets a comment when a case is over 25%
+slower, or when a commit's bytes written or syncs change at all, either way,
+since those are the same on every machine. Nothing fails the check. The write
+suite writes those storage numbers as JSON to the file `BENCH_STORAGE_JSON` names.
 
 ### Checking a change for regressions
 
