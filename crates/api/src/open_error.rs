@@ -17,7 +17,9 @@ pub enum OpenError {
     GenesisMismatch,
     #[error("incomplete or corrupt database: {0}")]
     CorruptState(&'static str),
-    #[error("unsupported database format {0}")]
+    #[error(
+        "unsupported database format {0}; this build requires format 2, create a new compatible database (no migration is available)"
+    )]
     UnsupportedFormat(u32),
     #[error("unsupported hash function ID {0}")]
     UnsupportedHash(u16),
@@ -27,6 +29,8 @@ pub enum OpenError {
     Metering(#[from] golemdb_metering::ModelError),
     #[error(transparent)]
     Storage(#[from] golemdb_storage::StorageError),
+    #[error(transparent)]
+    Pruning(#[from] golemdb_pruning::PruningError),
     #[error(transparent)]
     Cells(#[from] golemdb_cells::CellError),
     #[error(transparent)]

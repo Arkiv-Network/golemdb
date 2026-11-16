@@ -41,12 +41,22 @@ fn api_errors_preserve_diagnostic_sources() {
 #[test]
 fn capacity_errors_remain_public_through_internal_wrappers() {
     use golemdb_cells::CellError;
+    use golemdb_history::HistoryError;
     use golemdb_index::IndexError;
     use golemdb_merkle::MerkleError;
     use golemdb_storage::StorageError;
     for error in [
         RecordError::Storage(StorageError::Full),
         RecordError::Cells(CellError::Storage(StorageError::Full)),
+        RecordError::Cells(CellError::History(HistoryError::Storage(
+            StorageError::Full,
+        ))),
+        RecordError::Branch(BranchError::Cells(CellError::History(
+            HistoryError::Storage(StorageError::Full),
+        ))),
+        RecordError::Branch(BranchError::Index(IndexError::History(
+            HistoryError::Storage(StorageError::Full),
+        ))),
         RecordError::Cells(CellError::Merkle(MerkleError::Storage(StorageError::Full))),
         RecordError::Pricing(golemdb_metering::ModelError::Cells(CellError::Storage(
             StorageError::Full,

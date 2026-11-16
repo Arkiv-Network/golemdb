@@ -404,7 +404,12 @@ fn failures(store: impl Store + Clone + 'static, path: &Path) {
         .unwrap();
     let cell = CellKey::new(64, CellNameRef::raw(b"retry"));
     b.write(id, |cells| {
-        cells.put(cell.clone(), CellValue::from_u64(9));
+        cells.put(
+            cell.clone(),
+            CellValue::from_u64(9)
+                .with_kind(golemdb_cells::CellKind::Attribute)
+                .unwrap(),
+        );
         Ok::<_, ()>(())
     })
     .unwrap();
@@ -423,6 +428,37 @@ fn failures(store: impl Store + Clone + 'static, path: &Path) {
     assert_eq!(metadata::ordinal_for_key(&tx, 0, key(2)).unwrap(), None);
     assert_eq!(metadata::commit_range(&tx, 0, 2).unwrap(), None);
     assert_eq!(tx.get(tables::CELL, &cell.encode()).unwrap(), None);
+    assert_eq!(tx.get(tables::CELL_HISTORY, &cell.encode()).unwrap(), None);
+    let index_key = golemdb_index::IndexKey {
+        term: golemdb_index::IndexTerm::new(
+            "retry",
+            CellType::Uint(Width::W8),
+            &9u64.to_be_bytes(),
+        )
+        .unwrap(),
+        container_id: golemdb_index::ContainerId::new(0).unwrap(),
+    };
+    assert_eq!(
+        tx.get(golemdb_index::tables::INDEX_HISTORY, &index_key.encode())
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        tx.get(
+            tables::CELL_CHANGE_SET,
+            &golemdb_history::changeset_key(2, &cell.encode())
+        )
+        .unwrap(),
+        None
+    );
+    assert_eq!(
+        tx.get(
+            golemdb_index::tables::INDEX_CHANGE_SET,
+            &golemdb_history::changeset_key(2, &index_key.encode())
+        )
+        .unwrap(),
+        None
+    );
     drop(tx);
     // Failure after all file fsyncs must roll back both segment tails.
     store.faults.mode.store(1, Ordering::SeqCst);
@@ -436,6 +472,44 @@ fn failures(store: impl Store + Clone + 'static, path: &Path) {
     // A reported commit error with a published result is success, not rollback.
     store.faults.mode.store(2, Ordering::SeqCst);
     assert_eq!(b.commit(id).unwrap().get(), 2);
+    let tx = store.begin_read().unwrap();
+    assert_eq!(
+        tx.get(
+            tables::CELL_CHANGE_SET,
+            &golemdb_history::changeset_key(2, &cell.encode())
+        )
+        .unwrap(),
+        Some(vec![])
+    );
+    assert_eq!(
+        tx.get(
+            golemdb_index::tables::INDEX_CHANGE_SET,
+            &golemdb_history::changeset_key(2, &index_key.encode())
+        )
+        .unwrap(),
+        Some(vec![])
+    );
+    assert!(
+        golemdb_cells::CellReader::at(&tx, 1)
+            .get(&cell)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        golemdb_index::IndexReader::at(&tx, 1)
+            .container(&index_key)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        golemdb_index::IndexReader::at(&tx, 2)
+            .container(&index_key)
+            .unwrap()
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>(),
+        [64]
+    );
     assert_eq!(number(&store, &reader, 1), 2);
     assert!(matches!(b.branch_info(id), Err(BranchError::HandleInvalid)));
 }
