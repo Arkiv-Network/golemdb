@@ -10,13 +10,14 @@
 
 mod error;
 mod gc;
+mod history;
 
 pub use error::{PruningError, Result};
 pub use gc::STALE;
 
 use std::ops::Bound;
 
-use golemdb_storage::{Table, WriteTransaction, scan};
+use golemdb_storage::{ReadTransaction, Table, WriteTransaction, scan};
 
 /// Due rows a sweep waits for before deleting a batch, so each batch is large
 /// enough for rows sharing a page to be deleted together.
@@ -57,6 +58,19 @@ impl Pruner {
     /// A pruner with `config`.
     pub const fn new(config: PruningConfig) -> Self {
         Self { config }
+    }
+
+    /// Initialize pruning metadata in a new database's genesis transaction,
+    /// including when pruning is disabled. Never use this to repair an existing
+    /// database; existing metadata is preserved and returns `AlreadyExists`.
+    pub fn initialize(tx: &mut impl WriteTransaction) -> Result<()> {
+        history::initialize(tx)
+    }
+
+    /// Validate persisted pruning metadata against the head of the same snapshot,
+    /// including when pruning is disabled. Does not repair metadata or scan history.
+    pub fn validate(tx: &impl ReadTransaction, head: u64) -> Result<()> {
+        history::validate(tx, head)
     }
 
     /// Register the rows `commit` superseded, to delete once they leave the

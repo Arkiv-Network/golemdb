@@ -15,7 +15,11 @@ use std::{
 };
 
 const SUPERBLOCK: Table = Table("Superblock");
-const TABLES: [Table; 6] = [
+const TABLES: [Table; 10] = [
+    tables::CELL_HISTORY,
+    tables::CELL_CHANGE_SET,
+    golemdb_index::tables::INDEX_HISTORY,
+    golemdb_index::tables::INDEX_CHANGE_SET,
     tables::CELL,
     tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX,

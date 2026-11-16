@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use golemdb_cells::CellLimits;
+use golemdb_history::CHANGESET_PREFIX_LEN;
 use golemdb_immutable_data::ImmutableDataConfig;
 use golemdb_index::IndexKey;
 use golemdb_merkle::HashAlgorithm;
@@ -67,18 +68,20 @@ impl Genesis {
                 "max_cell_name_len must be positive".into(),
             ));
         }
-        // A cell key is `recordID ‖ name`; the longest index key is
-        // `IndexKey::max_len`.
+        // A live cell key is record ID + name; IndexKey owns its encoded bound.
+        // Reserved record-key bindings need 8 + 32 bytes even with tiny name caps.
         let name = u64::from(limits.max_cell_name_len);
-        let key = (name + 8)
+        let max_live_key_len = (name + 8)
             .max(IndexKey::max_len(name, limits.max_str_len.into()))
             .max(40);
+        // Every changeset key adds the modifying commit to the complete live key.
+        let required_key_len = CHANGESET_PREFIX_LEN as u64 + max_live_key_len;
         // The format reserves 16 KiB for fixed engine values: trie nodes, metadata,
         // root pairs, and canonical single-u16-domain Roaring containers.
         let value = (1 + u64::from(limits.max_bytes_len.max(limits.max_str_len))).max(16 * 1024);
-        if key > max_key as u64 {
+        if required_key_len > max_key as u64 {
             return Err(OpenError::InvalidConfig(format!(
-                "configured cells/index terms need {key}-byte keys; backend supports {max_key}"
+                "configured cells/index changesets need {required_key_len}-byte keys; backend supports {max_key}"
             )));
         }
         if value > max_value as u64 {
@@ -89,9 +92,15 @@ impl Genesis {
         // Reserved pricing names are not subject to user-cell caps, but their
         // actual encodings must fit this backend (including long host names).
         for (key, value) in crate::genesis::pricing_cells(&self.metering) {
-            if key.encode().len() > max_key || value.encoded_bytes().len() > max_value {
+            if key
+                .encode()
+                .len()
+                .checked_add(CHANGESET_PREFIX_LEN)
+                .is_none_or(|len| len > max_key)
+                || value.encoded_bytes().len() > max_value
+            {
                 return Err(OpenError::InvalidConfig(
-                    "metering cells exceed backend key/value limits".into(),
+                    "metering cells or their changesets exceed backend key/value limits".into(),
                 ));
             }
         }

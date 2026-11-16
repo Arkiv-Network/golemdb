@@ -43,4 +43,4 @@ mod history;
 
 pub use commits::{CommitSet, CommitSetError};
 pub use error::{HistoryError, Result};
-pub use history::{HistoryTables, ValueSource, changeset_key};
+pub use history::{CHANGESET_PREFIX_LEN, HistoryTables, ValueSource, changeset_key};

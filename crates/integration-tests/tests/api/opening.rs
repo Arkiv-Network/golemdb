@@ -572,9 +572,10 @@ fn mdbx_modes_limits_and_shared_environment_concurrent_opening() {
         Err(OpenError::InvalidConfig(_))
     ));
     assert!(db.begin_write().unwrap().is_empty().unwrap());
-    // Name, separator, tag, the value, its terminator, hi48.
+    // Changeset commit, name, separator, tag, the value, its terminator, hi48.
     cfg.genesis.cell_limits.max_str_len = db.max_key_size() as u32
         - cfg.genesis.cell_limits.max_cell_name_len
+        - golemdb_history::CHANGESET_PREFIX_LEN as u32
         - 3
         - golemdb_index::ContainerId::BYTES as u32;
     Database::from_store(db.clone(), &cfg).unwrap();
