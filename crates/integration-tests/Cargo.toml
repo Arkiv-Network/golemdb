@@ -23,5 +23,9 @@ criterion.workspace = true
 tempfile = "3"
 
 [[bench]]
+name = "write"
+harness = false
+
+[[bench]]
 name = "index"
 harness = false
