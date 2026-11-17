@@ -20,6 +20,11 @@
 //! // This example recorded all changes from the empty baseline at commit 0.
 //! assert!(CellReader::at(&tx, 0).get(&key)?.is_none());
 //! assert_eq!(CellReader::at(&tx, 1).get(&key)?, Some(CellValue::from_str("Alice")));
+//! // Scans discover names in both live storage and history, then resolve at T.
+//! assert!(CellReader::at(&tx, 0).scan_record(64)?.next().is_none());
+//! let rows = CellReader::at(&tx, 1).scan_record(64)?
+//!     .collect::<golemdb_cells::Result<Vec<_>>>()?;
+//! assert_eq!(rows, vec![(key, CellValue::from_str("Alice"))]);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 

@@ -66,8 +66,6 @@ impl core::error::Error for CellValueParseError {}
 pub enum CellError {
     #[error(transparent)]
     History(#[from] golemdb_history::HistoryError),
-    #[error("historical cell scans are not implemented yet")]
-    HistoricalScanUnavailable,
     #[error(transparent)]
     Storage(#[from] golemdb_storage::StorageError),
     #[error(transparent)]
