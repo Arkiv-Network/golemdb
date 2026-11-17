@@ -566,6 +566,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "golemdb-history"
+version = "0.1.0"
+dependencies = [
+ "golemdb-storage",
+ "proptest",
+ "roaring",
+ "thiserror",
+]
+
+[[package]]
 name = "golemdb-immutable-data"
 version = "0.1.0"
 dependencies = [
@@ -598,6 +608,7 @@ dependencies = [
  "golemdb-api",
  "golemdb-branch",
  "golemdb-cells",
+ "golemdb-history",
  "golemdb-immutable-data",
  "golemdb-index",
  "golemdb-merkle",

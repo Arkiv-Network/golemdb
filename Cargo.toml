@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/cells",
+    "crates/history",
     "crates/immutable-data",
     "crates/storage",
     "crates/storage-mdbx",
@@ -25,6 +26,7 @@ license = "MIT"
 [workspace.dependencies]
 # Internal crates, referenced by member crates as `{ workspace = true }`.
 golemdb-cells = { path = "crates/cells", version = "0.1.0" }
+golemdb-history = { path = "crates/history", version = "0.1.0" }
 golemdb-immutable-data = { path = "crates/immutable-data", version = "0.1.0" }
 golemdb-storage = { path = "crates/storage", version = "0.1.0" }
 golemdb-storage-mdbx = { path = "crates/storage-mdbx", version = "0.1.0" }
