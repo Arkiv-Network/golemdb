@@ -631,6 +631,9 @@ fn writes_check_the_containers_they_touch_and_no_others() {
     // (container rewritten, its new value, record ID the write adds, detected)
     for (hi, value, id, detected) in [
         (0, Some(&other), 2, true),
+        // Adding an already-present offset is a no-op, but its corrupt origin
+        // still has to be checked against the root before returning no changes.
+        (0, Some(&other), 7, true),
         (0, None, 2, true),
         (2, Some(&other), record_id(2, 1), true),
         (1, Some(&other), 2, false),

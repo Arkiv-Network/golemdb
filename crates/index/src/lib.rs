@@ -34,6 +34,7 @@ mod bitmap;
 pub mod container;
 mod container_id;
 pub mod error;
+pub mod history;
 mod index;
 mod index_trie;
 mod key;
@@ -45,7 +46,9 @@ pub use bitmap::Bitmap;
 pub use container::BitmapContainer;
 pub use container_id::ContainerId;
 pub use error::{BitmapError, IndexError, Result};
-pub use index::{Index, IndexUpdate, PostingChange, TermScan, term_exists};
+pub use index::{
+    ContainerValueChange, Index, IndexReader, IndexUpdate, PostingChange, TermScan, term_exists,
+};
 pub use key::IndexKey;
 pub use term::{IndexTerm, TermError};
 pub use term_range::{RangeError, TermRange};

@@ -3,7 +3,7 @@ use golemdb_storage::{Table, WriteTransaction};
 
 use super::Index;
 use crate::{
-    BitmapContainer, ContainerId, INDEX_TRIE_PATH_BYTES, IndexTerm, Result,
+    BitmapContainer, ContainerId, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Result,
     index_trie::{ContainerEdit, IndexTriePath},
     key, tables,
 };
@@ -47,13 +47,25 @@ impl From<PostingChange> for Posting {
     }
 }
 
-/// The result of applying a batch: the new index root and the terms whose postings changed.
+/// One net container change. Present payloads are canonical nonempty Roaring
+/// bytes, without the container ID; `None` means the container is absent.
+/// `Index::apply` retains the buffers it already read/encoded for history work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContainerValueChange {
+    pub key: IndexKey,
+    pub before: Option<Vec<u8>>,
+    pub after: Option<Vec<u8>>,
+}
+
+/// The result of applying a batch: the new root and actual term/container changes.
 /// These changes become permanent only when the caller commits the transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexUpdate {
     pub root: RootRef<INDEX_TRIE_PATH_BYTES>,
     /// The terms whose postings changed, in term order.
     pub changed_terms: Vec<IndexTerm>,
+    /// Actual changes only, ordered by complete IndexKey, once per container.
+    pub changed_containers: Vec<ContainerValueChange>,
     /// Stored trie rows this batch replaced, which only older roots reach.
     pub superseded: Vec<(Table, Vec<u8>)>,
 }
@@ -89,6 +101,7 @@ impl<H: HashProvider> Index<'_, H> {
         });
         let mut edits = Vec::new();
         let mut changed_terms = Vec::new();
+        let mut changed_containers = Vec::new();
         for group in batch.chunk_by(|a, b| a.term == b.term) {
             let term = &group[0].term;
             let term_path = term.routing_path(self.hasher);
@@ -121,12 +134,20 @@ impl<H: HashProvider> Index<'_, H> {
                     after = bytes
                         .as_ref()
                         .map(|bytes| self.trie.leaf_hash(&path, bytes));
-                    match bytes {
-                        Some(bytes) => tx.put(tables::INDEX, &key, &bytes)?,
+                    match &bytes {
+                        Some(bytes) => tx.put(tables::INDEX, &key, bytes)?,
                         None => {
                             tx.delete(tables::INDEX, &key)?;
                         }
                     }
+                    changed_containers.push(ContainerValueChange {
+                        key: IndexKey {
+                            term: term.clone(),
+                            container_id,
+                        },
+                        before: stored,
+                        after: bytes,
+                    });
                 }
                 edits.push(ContainerEdit {
                     path,
@@ -142,6 +163,7 @@ impl<H: HashProvider> Index<'_, H> {
         Ok(IndexUpdate {
             root: update.root,
             changed_terms,
+            changed_containers,
             superseded: update.superseded,
         })
     }
