@@ -5,7 +5,7 @@
 //!
 //! ```
 //! use golemdb_cells::CellType;
-//! use golemdb_index::{ContainerId, Index, IndexKey, IndexReader, IndexTerm, PostingChange, history};
+//! use golemdb_index::{ContainerId, Index, IndexKey, IndexReader, IndexTerm, PostingChange, TermRange, history};
 //! use golemdb_merkle::{Keccak256Hasher, RootRef};
 //! use golemdb_storage::{MemoryStore, Store, WriteTransaction};
 //!
@@ -24,6 +24,14 @@
 //! // This example recorded all changes from the empty baseline at commit 0.
 //! assert!(IndexReader::at(&tx, 0).container(&key)?.is_none());
 //! assert_eq!(IndexReader::at(&tx, 1).container(&key)?.unwrap().iter().collect::<Vec<_>>(), [42]);
+//! // Exact-term and range reads discover all containers, including deleted ones.
+//! assert!(!IndexReader::at(&tx, 0).term_exists(&key.term)?);
+//! assert!(IndexReader::at(&tx, 0).bitmap(&key.term)?.is_none());
+//! assert!(IndexReader::at(&tx, 1).postings(&key.term)?.treemap().contains(42));
+//! let terms = IndexReader::at(&tx, 1).terms(TermRange::all())?
+//!     .collect::<golemdb_index::Result<Vec<_>>>()?;
+//! assert_eq!(terms.len(), 1);
+//! assert_eq!(terms[0].0, key.term);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
