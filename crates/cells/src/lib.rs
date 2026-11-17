@@ -138,6 +138,7 @@ pub mod marker;
 mod name;
 mod not_nan;
 mod order;
+mod scan;
 pub mod system;
 pub mod tables;
 mod types;
@@ -146,13 +147,14 @@ mod value;
 #[cfg(test)]
 mod tests;
 
-pub use cells::{CellChange, CellReader, CellScan, CellValueChange, Cells, CellsUpdate};
+pub use cells::{CellChange, CellReader, CellValueChange, Cells, CellsUpdate};
 pub use config::{CellLimitError, CellLimits};
 pub use error::{CellError, CellValueParseError, Result};
 pub use key::{CellKey, CellKeyError};
 pub use name::{CellName, CellNameError, CellNameRef, reserved};
 pub use not_nan::{NotNan32, NotNan64};
 pub use order::{decode_float, encode_float, flip_sign};
+pub use scan::CellScan;
 pub use types::{CellKind, CellType, FloatWidth, Width};
 pub use value::{CellValue, CellValueRef};
 
