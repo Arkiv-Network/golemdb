@@ -1,18 +1,16 @@
-use std::iter::{FusedIterator, Peekable};
-
 use golemdb_merkle::{HashProvider, RootRef};
-use golemdb_storage::{Entry, ReadCursor, ReadTransaction, Scan, scan, scan_prefix};
+use golemdb_storage::{ReadTransaction, scan_prefix};
 
 use super::Index;
 use crate::{
-    Bitmap, BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Result, TermRange,
-    history, key, tables,
+    Bitmap, BitmapContainer, ContainerScan, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Result,
+    TermRange, TermScan, history, tables,
 };
 
 /// Committed container reads from one caller-owned snapshot, without a hash
 /// provider. These flat reads validate codecs but do not authenticate a root.
-/// Historical term assembly requires discovery of both live and deleted
-/// containers; this reader currently exposes only individual container reads.
+/// Historical scans discover both live and deleted containers and resolve them
+/// independently before assembling each term's postings.
 pub struct IndexReader<'tx, R: ReadTransaction> {
     tx: &'tx R,
     target: Option<u64>,
@@ -57,6 +55,46 @@ impl<'tx, R: ReadTransaction> IndexReader<'tx, R> {
             }
         }
     }
+
+    /// Present containers of exactly one term, in `hi48` order. Also discovers
+    /// containers deleted since the target. No rows are fetched at construction.
+    pub fn containers_for_term(&self, term: &IndexTerm) -> Result<ContainerScan<'tx, R>> {
+        ContainerScan::for_term(self.tx, self.target, term)
+    }
+
+    /// Present containers in a term range, ordered by `(term, hi48)`.
+    /// Use the stream's work hooks before decoding or assembling large postings.
+    pub fn containers_for_range(&self, range: TermRange) -> Result<ContainerScan<'tx, R>> {
+        ContainerScan::for_range(self.tx, self.target, range)
+    }
+
+    /// A term exists if at least one container is present at the selected target.
+    /// Stops after the first present container, validating its canonical payload.
+    pub fn term_exists(&self, term: &IndexTerm) -> Result<bool> {
+        Ok(self
+            .containers_for_term(term)?
+            .next()
+            .transpose()?
+            .is_some())
+    }
+
+    /// Assemble an exact term's postings. Absent terms return `None`.
+    pub fn bitmap(&self, term: &IndexTerm) -> Result<Option<Bitmap>> {
+        Ok(TermScan::new(self.containers_for_term(term)?)
+            .next()
+            .transpose()?
+            .map(|(_, bitmap)| bitmap))
+    }
+
+    /// Assemble an exact term's postings; empty when the term is absent.
+    pub fn postings(&self, term: &IndexTerm) -> Result<Bitmap> {
+        Ok(self.bitmap(term)?.unwrap_or_default())
+    }
+
+    /// Each present term in the range with its bitmap, in term order.
+    pub fn terms(&self, range: TermRange) -> Result<TermScan<'tx, R>> {
+        Ok(TermScan::new(self.containers_for_range(range)?))
+    }
 }
 
 /// Whether `term` has postings: one seek to its first container row, decoding
@@ -85,80 +123,24 @@ impl<H: HashProvider> Index<'_, H> {
     /// Materialize a term's postings from its container rows; absent terms
     /// return None, never an empty bitmap.
     pub fn bitmap(&self, tx: &impl ReadTransaction, term: &IndexTerm) -> Result<Option<Bitmap>> {
-        // No other term starts with this one, so the scan holds only its rows.
-        let mut rows = TermScan::new(scan_prefix(tx, tables::INDEX, term.as_bytes().to_vec())?);
-        Ok(rows.next().transpose()?.map(|(_, bitmap)| bitmap))
+        IndexReader::new(tx).bitmap(term)
     }
 
     /// Materialize the postings of a term; empty when the term is absent.
     pub fn postings(&self, tx: &impl ReadTransaction, term: &IndexTerm) -> Result<Bitmap> {
-        Ok(self.bitmap(tx, term)?.unwrap_or_default())
+        IndexReader::new(tx).postings(term)
     }
 
     /// Ordered scan of the terms in `range`: each term with its postings, in
     /// one pass over the container rows.
-    pub fn terms<'a, T: ReadTransaction>(
-        &'a self,
-        tx: &'a T,
+    pub fn terms<'tx, R: ReadTransaction>(
+        &self,
+        tx: &'tx R,
         range: TermRange,
-    ) -> Result<TermScan<T::Cursor<'a>>> {
-        let (lower, upper) = key::bounds(range.bounds());
-        Ok(TermScan::new(scan(tx, tables::INDEX, lower, upper)?))
+    ) -> Result<TermScan<'tx, R>> {
+        IndexReader::new(tx).terms(range)
     }
 }
-
-/// Lazy typed term scan over the container rows: one cursor walks the range,
-/// and each term's adjacent rows are grouped into its postings. Any storage
-/// or decoding error ends iteration.
-pub struct TermScan<C: ReadCursor> {
-    rows: Peekable<Scan<C>>,
-    done: bool,
-}
-
-impl<C: ReadCursor> TermScan<C> {
-    fn new(rows: Scan<C>) -> Self {
-        Self {
-            rows: rows.peekable(),
-            done: false,
-        }
-    }
-
-    fn step(&mut self) -> Result<Option<(IndexTerm, Bitmap)>> {
-        let Some(row) = self.rows.next() else {
-            return Ok(None);
-        };
-        let (key, value) = row?;
-        let IndexKey { term, container_id } = IndexKey::decode(&key)?;
-        let mut containers = vec![BitmapContainer::decode(container_id, &value)?];
-        // The term ends unambiguously, so its rows are those it prefixes.
-        // An error may hide one of the term's rows, so it fails the term.
-        let same_term = |row: &golemdb_storage::Result<Entry>| {
-            row.as_ref()
-                .map_or(true, |(next, _)| next.starts_with(term.as_bytes()))
-        };
-        while let Some(row) = self.rows.next_if(same_term) {
-            let (next, value) = row?;
-            let container_id = key::container_id(&next[term.as_bytes().len()..])?;
-            containers.push(BitmapContainer::decode(container_id, &value)?);
-        }
-        Ok(Some((term, Bitmap::from_containers(containers)?)))
-    }
-}
-
-impl<C: ReadCursor> Iterator for TermScan<C> {
-    type Item = Result<(IndexTerm, Bitmap)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-        let item = self.step().transpose();
-        self.done = !matches!(item, Some(Ok(_)));
-        item
-    }
-}
-
-impl<C: ReadCursor> FusedIterator for TermScan<C> {}
 
 #[cfg(test)]
 mod tests {
