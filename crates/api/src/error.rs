@@ -200,6 +200,7 @@ pub type Result<T> = std::result::Result<T, ApiError>;
 // can hide a source-less StorageError::Full. Follow those wrappers explicitly.
 fn store_full(error: &(dyn Error + 'static)) -> bool {
     use golemdb_cells::CellError;
+    use golemdb_history::HistoryError;
     use golemdb_index::IndexError;
     use golemdb_merkle::MerkleError;
     use golemdb_pruning::PruningError;
@@ -240,14 +241,18 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
             match error {
                 CellError::Storage(e) => Some(e),
                 CellError::Merkle(e) => Some(e),
+                CellError::History(e) => Some(e),
                 _ => None,
             }
         } else if let Some(error) = error.downcast_ref::<IndexError>() {
             match error {
                 IndexError::Storage(e) => Some(e),
                 IndexError::Merkle(e) => Some(e),
+                IndexError::History(e) => Some(e),
                 _ => None,
             }
+        } else if let Some(HistoryError::Storage(error)) = error.downcast_ref::<HistoryError>() {
+            Some(error)
         } else if let Some(MerkleError::Storage(error)) = error.downcast_ref::<MerkleError>() {
             Some(error)
         } else if let Some(PruningError::Storage(error)) = error.downcast_ref::<PruningError>() {

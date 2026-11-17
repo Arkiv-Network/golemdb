@@ -66,7 +66,8 @@
 //! Supply the deployment's hash provider when constructing the manager. A seal
 //! reopens both roots from the validated origin, adds the previous commit's
 //! `#roots` cell, applies cells, derives postings from actual before/after values,
-//! and applies the index. No store writer is opened. History is deferred.
+//! and applies the index, then records each net cell/container pre-image in
+//! the same buffer. No store writer is opened.
 //! The result retains both updates and physical rows for commit.
 //!
 //! ```
@@ -109,9 +110,9 @@
 //!
 //! A seal error leaves the branch open. A storage error after sealing preserves
 //! the sealed result for retry or discard; every retry validates head again.
-//! The manager does not recompute roots for a sealed branch. History and
-//! change-set tables remain deferred; record-layer allocator/binding writes
-//! already staged as cells are persisted with all other sealed rows.
+//! The manager does not recompute roots or pre-images for a sealed branch.
+//! Cell and per-container history, including allocator/binding and other
+//! system-cell changes, is staged at seal and published with the live rows.
 //!
 //! # Callback errors and panics
 //!

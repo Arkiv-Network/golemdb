@@ -85,6 +85,10 @@ pub(crate) fn compute(
         }
     }
     let index_update = index.apply(&mut tx, commit, roots.index, postings)?;
+    // Record origin pre-images from the final net changes, including system
+    // cells. History and live state become one sealed, atomically replayed batch.
+    golemdb_cells::history::record_changes(&mut tx, commit, &cells_update.changed_cells)?;
+    golemdb_index::history::record_changes(&mut tx, commit, &index_update.changed_containers)?;
     Ok(SealedCommit {
         commit_id,
         state_root: cells_update.root.hash(hasher),

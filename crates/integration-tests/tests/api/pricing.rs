@@ -333,13 +333,17 @@ fn reopening_requires_active_host_code_not_retired_genesis_host_code() {
 fn host_weight_keys_must_fit_backend_even_though_user_caps_do_not_apply() {
     let dir = tempfile::tempdir().unwrap();
     let store = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
-    let mut cfg = config(HashAlgorithm::Keccak256);
-    let name = format!("host.{}", "x".repeat(store.max_key_size()));
-    cfg.genesis.metering.weights.insert(name.clone(), 1);
-    cfg.host_schemas[0].weight_names.push(name);
-    assert!(matches!(
-        Database::from_store(store.clone(), &cfg),
-        Err(OpenError::InvalidConfig(_))
-    ));
-    assert!(store.begin_write().unwrap().is_empty().unwrap());
+    // A live weight key contains record ID + model version + name. The second
+    // case fits live storage exactly but cannot fit its changeset commit prefix.
+    for name_len in [store.max_key_size() + 5, store.max_key_size() - 16] {
+        let mut cfg = config(HashAlgorithm::Keccak256);
+        let name = format!("host.{}", "x".repeat(name_len - 5));
+        cfg.genesis.metering.weights.insert(name.clone(), 1);
+        cfg.host_schemas[0].weight_names.push(name);
+        assert!(matches!(
+            Database::from_store(store.clone(), &cfg),
+            Err(OpenError::InvalidConfig(_))
+        ));
+        assert!(store.begin_write().unwrap().is_empty().unwrap());
+    }
 }

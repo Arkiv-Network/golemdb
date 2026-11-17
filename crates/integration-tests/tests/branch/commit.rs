@@ -14,7 +14,11 @@ use std::{
 };
 
 const SUPERBLOCK: Table = Table("Superblock");
-const TABLES: [Table; 6] = [
+const TABLES: [Table; 10] = [
+    tables::CELL_HISTORY,
+    tables::CELL_CHANGE_SET,
+    golemdb_index::tables::INDEX_HISTORY,
+    golemdb_index::tables::INDEX_CHANGE_SET,
     tables::CELL,
     tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX,
@@ -179,14 +183,26 @@ fn lifecycle(db: impl Store + Clone, hash: impl HashProvider + Copy) {
         [sealed.state_root, sealed.index_root].concat()
     );
     assert_eq!(root_value.cell_type(), CellType::Bytes);
-    for table in [
-        Table("CellHistory"),
-        Table("IndexHistory"),
-        Table("CellChangeSet"),
-        Table("IndexChangeSet"),
+    for (table, rows) in [
+        (tables::CELL_HISTORY, 3), // user cell plus two lag-one root cells
+        (golemdb_index::tables::INDEX_HISTORY, 1),
+        (tables::CELL_CHANGE_SET, 4),
+        (golemdb_index::tables::INDEX_CHANGE_SET, 2),
     ] {
-        assert_eq!(scan_prefix(&tx, table, vec![]).unwrap().count(), 0);
+        assert_eq!(scan_prefix(&tx, table, vec![]).unwrap().count(), rows);
     }
+    assert_eq!(
+        golemdb_cells::CellReader::at(&tx, 1)
+            .get(&key(b"name"))
+            .unwrap(),
+        Some(value("Alice"))
+    );
+    assert!(
+        golemdb_cells::CellReader::at(&tx, 0)
+            .get(&key(b"name"))
+            .unwrap()
+            .is_none()
+    );
 }
 #[test]
 fn memory_commit_publishes_cells_index_roots_and_head_atomically() {
@@ -221,6 +237,7 @@ enum Fault {
     None,
     Open,
     Write(usize),
+    Table(Table),
     HeadRead,
     HeadWrite,
     Commit,
@@ -315,6 +332,7 @@ impl<W> ControlledWrite<W> {
             panic!("injected write panic");
         }
         if matches!(self.fault, Fault::Write(n) if n == self.step)
+            || matches!(self.fault, Fault::Table(t) if t == table)
             || (matches!(self.fault, Fault::HeadWrite) && table == SUPERBLOCK)
         {
             return Err(injected());
@@ -364,6 +382,10 @@ fn failure_recovery(db: impl Store + Clone + 'static) {
         Fault::HeadRead,
         Fault::Write(1),
         Fault::Write(3),
+        Fault::Table(tables::CELL_HISTORY),
+        Fault::Table(tables::CELL_CHANGE_SET),
+        Fault::Table(golemdb_index::tables::INDEX_HISTORY),
+        Fault::Table(golemdb_index::tables::INDEX_CHANGE_SET),
         Fault::HeadWrite,
         Fault::Commit,
         Fault::Panic(3),

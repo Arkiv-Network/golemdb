@@ -266,11 +266,12 @@ fn physical_limits_cover_full_index_keys_fixed_values_and_size_overflow() {
     for (name, string, bytes, max_key, max_value) in [
         (0, 64, 128, usize::MAX, usize::MAX),
         // The index needs 32 + 2 bytes, a 64-byte string, its terminator
-        // and hi48.
-        (32, 64, 128, 104, usize::MAX),
-        (32, 0, 128, 71, usize::MAX), // u256 needs 32 bytes even with zero string cap
-        (32, 64, 16384, 105, 16384),  // cell tag needs one more byte
-        (32, 64, 128, 105, 16383),    // engine rows need their own allowance
+        // and hi48, plus the changeset's eight-byte commit prefix.
+        (32, 64, 128, 112, usize::MAX),
+        (32, 64, 128, 105, usize::MAX), // live rows fit but history does not
+        (32, 0, 128, 79, usize::MAX),   // u256 needs 32 bytes even with zero string cap
+        (32, 64, 16384, 113, 16384),    // cell tag needs one more byte
+        (32, 64, 128, 113, 16383),      // engine rows need their own allowance
         (u32::MAX, u32::MAX, u32::MAX, u32::MAX as usize, usize::MAX),
     ] {
         cfg.genesis.cell_limits = CellLimits {
@@ -289,7 +290,7 @@ fn physical_limits_cover_full_index_keys_fixed_values_and_size_overflow() {
         assert!(db.begin_write().unwrap().is_empty().unwrap());
     }
     let mut bounded = Controlled::new(MemoryStore::new(), Fault::None);
-    bounded.max_key = 105;
+    bounded.max_key = 113;
     bounded.max_value = 16384;
     assert!(Database::from_store(bounded, &config(files.path())).is_ok());
 }
