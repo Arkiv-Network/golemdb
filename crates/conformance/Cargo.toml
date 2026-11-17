@@ -1,0 +1,13 @@
+[package]
+name = "golemdb-conformance"
+description = "Conformance tests: the public API checked against its specification"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+golemdb-api.workspace = true
+tempfile = "3"
+
