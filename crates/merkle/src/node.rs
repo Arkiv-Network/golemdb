@@ -165,25 +165,34 @@ impl<const N: usize> BranchNodeCompact<N> {
         })
     }
 
-    /// Hash payload, without the domain byte or stored-only paths and commits.
-    pub fn hash_payload(&self) -> Vec<u8> {
-        let mut bytes = vec![self.prefix_len];
+    /// Length of the hash payload: the encoding without the domain byte or the
+    /// stored-only paths and commits.
+    fn payload_len(&self) -> usize {
+        PREFIX_LEN_BYTES + self.prefix.len() + 2 * MASK_BYTES + HASH_BYTES * self.child_hashes.len()
+    }
+
+    fn extend_payload(&self, bytes: &mut Vec<u8>) {
+        bytes.push(self.prefix_len);
         bytes.extend_from_slice(&self.prefix);
         bytes.extend_from_slice(&self.state_mask.to_be_bytes());
         bytes.extend_from_slice(&self.tree_mask.to_be_bytes());
         for hash in &self.child_hashes {
             bytes.extend_from_slice(hash);
         }
-        bytes
     }
 
     /// Hash with the branch domain byte assigned by the owning crate.
     pub fn hash(&self, domain: u8, hasher: &impl HashProvider) -> Hash {
-        hasher.hash_parts(&[&[domain], &self.hash_payload()])
+        let (state, tree) = (self.state_mask.to_be_bytes(), self.tree_mask.to_be_bytes());
+        let head: [&[u8]; 5] = [&[domain], &[self.prefix_len], &self.prefix, &state, &tree];
+        let children = self.child_hashes.iter().map(|hash| &hash[..]);
+        hasher.hash_iter(head.into_iter().chain(children))
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut bytes = self.hash_payload();
+        let stored = N * self.leaf_paths.len() + COMMIT_BYTES * self.child_commits.len();
+        let mut bytes = Vec::with_capacity(self.payload_len() + stored);
+        self.extend_payload(&mut bytes);
         for path in &self.leaf_paths {
             bytes.extend_from_slice(path);
         }

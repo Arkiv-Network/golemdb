@@ -118,9 +118,9 @@ impl<S: Store> Store for ReadOnly<S> {
 
 struct PanicHasher(Arc<AtomicBool>);
 impl HashProvider for PanicHasher {
-    fn hash_parts(&self, parts: &[&[u8]]) -> Hash {
+    fn hash_iter<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Hash {
         assert!(!self.0.load(Ordering::Relaxed), "injected hash panic");
-        Keccak256Hasher.hash_parts(parts)
+        Keccak256Hasher.hash_iter(parts)
     }
 }
 
@@ -250,12 +250,12 @@ fn stage<S: Store, H: HashProvider>(branches: &Branches<S, H>, text: &str) -> cr
 
 struct SwitchHash(Arc<AtomicBool>);
 impl HashProvider for SwitchHash {
-    fn hash_parts(&self, parts: &[&[u8]]) -> Hash {
+    fn hash_iter<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Hash {
         assert!(
             !self.0.load(Ordering::Relaxed),
             "commit recalculated a sealed hash"
         );
-        Keccak256Hasher.hash_parts(parts)
+        Keccak256Hasher.hash_iter(parts)
     }
 }
 

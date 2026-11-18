@@ -12,8 +12,15 @@ pub const HASH_BYTES: usize = size_of::<Hash>();
 /// Concrete providers keep algorithm selection out of the hashing path.
 /// `Sized` excludes trait-object dispatch; algorithms are generic type parameters.
 pub trait HashProvider: Sized {
-    fn hash_parts(&self, parts: &[&[u8]]) -> Hash;
+    /// Hash the concatenation of `parts`, fed to the digest as they come.
+    fn hash_iter<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Hash;
 
+    /// Hash the concatenation of `parts`.
+    fn hash_parts(&self, parts: &[&[u8]]) -> Hash {
+        self.hash_iter(parts.iter().copied())
+    }
+
+    /// Hash `bytes` as a single part.
     fn hash(&self, bytes: &[u8]) -> Hash {
         self.hash_parts(&[bytes])
     }
@@ -36,7 +43,7 @@ pub enum HashAlgorithm {
 pub struct Keccak256Hasher;
 
 impl HashProvider for Keccak256Hasher {
-    fn hash_parts(&self, parts: &[&[u8]]) -> Hash {
+    fn hash_iter<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Hash {
         let mut digest = Keccak256::new();
         for part in parts {
             digest.update(part);
@@ -50,7 +57,7 @@ impl HashProvider for Keccak256Hasher {
 pub struct Blake3Hasher;
 
 impl HashProvider for Blake3Hasher {
-    fn hash_parts(&self, parts: &[&[u8]]) -> Hash {
+    fn hash_iter<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Hash {
         let mut digest = blake3::Hasher::new();
         for part in parts {
             digest.update(part);

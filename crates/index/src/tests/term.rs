@@ -238,8 +238,9 @@ fn strict_term_decoding() {
 #[derive(Default)]
 struct Recorder(RefCell<Vec<Vec<u8>>>);
 impl HashProvider for Recorder {
-    fn hash_parts(&self, parts: &[&[u8]]) -> Hash {
-        self.0.borrow_mut().push(parts.concat());
+    fn hash_iter<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Hash {
+        let preimage = parts.into_iter().flatten().copied().collect();
+        self.0.borrow_mut().push(preimage);
         [self.0.borrow().len() as u8; 32]
     }
 }

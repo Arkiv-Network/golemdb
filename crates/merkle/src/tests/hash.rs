@@ -17,6 +17,8 @@ fn keccak_known_answers_and_chunking() {
         "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45"
     );
     assert_eq!(hash.hash_parts(&[b"a", b"", b"bc"]), hash.hash(b"abc"));
+    assert_eq!(hash.hash_iter([&b"a"[..], b"", b"bc"]), hash.hash(b"abc"));
+    assert_eq!(hash.hash_iter(std::iter::empty()), hash.hash(b""));
     assert_eq!(hash.hash_parts(&[]), hash.hash(b""));
 }
 
@@ -68,6 +70,8 @@ fn blake3_known_answers_and_chunking() {
     );
     assert_eq!(hash.hash_parts(&[]), hash.hash(b""));
     assert_eq!(hash.hash_parts(&[b"a", b"", b"bc"]), hash.hash(b"abc"));
+    assert_eq!(hash.hash_iter([&b"a"[..], b"", b"bc"]), hash.hash(b"abc"));
+    assert_eq!(hash.hash_iter(std::iter::empty()), hash.hash(b""));
     // Cross compression-block and tree-chunk boundaries with fragmented input.
     let bytes = (0..4097).map(|i| (i % 251) as u8).collect::<Vec<_>>();
     for size in [1, 63, 64, 65, 1023, 1024, 1025] {
