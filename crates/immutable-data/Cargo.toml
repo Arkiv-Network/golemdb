@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 golemdb-cells.workspace = true
 golemdb-storage.workspace = true
-reth-nippy-jar = { git = "https://github.com/paradigmxyz/reth", rev = "d58c6e3d0723a28f655e89da83c3738e47dcc364" }
+reth-nippy-jar = { git = "https://github.com/Arkiv-Network/reth", tag = "custom-golemdb-v2.7.0-v1.0.1" }
 thiserror.workspace = true
 serde.workspace = true
 
