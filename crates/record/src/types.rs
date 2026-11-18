@@ -1,11 +1,33 @@
 use std::collections::BTreeMap;
 
 use golemdb_branch::{BranchId, CommitId};
-use golemdb_cells::{CellKind, CellName, CellValue};
+use golemdb_cells::{CellKind, CellName, CellValue, system};
 
 /// Caller-assigned logical identity, independent of the internal record ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordKey(pub [u8; 32]);
+
+impl RecordKey {
+    /// `#params`: genesis parameters.
+    pub const PARAMS: Self = Self(system::PARAMS.key);
+    /// `#alloc`: record ID allocator.
+    pub const ALLOC: Self = Self(system::ALLOC.key);
+    /// `#roots`: commit root history.
+    pub const ROOTS: Self = Self(system::ROOTS.key);
+    /// `#recordKeys`: key to record ID bindings.
+    pub const RECORD_KEYS: Self = Self(system::RECORD_KEYS.key);
+    /// `#rootIndex`
+    pub const ROOT_INDEX: Self = Self(system::ROOT_INDEX.key);
+    /// `@meteringModel`: metering model versions.
+    pub const METERING_MODEL: Self = Self(system::METERING_MODEL.key);
+    /// `@modelWeight`: metering model weights.
+    pub const MODEL_WEIGHT: Self = Self(system::MODEL_WEIGHT.key);
+
+    /// Whether this is a reserved key.
+    pub fn is_reserved(&self) -> bool {
+        system::by_key(&self.0).is_some()
+    }
+}
 
 impl From<[u8; 32]> for RecordKey {
     fn from(key: [u8; 32]) -> Self {

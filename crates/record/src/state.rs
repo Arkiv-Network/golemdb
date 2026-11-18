@@ -12,7 +12,7 @@ pub(crate) fn binding(key: RecordKey) -> CellKey {
 pub(crate) fn record_id(key: RecordKey, binding_value: Option<CellValue>) -> Result<Option<u64>> {
     let Some(value) = binding_value else {
         // Reserved records must have been initialized, including their bindings.
-        return if system::by_key(&key.0).is_some() {
+        return if key.is_reserved() {
             Err(RecordError::CorruptState("reserved record binding missing"))
         } else {
             Ok(None)

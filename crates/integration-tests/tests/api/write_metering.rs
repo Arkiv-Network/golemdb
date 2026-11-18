@@ -1,7 +1,6 @@
 //! Public API conformance with persisted, nonzero prices. Expected totals below
 //! are hand-counted at the temporary depth 6, not obtained by executing an estimate.
 use golemdb_api::*;
-use golemdb_cells::system;
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
 const OTHER: RecordKey = RecordKey([0x43; 32]);
@@ -105,7 +104,7 @@ fn cud_exact_budgets_preserve_state_and_return_only_completed_work_on_failure() 
     each_backend(genesis(), |db| {
         let branch = db.begin().unwrap();
         let head = db.head().unwrap();
-        let alloc = record(&db, branch, RecordKey(system::ALLOC.key));
+        let alloc = record(&db, branch, RecordKey::ALLOC);
         let info = db.branch_info(branch).unwrap();
         for (budget, spent, required) in [
             (1, 0, None),
@@ -118,7 +117,7 @@ fn cud_exact_budgets_preserve_state_and_return_only_completed_work_on_failure() 
             refused(&call, spent, required);
             accounting(&db, &call.receipt, spent, head);
             assert_eq!(db.branch_info(branch).unwrap(), info);
-            assert_eq!(record(&db, branch, RecordKey(system::ALLOC.key)), alloc);
+            assert_eq!(record(&db, branch, RecordKey::ALLOC), alloc);
             assert!(matches!(
                 db.get(
                     ReadTarget::Branch(branch),
@@ -272,12 +271,12 @@ fn missing_weights_and_overflow_fail_under_limited_and_unlimited_budgets() {
         }
         each_backend(config, |db| {
             let branch = db.begin().unwrap();
-            let alloc = record(&db, branch, RecordKey(system::ALLOC.key));
+            let alloc = record(&db, branch, RecordKey::ALLOC);
             for budget in [Budget::Limited(u64::MAX), Budget::Unlimited] {
                 let call = db.create(branch, create(KEY, budget));
                 refused(&call, spent, None);
                 accounting(&db, &call.receipt, spent, CommitId::GENESIS);
-                assert_eq!(record(&db, branch, RecordKey(system::ALLOC.key)), alloc);
+                assert_eq!(record(&db, branch, RecordKey::ALLOC), alloc);
                 assert_eq!(db.branch_info(branch).unwrap().version, 0);
             }
         });
@@ -302,13 +301,13 @@ fn record_caps_reject_the_plan_without_allocating_or_applying_it() {
     config.record_limits.max_cells = 1;
     each_backend(config, |db| {
         let branch = db.begin().unwrap();
-        let alloc = record(&db, branch, RecordKey(system::ALLOC.key));
+        let alloc = record(&db, branch, RecordKey::ALLOC);
         let call = db.create(branch, create(KEY, Budget::Unlimited));
         assert!(matches!(call.result, Err(ApiError::InvalidArgument { .. })));
         accounting(&db, &call.receipt, 24, CommitId::GENESIS);
         assert_eq!(call.receipt.details, Details::default());
         assert_eq!(call.receipt.ledger.count("write.cell.create"), 0);
-        assert_eq!(record(&db, branch, RecordKey(system::ALLOC.key)), alloc);
+        assert_eq!(record(&db, branch, RecordKey::ALLOC), alloc);
         assert_eq!(db.branch_info(branch).unwrap().version, 0);
     });
 }

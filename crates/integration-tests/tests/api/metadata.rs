@@ -149,7 +149,7 @@ fn metadata_tracks_receipts_kind_changes_removals_rollback_and_query_projections
 fn cap_contract(db: Database) {
     let b = db.begin().unwrap();
     let target = ReadTarget::Branch(b);
-    let allocator = || get(&db, target, RecordKey(system::ALLOC.key));
+    let allocator = || get(&db, target, RecordKey::ALLOC);
     let initial_allocator = allocator();
     let initial_info = db.branch_info(b).unwrap();
     for create in [

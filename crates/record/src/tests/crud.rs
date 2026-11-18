@@ -373,12 +373,28 @@ fn work_in_progress_is_isolated_and_projection_preserves_identity() {
 }
 
 #[test]
+fn reserved_key_constants_match_the_catalogue() {
+    let constants = [
+        RecordKey::PARAMS,
+        RecordKey::ALLOC,
+        RecordKey::ROOTS,
+        RecordKey::RECORD_KEYS,
+        RecordKey::ROOT_INDEX,
+        RecordKey::METERING_MODEL,
+        RecordKey::MODEL_WEIGHT,
+    ];
+    let catalogue: Vec<_> = system::ALL.iter().map(|r| RecordKey(r.key)).collect();
+    assert_eq!(constants.as_slice(), catalogue);
+}
+
+#[test]
 fn reserved_records_are_readable_but_only_exact_keys_are_protected() {
     let (_, branches, records) = setup();
     let b = branches.begin().unwrap();
     let before = snapshot(&branches, b);
     for reserved in system::ALL {
         let key = RecordKey(reserved.key);
+        assert!(key.is_reserved());
         let result = records
             .get(ReadTarget::Branch(b), key, None, Budget::Unlimited)
             .result
@@ -420,6 +436,7 @@ fn reserved_records_are_readable_but_only_exact_keys_are_protected() {
     );
     let mut similar = system::PARAMS.key;
     similar[31] = 1;
+    assert!(!RecordKey(similar).is_reserved());
     records
         .create(
             b,
