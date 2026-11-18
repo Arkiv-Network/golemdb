@@ -130,10 +130,9 @@ impl Fixture {
         let before = self.stats();
         self.commit(batch);
         let after = self.stats();
-        let written = (after.session_bytes_written - before.session_bytes_written) as f64;
         format!(
-            "{:.2} MiB written and {} sync(s) per commit, database {:.0} MiB",
-            written / MIB,
+            "{} bytes written and {} sync(s) per commit, database {:.0} MiB",
+            after.session_bytes_written - before.session_bytes_written,
             after.session_syncs - before.session_syncs,
             after.db_size as f64 / MIB,
         )

@@ -57,7 +57,7 @@ cargo bench -p golemdb-integration-tests --bench write -- --baseline before
 After each commit case, the suite prints its storage work:
 
 ```
-commit/patch: 2.64 MiB written and 1 sync(s) per commit, database 499 MiB
+commit/patch: 2772992 bytes written and 1 sync(s) per commit, database 499 MiB
 ```
 
 It comes from MDBX's own counters (`Store::stats`). Bytes written are estimated
@@ -121,7 +121,8 @@ suite; the first index performance suite focuses on additions.
   temporary-directory cleanup happen outside timing. It measures an isolated
   commit after seeding, not sustained ingestion or cold-disk throughput.
 - Write cases time only the `seal` or `commit` call, in wall-clock time, so
-  commit times include waiting for the disk. Planning and executing the batch,
+  commit times include waiting for the disk sync, which CPU time would leave
+  out. Planning and executing the batch,
   and for commit cases sealing it, happen outside timing. The preloaded database
   is built once per run. `seal` cases run on it and discard each batch, so it
   never changes. Each timed commit runs on a fresh copy of the preloaded
