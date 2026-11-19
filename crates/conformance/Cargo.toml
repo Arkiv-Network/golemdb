@@ -10,4 +10,3 @@ publish = false
 [dependencies]
 golemdb-api.workspace = true
 tempfile = "3"
-
