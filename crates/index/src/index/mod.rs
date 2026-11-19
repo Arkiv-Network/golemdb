@@ -5,7 +5,7 @@ use crate::index_trie::IndexTrie;
 mod reader;
 mod writer;
 
-pub use reader::{IndexReader, TermScan, term_exists};
+pub use reader::{IndexReader, term_exists};
 pub use writer::{ContainerValueChange, IndexUpdate, PostingChange};
 
 /// Index operations over caller-owned transactions. Use the same hash provider
