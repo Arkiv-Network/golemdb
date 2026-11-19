@@ -72,6 +72,7 @@ mod admission;
 mod committed;
 mod crud;
 mod error;
+pub mod historical;
 mod meta;
 mod outcome;
 mod plan;

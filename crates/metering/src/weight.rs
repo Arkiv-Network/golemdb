@@ -3,7 +3,7 @@ use std::{borrow::Cow, fmt};
 /// A name in a pricing schedule or receipt ledger, ordered by its exact text.
 ///
 /// Names are open-ended so future models and host weights do not change the
-/// receipt type. The constants declare GolemDB code version 1's weight names,
+/// receipt type. The constants declare GolemDB code version 2's weight names,
 /// including query/log weights whose execution metering is still deferred.
 /// Declaration/form checks at genesis and activation belong to their loader;
 /// constructing a name does not declare or price it.
@@ -17,7 +17,7 @@ macro_rules! define_weights {
             $(pub const $constant: Self = Self(Cow::Borrowed($name));)*
         }
 
-        /// Names declared by GolemDB code version 1 (metering D10). Declaring
+        /// Names declared by GolemDB code version 2. Declaring
         /// query/log names permits configuration before their execution metering.
         pub const GOLEMDB_WEIGHT_NAMES: &[&str] = &[$($name),*];
     };
@@ -43,6 +43,7 @@ define_weights! {
     READ_KEY => "read.key",
     READ_CELL => "read.cell",
     READ_CELL_SCAN => "read.cell_scan",
+    READ_COMMIT_SET => "read.commit_set",
     READ_BYTE => "read.byte",
     READ_TERM => "read.term",
     READ_BASE => "read.base",

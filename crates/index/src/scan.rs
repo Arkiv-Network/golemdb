@@ -1,11 +1,8 @@
 //! Ordered container discovery, temporal resolution, and shared term assembly.
 
-use std::{
-    iter::{FusedIterator, Peekable},
-    ops::Bound,
-};
+use std::{iter::FusedIterator, ops::Bound};
 
-use golemdb_history::{CommitSet, HistoryError};
+use golemdb_history::{CommitSet, HistoryError, ReadOperation};
 use golemdb_storage::{Entry, ReadCursor, ReadTransaction};
 
 use crate::{
@@ -20,7 +17,7 @@ use crate::{
 /// One `next` may skip many candidates absent at the target. Lookahead copies
 /// at most one live key and one encoded history row, never live payloads;
 /// decoding history also allocates its commit set. Use [`Self::next_with`] to
-/// control candidate work and inspect selected bytes before decoding/copying.
+/// control individual operations and inspect selected bytes before decoding/copying.
 /// Any storage, codec or callback error ends the scan permanently.
 pub struct ContainerScan<'tx, R: ReadTransaction> {
     tx: &'tx R,
@@ -66,21 +63,17 @@ impl<'tx, R: ReadTransaction> ContainerScan<'tx, R> {
         })
     }
 
-    /// Inspect the next present container's borrowed bytes. `before_next` runs
-    /// before every candidate attempt, including absent candidates and the final
-    /// exhaustion probe; `inspect` runs before payload decoding or copying.
-    /// Empty pre-images mean absence; empty live values remain malformed payloads.
-    /// These are work hooks, not a pricing policy: physical attempts can depend
-    /// on locally retained history and are not automatically chargeable units.
-    pub fn next_with<Context, Output, E: From<IndexError>>(
+    /// Authorize each physical operation and bitmap package before it runs.
+    /// A buffered history row is processed/charged once and reused on selection.
+    pub fn next_with<C, T, E: From<IndexError>>(
         &mut self,
-        context: &mut Context,
-        mut before_next: impl FnMut(&mut Context) -> std::result::Result<(), E>,
-        mut inspect: impl FnMut(&mut Context, IndexKey, &[u8]) -> std::result::Result<Output, E>,
-    ) -> std::result::Result<Option<Output>, E> {
+        context: &mut C,
+        mut before: impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+        mut inspect: impl FnMut(&mut C, IndexKey, &[u8]) -> std::result::Result<T, E>,
+    ) -> std::result::Result<Option<T>, E> {
         loop {
-            match self.next_candidate_with(context, &mut before_next, |context, key, bytes| {
-                bytes.map(|bytes| inspect(context, key, bytes)).transpose()
+            match self.next_candidate_with(context, &mut before, |context, key, raw| {
+                raw.map(|raw| inspect(context, key, raw)).transpose()
             })? {
                 Some(Some(value)) => return Ok(Some(value)),
                 Some(None) => continue,
@@ -94,13 +87,13 @@ impl<'tx, R: ReadTransaction> ContainerScan<'tx, R> {
     fn next_candidate_with<Context, Output, E: From<IndexError>>(
         &mut self,
         context: &mut Context,
-        mut before_next: impl FnMut(&mut Context) -> std::result::Result<(), E>,
+        mut before: impl FnMut(&mut Context, ReadOperation) -> std::result::Result<(), E>,
         mut inspect: impl FnMut(&mut Context, IndexKey, Option<&[u8]>) -> std::result::Result<Output, E>,
     ) -> std::result::Result<Option<Output>, E> {
         if self.done {
             return Ok(None);
         }
-        let result = self.read_candidate(context, &mut before_next, &mut inspect);
+        let result = self.read_candidate(context, &mut before, &mut inspect);
         if !matches!(result, Ok(Some(_))) {
             self.done = true;
         }
@@ -110,15 +103,15 @@ impl<'tx, R: ReadTransaction> ContainerScan<'tx, R> {
     fn read_candidate<Context, Output, E: From<IndexError>>(
         &mut self,
         context: &mut Context,
-        before_next: &mut impl FnMut(&mut Context) -> std::result::Result<(), E>,
+        before: &mut impl FnMut(&mut Context, ReadOperation) -> std::result::Result<(), E>,
         inspect: &mut impl FnMut(
             &mut Context,
             IndexKey,
             Option<&[u8]>,
         ) -> std::result::Result<Output, E>,
     ) -> std::result::Result<Option<Output>, E> {
-        before_next(context)?;
         let Some(history) = &mut self.history else {
+            before(context, ReadOperation::Advance(tables::INDEX))?;
             return self
                 .live
                 .with_next(|row| {
@@ -129,7 +122,7 @@ impl<'tx, R: ReadTransaction> ContainerScan<'tx, R> {
                 .map_err(IndexError::from)?;
         };
         let Some(Candidate { encoded, commits }) =
-            history.next_candidate(&mut self.live, &self.upper)?
+            history.next_candidate(&mut self.live, &self.upper, context, before)?
         else {
             return Ok(None);
         };
@@ -149,17 +142,22 @@ impl<'tx, R: ReadTransaction> ContainerScan<'tx, R> {
             .transpose()?
             .flatten();
         let value = match successor {
-            Some(commit) => tables::HISTORY
-                .with_preimage(self.tx, &encoded, commit, |bytes| {
-                    inspect(context, key, bytes)
-                })
-                .map_err(IndexError::from)??,
-            None => self
-                .tx
-                .with_value(tables::INDEX, &encoded, |bytes| {
-                    inspect(context, key, bytes)
-                })
-                .map_err(IndexError::from)??,
+            Some(commit) => {
+                before(context, ReadOperation::Lookup(tables::INDEX_CHANGE_SET))?;
+                tables::HISTORY
+                    .with_preimage(self.tx, &encoded, commit, |bytes| {
+                        inspect(context, key, bytes)
+                    })
+                    .map_err(IndexError::from)??
+            }
+            None => {
+                before(context, ReadOperation::Lookup(tables::INDEX))?;
+                self.tx
+                    .with_value(tables::INDEX, &encoded, |bytes| {
+                        inspect(context, key, bytes)
+                    })
+                    .map_err(IndexError::from)??
+            }
         };
         Ok(Some(value))
     }
@@ -171,7 +169,7 @@ impl<R: ReadTransaction> Iterator for ContainerScan<'_, R> {
     fn next(&mut self) -> Option<Self::Item> {
         self.next_with(
             &mut (),
-            |_| Ok::<_, IndexError>(()),
+            |_, _| Ok::<_, IndexError>(()),
             |_, key, bytes| {
                 let container = BitmapContainer::decode(key.container_id, bytes)?;
                 Ok((key, container))
@@ -206,23 +204,41 @@ struct Candidate {
 }
 
 impl<Cursor: ReadCursor> HistoricalScan<Cursor> {
-    fn next_candidate(
+    fn next_candidate<C, E: From<IndexError>>(
         &mut self,
         live: &mut Cursor,
         upper: &Bound<Vec<u8>>,
-    ) -> Result<Option<Candidate>> {
+        context: &mut C,
+        before: &mut impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+    ) -> std::result::Result<Option<Candidate>, E> {
         if self.live_key.is_none() && !self.live_done {
-            self.live_key = live.with_next(|row| {
-                row.filter(|(key, _)| within(key, upper))
-                    .map(|(key, _)| key.to_vec())
-            })?;
+            before(context, ReadOperation::Advance(tables::INDEX))?;
+            self.live_key = live
+                .with_next(|row| {
+                    row.filter(|(key, _)| within(key, upper))
+                        .map(|(key, _)| key.to_vec())
+                })
+                .map_err(IndexError::from)?;
             self.live_done = self.live_key.is_none();
         }
         if self.history_row.is_none() && !self.history_done {
-            self.history_row = self.cursor.with_next(|row| {
-                row.filter(|(key, _)| within(key, upper))
-                    .map(|(key, bytes)| (key.to_vec(), bytes.to_vec()))
-            })?;
+            before(context, ReadOperation::Advance(tables::INDEX_HISTORY))?;
+            self.history_row = self
+                .cursor
+                .with_next(|row| {
+                    row.filter(|(key, _)| within(key, upper))
+                        .map(|(key, bytes)| {
+                            before(
+                                context,
+                                ReadOperation::CommitSet {
+                                    encoded_bytes: bytes.len() as u64,
+                                },
+                            )?;
+                            Ok::<_, E>((key.to_vec(), bytes.to_vec()))
+                        })
+                        .transpose()
+                })
+                .map_err(IndexError::from)??;
             self.history_done = self.history_row.is_none();
         }
         if self
@@ -252,76 +268,98 @@ impl<Cursor: ReadCursor> HistoricalScan<Cursor> {
 /// A single term may require many candidate reads; use [`ContainerScan`] for
 /// finer work control. Errors terminate iteration without emitting a partial term.
 pub struct TermScan<'tx, R: ReadTransaction> {
-    rows: Peekable<ResolvedCandidates<'tx, R>>,
+    rows: ContainerScan<'tx, R>,
+    pending: Option<(IndexKey, Option<BitmapContainer>)>,
     done: bool,
 }
 
 impl<'tx, R: ReadTransaction> TermScan<'tx, R> {
     pub(crate) fn new(rows: ContainerScan<'tx, R>) -> Self {
         Self {
-            rows: ResolvedCandidates(rows).peekable(),
+            rows,
+            pending: None,
             done: false,
         }
     }
 
-    fn step(&mut self) -> Result<Option<(IndexTerm, Bitmap)>> {
+    /// Forward storage/commit-set checkpoints, and authorize each selected
+    /// container before decoding it. Query pricing policy belongs to the caller.
+    /// One resolved candidate of the following term can be retained as lookahead.
+    pub fn next_with<C, E: From<IndexError>>(
+        &mut self,
+        context: &mut C,
+        mut before: impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+        mut before_container: impl FnMut(&mut C, &IndexKey, &[u8]) -> std::result::Result<(), E>,
+    ) -> std::result::Result<Option<(IndexTerm, Bitmap)>, E> {
+        if self.done {
+            return Ok(None);
+        }
+        let result = self.step(context, &mut before, &mut before_container);
+        if !matches!(result, Ok(Some(_))) {
+            self.done = true;
+        }
+        result
+    }
+
+    fn step<C, E: From<IndexError>>(
+        &mut self,
+        context: &mut C,
+        before: &mut impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+        before_container: &mut impl FnMut(&mut C, &IndexKey, &[u8]) -> std::result::Result<(), E>,
+    ) -> std::result::Result<Option<(IndexTerm, Bitmap)>, E> {
         loop {
-            let Some(row) = self.rows.next() else {
+            let Some((key, container)) = self.candidate(context, before, before_container)? else {
                 return Ok(None);
             };
-            let (key, container) = row?;
             let term = key.term;
             let mut containers: Vec<_> = container.into_iter().collect();
-            // An error could hide a remaining container of this term, so fail the
-            // entire term rather than returning a partially assembled posting list.
-            while let Some(row) = self
-                .rows
-                .next_if(|row| row.as_ref().map_or(true, |(key, _)| key.term == term))
-            {
-                let (_, container) = row?;
+            // Even an absent candidate marks a term boundary. A failure before
+            // that boundary could hide another container, so discard the term.
+            while let Some((key, container)) = self.candidate(context, before, before_container)? {
+                if key.term != term {
+                    self.pending = Some((key, container));
+                    break;
+                }
                 containers.extend(container);
             }
             if !containers.is_empty() {
-                return Ok(Some((term, Bitmap::from_containers(containers)?)));
+                return Ok(Some((
+                    term,
+                    Bitmap::from_containers(containers).map_err(IndexError::from)?,
+                )));
             }
         }
+    }
+
+    fn candidate<C, E: From<IndexError>>(
+        &mut self,
+        context: &mut C,
+        before: &mut impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+        before_container: &mut impl FnMut(&mut C, &IndexKey, &[u8]) -> std::result::Result<(), E>,
+    ) -> std::result::Result<Option<(IndexKey, Option<BitmapContainer>)>, E> {
+        if self.pending.is_some() {
+            return Ok(self.pending.take());
+        }
+        self.rows
+            .next_candidate_with(context, before, |context, key, raw| {
+                let container = raw
+                    .map(|raw| {
+                        before_container(context, &key, raw)?;
+                        BitmapContainer::decode(key.container_id, raw)
+                            .map_err(IndexError::from)
+                            .map_err(E::from)
+                    })
+                    .transpose()?;
+                Ok((key, container))
+            })
     }
 }
 
 impl<R: ReadTransaction> Iterator for TermScan<'_, R> {
     type Item = Result<(IndexTerm, Bitmap)>;
-
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-        let item = self.step().transpose();
-        self.done = !matches!(item, Some(Ok(_)));
-        item
-    }
-}
-
-impl<R: ReadTransaction> FusedIterator for TermScan<'_, R> {}
-
-// Unlike ContainerScan's public iterator, this keeps names of absent containers
-// until their term has been assembled. Both use the same resolution mechanism.
-struct ResolvedCandidates<'tx, R: ReadTransaction>(ContainerScan<'tx, R>);
-
-impl<R: ReadTransaction> Iterator for ResolvedCandidates<'_, R> {
-    type Item = Result<(IndexKey, Option<BitmapContainer>)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0
-            .next_candidate_with(
-                &mut (),
-                |_| Ok::<_, IndexError>(()),
-                |_, key, bytes| {
-                    let container = bytes
-                        .map(|bytes| BitmapContainer::decode(key.container_id, bytes))
-                        .transpose()?;
-                    Ok((key, container))
-                },
-            )
+        self.next_with(&mut (), |_, _| Ok(()), |_, _, _| Ok(()))
             .transpose()
     }
 }
+impl<R: ReadTransaction> FusedIterator for TermScan<'_, R> {}
