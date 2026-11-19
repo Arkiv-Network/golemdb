@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+golemdb-history.workspace = true
 golemdb-cells.workspace = true
 golemdb-branch.workspace = true
 golemdb-storage.workspace = true

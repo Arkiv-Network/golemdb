@@ -40,7 +40,9 @@
 mod commits;
 mod error;
 mod history;
+mod read;
 
 pub use commits::{CommitSet, CommitSetError};
 pub use error::{HistoryError, Result};
 pub use history::{CHANGESET_PREFIX_LEN, HistoryTables, ValueSource, changeset_key};
+pub use read::ReadOperation;

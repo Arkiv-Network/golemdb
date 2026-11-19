@@ -1,6 +1,6 @@
 use golemdb_storage::{ReadTransaction, StorageError, Table, WriteTransaction};
 
-use crate::{CommitSet, HistoryError, Result};
+use crate::{CommitSet, HistoryError, ReadOperation, Result};
 
 /// Whether to use the owner's live value or a recorded pre-image.
 /// `B` is `Vec<u8>` for owned reads and `&[u8]` inside borrowed callbacks.
@@ -42,20 +42,44 @@ impl HistoryTables {
         Ok(())
     }
 
-    /// Read/decode the commit set without copying the stored history bytes.
-    /// Missing history is an empty set; malformed stored history is an error.
+    /// Read/decode the commit set without work callbacks. Missing history is an
+    /// empty set; malformed stored history is an error.
     pub fn read_commits(&self, tx: &impl ReadTransaction, item: &[u8]) -> Result<CommitSet> {
+        self.read_commits_with_callbacks(tx, item, &mut (), |_, _| Ok(()))
+    }
+
+    /// Authorize lookup before storage access, then processing while the encoded
+    /// bytes are still borrowed, before allocation/decode/canonical validation.
+    /// Missing history is an empty set; malformed stored history is an error.
+    pub fn read_commits_with_callbacks<C, E: From<HistoryError>>(
+        &self,
+        tx: &impl ReadTransaction,
+        item: &[u8],
+        context: &mut C,
+        mut before: impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+    ) -> std::result::Result<CommitSet, E> {
         self.validate()?;
+        before(context, ReadOperation::Lookup(self.history))?;
         tx.with_value(self.history, item, |bytes| match bytes {
             None => Ok(CommitSet::default()),
             Some(bytes) => {
-                CommitSet::decode(bytes).map_err(|source| HistoryError::InvalidCommits {
-                    table: self.history,
-                    key: item.to_vec(),
-                    source,
+                before(
+                    context,
+                    ReadOperation::CommitSet {
+                        encoded_bytes: bytes.len() as u64,
+                    },
+                )?;
+                CommitSet::decode(bytes).map_err(|source| {
+                    HistoryError::InvalidCommits {
+                        table: self.history,
+                        key: item.to_vec(),
+                        source,
+                    }
+                    .into()
                 })
             }
-        })?
+        })
+        .map_err(HistoryError::from)?
     }
 
     /// Resolve owned pre-image bytes. Coverage and target/head validation belong
@@ -66,14 +90,14 @@ impl HistoryTables {
         item: &[u8],
         target: u64,
     ) -> Result<ValueSource> {
-        self.with_resolved(tx, item, target, |resolved| match resolved {
+        self.with_resolved(tx, item, target, |source| match source {
             ValueSource::Live => ValueSource::Live,
             ValueSource::Preimage(bytes) => ValueSource::Preimage(bytes.to_vec()),
         })
     }
 
-    /// Inspect the selected pre-image before allocation/copying. The callback is
-    /// not invoked on storage errors, malformed history or a missing pre-image.
+    /// Inspect the selected source without work callbacks. Resolution and
+    /// storage errors are handled before calling `inspect`.
     pub fn with_resolved<T>(
         &self,
         tx: &impl ReadTransaction,
@@ -81,17 +105,45 @@ impl HistoryTables {
         target: u64,
         inspect: impl FnOnce(ValueSource<&[u8]>) -> T,
     ) -> Result<T> {
-        match self.read_commits(tx, item)?.first_after(target) {
-            None => Ok(inspect(ValueSource::Live)),
-            Some(commit) => self.with_preimage(tx, item, commit, |bytes| {
-                inspect(ValueSource::Preimage(bytes))
-            }),
+        self.with_resolved_with_callbacks(
+            tx,
+            item,
+            target,
+            &mut (),
+            |_, _| Ok(()),
+            |_, source| Ok(inspect(source)),
+        )
+    }
+
+    /// Resolve through upfront work checkpoints. The commit-set package includes
+    /// successor seeking; a missing history row needs no processing callback.
+    pub fn with_resolved_with_callbacks<C, T, E: From<HistoryError>>(
+        &self,
+        tx: &impl ReadTransaction,
+        item: &[u8],
+        target: u64,
+        context: &mut C,
+        mut before: impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+        inspect: impl FnOnce(&mut C, ValueSource<&[u8]>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        match self
+            .read_commits_with_callbacks(tx, item, context, &mut before)?
+            .first_after(target)
+        {
+            None => inspect(context, ValueSource::Live),
+            Some(commit) => self.with_preimage_with_callbacks(
+                tx,
+                item,
+                commit,
+                context,
+                before,
+                |context, bytes| inspect(context, ValueSource::Preimage(bytes)),
+            ),
         }
     }
 
-    /// Inspect a selected pre-image without rereading history. A scan can decode
-    /// its row with `CommitSet::decode`, select `first_after`, then call here.
-    /// Empty bytes are passed through; a missing row is never treated as absence.
+    /// Inspect a known pre-image without work callbacks or repeated history
+    /// discovery. Empty bytes are passed through; a missing row is an error.
     pub fn with_preimage<T>(
         &self,
         tx: &impl ReadTransaction,
@@ -99,16 +151,38 @@ impl HistoryTables {
         commit: u64,
         inspect: impl FnOnce(&[u8]) -> T,
     ) -> Result<T> {
+        self.with_preimage_with_callbacks(
+            tx,
+            item,
+            commit,
+            &mut (),
+            |_, _| Ok(()),
+            |_, bytes| Ok(inspect(bytes)),
+        )
+    }
+
+    /// Inspect a known pre-image after authorizing its lookup; does not repeat
+    /// history discovery or commit-set processing.
+    pub fn with_preimage_with_callbacks<C, T, E: From<HistoryError>>(
+        &self,
+        tx: &impl ReadTransaction,
+        item: &[u8],
+        commit: u64,
+        context: &mut C,
+        mut before: impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+        inspect: impl FnOnce(&mut C, &[u8]) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
         self.validate()?;
+        before(context, ReadOperation::Lookup(self.changeset))?;
         tx.with_value(self.changeset, &changeset_key(commit, item), |bytes| {
-            bytes
-                .map(inspect)
-                .ok_or_else(|| HistoryError::MissingPreimage {
-                    table: self.changeset,
-                    key: item.to_vec(),
-                    commit,
-                })
-        })?
+            let bytes = bytes.ok_or_else(|| HistoryError::MissingPreimage {
+                table: self.changeset,
+                key: item.to_vec(),
+                commit,
+            })?;
+            inspect(context, bytes)
+        })
+        .map_err(HistoryError::from)?
     }
 
     /// Record one net item change, with its value immediately before commit.
