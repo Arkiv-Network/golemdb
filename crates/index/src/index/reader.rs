@@ -1,10 +1,11 @@
+use golemdb_history::{HistoryError, ReadOperation, ValueSource};
 use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::{ReadTransaction, scan_prefix};
 
 use super::Index;
 use crate::{
     Bitmap, BitmapContainer, ContainerScan, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Result,
-    TermRange, TermScan, history, tables,
+    TermRange, TermScan, tables,
 };
 
 /// Committed container reads from one caller-owned snapshot, without a hash
@@ -39,21 +40,62 @@ impl<'tx, R: ReadTransaction> IndexReader<'tx, R> {
         })?
     }
 
-    /// Inspect raw bytes before validation or allocation. The callback may
-    /// charge/refuse further work before decoding. An empty historical pre-image
-    /// becomes `None`; a missing selected changeset is an error. Empty live rows
-    /// remain `Some(empty)` so typed decoding rejects them as malformed.
+    /// Inspect selected borrowed bytes without work callbacks. See
+    /// [`Self::with_encoded_container_with_callbacks`] for upfront work authorization.
     pub fn with_encoded_container<T>(
         &self,
         key: &IndexKey,
         inspect: impl FnOnce(Option<&[u8]>) -> T,
     ) -> Result<T> {
-        match self.target {
-            None => Ok(self.tx.with_value(tables::INDEX, &key.encode(), inspect)?),
-            Some(target) => {
-                history::with_encoded_container(self.tx, &key.encode(), target, inspect)
-            }
-        }
+        self.with_encoded_container_with_callbacks(
+            key,
+            &mut (),
+            |_, _| Ok(()),
+            |_, bytes| Ok(inspect(bytes)),
+        )
+    }
+
+    /// Inspect borrowed bytes before domain parsing/copying. `before` authorizes
+    /// each lookup and commit-set package; a callback returning `Ok(())` permits
+    /// internal reads without charging. Empty pre-images mean absence; missing
+    /// selected changesets fail and empty live rows remain visible to validation.
+    pub fn with_encoded_container_with_callbacks<C, T, E>(
+        &self,
+        key: &IndexKey,
+        context: &mut C,
+        mut before: impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+        inspect: impl FnOnce(&mut C, Option<&[u8]>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E>
+    where
+        E: From<crate::IndexError> + From<HistoryError>,
+    {
+        let encoded = key.encode();
+        let key = encoded.as_slice();
+        let Some(target) = self.target else {
+            before(context, ReadOperation::Lookup(tables::INDEX))?;
+            return self
+                .tx
+                .with_value(tables::INDEX, key, |raw| inspect(context, raw))
+                .map_err(crate::IndexError::from)?;
+        };
+        tables::HISTORY.with_resolved_with_callbacks(
+            self.tx,
+            key,
+            target,
+            &mut (context, &mut before),
+            |(context, before), work| before(context, work),
+            |(context, before), source| match source {
+                ValueSource::Preimage(bytes) => {
+                    inspect(context, (!bytes.is_empty()).then_some(bytes))
+                }
+                ValueSource::Live => {
+                    before(context, ReadOperation::Lookup(tables::INDEX))?;
+                    self.tx
+                        .with_value(tables::INDEX, key, |raw| inspect(context, raw))
+                        .map_err(crate::IndexError::from)?
+                }
+            },
+        )
     }
 
     /// Present containers of exactly one term, in `hi48` order. Also discovers

@@ -443,7 +443,7 @@ record_limits:
   max_cells: 100
   max_indexed_cells: 100
 metering:
-  golemdb_code_version: 1
+  golemdb_code_version: 2
   host_code_version: 0
   weights: {} # provide the deployment's prices; missing weights remain unpriced
 immutable_data:

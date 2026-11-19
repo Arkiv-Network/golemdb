@@ -35,8 +35,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use golemdb_history::ValueSource;
-use golemdb_storage::{ReadTransaction, WriteTransaction};
+use golemdb_storage::WriteTransaction;
 
 use crate::{BitmapError, ContainerValueChange, Result, tables};
 
@@ -68,20 +67,4 @@ pub fn record_changes(
         )?;
     }
     Ok(())
-}
-
-/// Borrow selected raw bytes; parsing/charging belongs to the caller.
-/// The owner must validate target/head and retention coverage first.
-pub(crate) fn with_encoded_container<T>(
-    tx: &impl ReadTransaction,
-    key: &[u8],
-    target: u64,
-    inspect: impl FnOnce(Option<&[u8]>) -> T,
-) -> Result<T> {
-    Ok(
-        tables::HISTORY.with_resolved(tx, key, target, |source| match source {
-            ValueSource::Live => tx.with_value(tables::INDEX, key, inspect),
-            ValueSource::Preimage(bytes) => Ok(inspect((!bytes.is_empty()).then_some(bytes))),
-        })??,
-    )
 }

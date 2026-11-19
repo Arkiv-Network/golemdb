@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, btree_map::Entry};
 
 use crate::{Accounting, Ledger, WeightName};
 
-/// Initial write-pricing code identifier, not a persisted model version or a
-/// declaration that production weights have been calibrated.
-pub const WRITE_CODE_VERSION: u64 = 1;
+/// Supported metering code identifier, retained under its original public name.
+/// Version 2 adds historical-read accounting. This is not a persisted model
+/// version or a declaration that production weights have been calibrated.
+pub const WRITE_CODE_VERSION: u64 = 2;
 
 /// Immutable weights supplied by the caller. No database or commit identifiers.
 ///
@@ -20,7 +21,7 @@ pub struct Schedule {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ScheduleError {
-    #[error("unsupported write metering code version {0}")]
+    #[error("unsupported metering code version {0}")]
     UnsupportedCodeVersion(u64),
     #[error("duplicate weight {0}")]
     DuplicateWeight(WeightName),

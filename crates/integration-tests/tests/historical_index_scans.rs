@@ -521,7 +521,10 @@ fn absent_candidates_can_be_stopped_before_more_work() {
     let mut attempts = 0;
     let result: Result<Option<()>, Box<dyn std::error::Error>> = scan.next_with(
         &mut attempts,
-        |n| {
+        |n, work| {
+            if work != golemdb_history::ReadOperation::Advance(tables::INDEX) {
+                return Ok(());
+            }
             *n += 1;
             if *n <= 3 {
                 Ok(())
@@ -566,7 +569,7 @@ fn hooks_can_refuse_before_cursor_work_or_selected_payload_decoding() {
         tx.accesses.take();
         let result: Result<Option<()>, Box<dyn std::error::Error>> = scan.next_with(
             &mut (),
-            |_| Err("refused".into()),
+            |_, _| Err("refused".into()),
             |_, _, _| panic!("before work"),
         );
         assert_eq!(result.unwrap_err().to_string(), "refused");
@@ -575,7 +578,7 @@ fn hooks_can_refuse_before_cursor_work_or_selected_payload_decoding() {
         tx.accesses.take();
         let result: Result<Option<()>, Box<dyn std::error::Error>> = scan.next_with(
             &mut (),
-            |_| Ok(()),
+            |_, _| Ok(()),
             |_, _, bytes| {
                 assert_eq!(bytes, b"malformed");
                 Err("decode refused".into())
@@ -593,7 +596,7 @@ fn hooks_can_refuse_before_cursor_work_or_selected_payload_decoding() {
         for expected in [Some(9), None] {
             let actual: golemdb_index::Result<_> = scan.next_with(
                 &mut attempts,
-                |n| {
+                |n, _| {
                     *n += 1;
                     Ok(())
                 },
@@ -601,7 +604,7 @@ fn hooks_can_refuse_before_cursor_work_or_selected_payload_decoding() {
             );
             assert_eq!(actual.unwrap(), expected);
         }
-        assert_eq!(attempts, 2);
+        assert_eq!(attempts, if target.is_none() { 2 } else { 6 });
         tx.accesses.take();
         assert!(scan.next().is_none());
         assert!(tx.accesses.take().is_empty());

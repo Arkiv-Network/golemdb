@@ -10,12 +10,12 @@ use golemdb_storage::ReadTransaction;
 use crate::{Record, RecordCells, RecordError, RecordKey, Result, cell_size, meta, state};
 
 /// D4 size: record ID + name + value tag + bytes32 key = 8 + 4 + 1 + 32 = 45.
-const KEY_CELL_BYTES: u64 =
+pub(crate) const KEY_CELL_BYTES: u64 =
     (size_of::<u64>() + reserved::KEY.as_bytes().len() + size_of::<u8>() + size_of::<[u8; 32]>())
         as u64;
 
 /// D4 size: record ID + name + value tag + four u64 counters = 8 + 5 + 1 + 32 = 46.
-const META_CELL_BYTES: u64 =
+pub(crate) const META_CELL_BYTES: u64 =
     (size_of::<u64>() + reserved::META.as_bytes().len() + size_of::<u8>() + size_of::<[u64; 4]>())
         as u64;
 
@@ -121,7 +121,11 @@ pub(crate) fn get<R: ReadTransaction>(
     Ok(Record { key, cells: values })
 }
 
-fn returned(name: &CellName, raw: &[u8], meter: &mut ReadMeter<'_>) -> Result<CellValue> {
+pub(crate) fn returned(
+    name: &CellName,
+    raw: &[u8],
+    meter: &mut ReadMeter<'_>,
+) -> Result<CellValue> {
     let bytes = 8u64
         .checked_add(name.as_bytes().len() as u64)
         .and_then(|n| n.checked_add(raw.len() as u64))
