@@ -1,6 +1,8 @@
 //! Times `seal` and `commit` of record batches on an MDBX database with
 //! 100,000 records.
 
+#[path = "../common/mod.rs"]
+mod common;
 mod workload;
 
 use std::fs::{self, File, OpenOptions};
@@ -9,13 +11,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use criterion::{Criterion, SamplingMode, criterion_group, criterion_main};
-use golemdb_api::{
-    Api, BranchId, CellLimits, Database, Genesis, HashAlgorithm, OpenConfig, OpenMode,
-    PricingConfig, RecordLimits,
-};
+use golemdb_api::{Api, BranchId, Database, OpenMode};
 use golemdb_storage::{Store, StoreStats};
 use golemdb_storage_mdbx::{MdbxOptions, MdbxStore};
 use tempfile::TempDir;
+
+use common::{bench_dir, config};
 use workload::{Batch, Workload};
 
 const RECORDS: u64 = 100_000;
@@ -25,8 +26,6 @@ const _: () = assert!(RECORDS.is_multiple_of(PRELOAD_BATCH));
 /// than a freshly loaded one.
 const HISTORY: u64 = 200;
 
-/// On a real disk, unlike `/tmp`, which is often RAM-backed and hides writes.
-const TMP: &str = env!("CARGO_TARGET_TMPDIR");
 const DATA: &str = "mdbx.dat";
 const MIB: f64 = 1024.0 * 1024.0;
 
@@ -96,7 +95,7 @@ struct Fixture {
 impl Fixture {
     fn open(dir: &Path, mode: OpenMode, workload: Workload) -> Self {
         let store = MdbxStore::open(dir).unwrap();
-        let db = Database::from_store(store.clone(), &config(mode)).unwrap();
+        let db = Database::from_store(store.clone(), &config().with_mode(mode)).unwrap();
         Self {
             db,
             store,
@@ -151,27 +150,6 @@ impl Fixture {
     }
 }
 
-fn config(mode: OpenMode) -> OpenConfig {
-    let cells = CellLimits {
-        max_cell_name_len: 32,
-        max_str_len: 128,
-        max_bytes_len: 128 * 1024,
-    };
-    let records = RecordLimits {
-        max_cells: 16,
-        max_indexed_cells: 16,
-    };
-    let no_immutable_data = None;
-    let genesis = Genesis::new(
-        HashAlgorithm::Keccak256,
-        cells,
-        records,
-        no_immutable_data,
-        PricingConfig::zero(),
-    );
-    OpenConfig::new(genesis).with_mode(mode)
-}
-
 fn write(c: &mut Criterion) {
     let mut group = c.benchmark_group(format!("write/{}k", RECORDS / 1000));
     group.sampling_mode(SamplingMode::Flat);
@@ -201,13 +179,6 @@ fn write(c: &mut Criterion) {
         }
     }
     group.finish();
-}
-
-fn bench_dir() -> TempDir {
-    tempfile::Builder::new()
-        .prefix("golemdb-bench-")
-        .tempdir_in(TMP)
-        .unwrap()
 }
 
 /// Makes `to`'s data file equal to `from`'s, rewriting only the pages that differ.

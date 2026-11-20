@@ -211,7 +211,7 @@ fn durable_commit(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider
             // destruction are excluded; begin/apply/commit are all inside timing.
             b.iter_batched_ref(
                 || {
-                    let dir = tempfile::tempdir().unwrap();
+                    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
                     let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
                     let root = seed(&db, 8, hasher);
                     (db, dir, root, vec![add(0, 0, 128)])
@@ -235,7 +235,7 @@ fn algorithm(c: &mut Criterion, algorithm: &str, hasher: &impl HashProvider) {
     for chunks in [64, 256] {
         backend(c, "memory", &MemoryStore::new(), chunks, algorithm, hasher);
         {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
             let db = golemdb_storage_mdbx::MdbxStore::open(dir.path()).unwrap();
             backend(c, "mdbx", &db, chunks, algorithm, hasher);
         }
