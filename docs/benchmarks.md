@@ -12,6 +12,7 @@ cargo bench -p golemdb-cells --bench cells
 cargo bench -p golemdb-merkle --bench merkle
 cargo bench -p golemdb-index --bench index
 cargo bench -p golemdb-index --bench index --features mdbx
+cargo bench -p golemdb-integration-tests --bench write
 ```
 
 Full runs include many cases and can take several minutes. Select a group or
@@ -21,6 +22,8 @@ case using the filter after `--`:
 cargo bench -p golemdb-merkle --bench merkle -- 'merkle/trie/keccak-256/path_bytes=6/replace'
 cargo bench -p golemdb-index --bench index -- 'index/keccak-256/memory/chunks=64/apply_only/one_posting'
 cargo bench -p golemdb-index --bench index --features mdbx -- 'transaction_begin_apply_durable_commit'
+cargo bench -p golemdb-integration-tests --bench write -- 'seal/create'
+cargo bench -p golemdb-integration-tests --bench write -- 'commit/'
 ```
 
 Compile without running, or execute every fixture once without collecting timing
@@ -38,6 +41,32 @@ then after the change use `--baseline before`. Keep machine, build settings and
 background load comparable. CI compiles the suites; timing regressions are not
 automatic pass/fail gates.
 
+### Checking a change for regressions
+
+Save a run of the write benchmark without your change, then compare runs with
+your change against it. Make the two runs back to back. Runs of identical code
+can differ by ~10%, even on one machine over a day, so write cases treat
+smaller changes as noise. Without these flags, each run is compared with the
+previous one.
+
+```sh
+cargo bench -p golemdb-integration-tests --bench write -- --save-baseline before
+cargo bench -p golemdb-integration-tests --bench write -- --baseline before
+```
+
+After each commit case, the suite prints its storage work:
+
+```
+commit/patch: 2772992 bytes written and 1 sync(s) per commit, database 499 MiB
+```
+
+It comes from MDBX's own counters (`Store::stats`). Bytes written are estimated
+from the pages a commit creates or copies; it also counts syncs and the
+database's size. The same code reports the same numbers in every run, on every machine, so
+any difference between two runs is real. Nothing compares them automatically:
+compare the lines of the two runs. It catches a change in write
+amplification even when it hardly moves the times.
+
 ## Cases
 
 | Group | Workload |
@@ -48,6 +77,15 @@ automatic pass/fail gates.
 | `index/term` | String term construction, strict decoding and routing hash at 16/256/1024 value bytes |
 | `index/<algorithm>/memory` and optional `index/<algorithm>/mdbx` | Materialization, four-term prefix scans, and posting batches at 64/256 containers per term |
 | `index/<algorithm>/mdbx/transaction_begin_apply_durable_commit` | One posting change including writer acquisition and durable commit |
+| `write/100k/{seal,commit}/{create,patch,delete,mixed}` | Sealing or committing a 200-operation batch through the public `Api`, on MDBX with 100,000 records |
+
+Write cases run on a database preloaded with 100,000 records, then 200 commits
+of 70 creates, 60 patches and 70 deletes, so they measure a database with a
+history rather than a freshly loaded one. Each case's batch is 200 creates, 200
+patches or 200 deletes, or 70 creates, 60 patches and 70 deletes, so a regression
+shows which operation it affects. The record shape is described in
+`benches/write/workload.rs`. To add a case, add a line to `BATCHES` in
+`benches/write/main.rs`.
 
 Trie paths are either clustered (zero leading bytes and a unique four-byte suffix)
 or spread (hash-derived leading bytes and the same unique suffix). Both widths
@@ -82,9 +120,22 @@ suite; the first index performance suite focuses on additions.
   transaction, applies one posting change and commits. Environment teardown and
   temporary-directory cleanup happen outside timing. It measures an isolated
   commit after seeding, not sustained ingestion or cold-disk throughput.
+- Write cases time only the `seal` or `commit` call, in wall-clock time, so
+  commit times include waiting for the disk sync, which CPU time would leave
+  out. Planning and executing the batch,
+  and for commit cases sealing it, happen outside timing. The preloaded database
+  is built once per run. `seal` cases run on it and discard each batch, so it
+  never changes. Each timed commit runs on a fresh copy of the preloaded
+  database.
+- Write cases use 3 s of warm-up and 10 s of measurement per case, which
+  `--warm-up-time` and `--measurement-time` override. Criterion plans
+  iterations from wall time, including each commit's untimed reset, so 10 s of
+  measurement runs fewer commits than seals.
 
-These suites collect timings, not allocation counts, database-size growth or
-physical I/O statistics. Existing storage-work tests count logical reads/writes.
+The suites collect timings, not allocation counts. Only the write suite measures
+storage: for each commit case, the bytes written and syncs per commit and the
+database's size, from MDBX's counters.
+Existing storage-work tests count logical reads/writes.
 Future binary/256-way trie experiments should reuse the logical workloads but
 add storage/proof-size measurements alongside timing comparisons.
 
