@@ -567,6 +567,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "golemdb-conformance"
+version = "0.1.0"
+dependencies = [
+ "golemdb-api",
+ "tempfile",
+]
+
+[[package]]
 name = "golemdb-immutable-data"
 version = "0.1.0"
 dependencies = [
