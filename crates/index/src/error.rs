@@ -1,5 +1,7 @@
 use std::{error::Error, fmt};
 
+use crate::{CHUNK_BITS, PATH_BITS};
+
 pub type Result<T> = std::result::Result<T, IndexError>;
 
 #[derive(Debug, thiserror::Error)]
@@ -14,7 +16,7 @@ pub enum IndexError {
     Term(#[from] crate::TermError),
     #[error("corrupt index: {0}")]
     Corruption(&'static str),
-    #[error("index root disagrees with the flat term table")]
+    #[error("index state does not match the supplied root")]
     RootMismatch,
 }
 
@@ -25,7 +27,6 @@ pub enum BitmapError {
     DuplicatePath { path: u64 },
     UnsortedPaths { previous: u64, path: u64 },
     EmptyContainer,
-    TruncatedPath,
     NonCanonicalEncoding,
     Decode(std::io::Error),
 }
@@ -33,14 +34,17 @@ pub enum BitmapError {
 impl fmt::Display for BitmapError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PathOutOfRange { path } => write!(f, "bitmap path {path} exceeds 48 bits"),
-            Self::OffsetOutOfRange { value } => write!(f, "bitmap offset {value} exceeds 16 bits"),
+            Self::PathOutOfRange { path } => {
+                write!(f, "bitmap path {path} exceeds {PATH_BITS} bits")
+            }
+            Self::OffsetOutOfRange { value } => {
+                write!(f, "bitmap offset {value} exceeds {CHUNK_BITS} bits")
+            }
             Self::DuplicatePath { path } => write!(f, "duplicate bitmap path {path}"),
             Self::UnsortedPaths { previous, path } => {
                 write!(f, "bitmap path {path} follows larger path {previous}")
             }
             Self::EmptyContainer => f.write_str("empty containers have no persisted encoding"),
-            Self::TruncatedPath => f.write_str("container is missing its six-byte path"),
             Self::NonCanonicalEncoding => f.write_str("noncanonical container encoding"),
             Self::Decode(source) => write!(f, "invalid Roaring container: {source}"),
         }
