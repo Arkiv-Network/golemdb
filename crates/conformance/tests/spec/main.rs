@@ -5,3 +5,4 @@ mod create;
 mod delete;
 mod get;
 mod patch;
+mod receipts;
