@@ -464,6 +464,9 @@ ASCII, zero-padded to 32 bytes. The implemented catalogue:
 `create`, `patch` and `delete` on a reserved key return `Reserved`. `get` works on reserved
 records like on any other; a full read returns all their cells.
 
+Reserved keys are constants on `RecordKey` (`RecordKey::ALLOC`, …); `RecordKey::is_reserved`
+checks a key.
+
 ### `#meta`
 
 ```rust

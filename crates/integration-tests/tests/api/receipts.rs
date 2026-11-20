@@ -6,7 +6,7 @@ use std::sync::{
 use std::time::Duration;
 
 use golemdb_api::*;
-use golemdb_cells::{CellLimitError, CellNameError, CellValueParseError, system};
+use golemdb_cells::{CellLimitError, CellNameError, CellValueParseError};
 use golemdb_storage::{MemoryStore, StorageError, Store};
 use std::error::Error;
 
@@ -202,7 +202,7 @@ fn handle_then_admission_then_record_state_and_failures_always_have_receipts() {
         assert!(matches!(sealed.result, Err(ApiError::Sealed)));
         let read = db.get(
             ReadTarget::Branch(branch),
-            RecordOp::get(RecordKey(system::ALLOC.key), BUDGET),
+            RecordOp::get(RecordKey::ALLOC, BUDGET),
         );
         unchanged(&read, Some(head));
         read.result.unwrap();
@@ -210,10 +210,7 @@ fn handle_then_admission_then_record_state_and_failures_always_have_receipts() {
         let dead = db.create(branch, invalid());
         unchanged(&dead, None);
         assert!(matches!(dead.result, Err(ApiError::HandleInvalid)));
-        let dead_reserved = db.delete(
-            branch,
-            RecordOp::delete(RecordKey(system::ALLOC.key), BUDGET),
-        );
+        let dead_reserved = db.delete(branch, RecordOp::delete(RecordKey::ALLOC, BUDGET));
         unchanged(&dead_reserved, None);
         assert!(matches!(dead_reserved.result, Err(ApiError::HandleInvalid)));
         let stale = db.begin().unwrap();
@@ -233,7 +230,7 @@ fn raw_admission_errors_preserve_input_order_causes_and_record_state() {
         let allocator = || {
             db.get(
                 ReadTarget::Branch(branch),
-                RecordOp::get(RecordKey(system::ALLOC.key), BUDGET),
+                RecordOp::get(RecordKey::ALLOC, BUDGET),
             )
             .result
             .unwrap()
@@ -334,8 +331,7 @@ fn raw_admission_errors_preserve_input_order_causes_and_record_state() {
         // Fixed target checks precede entry validation.
         let call = db.create(
             branch,
-            RecordOp::create(RecordKey(system::ALLOC.key), BUDGET)
-                .field("", CellValue::from_bool(true)),
+            RecordOp::create(RecordKey::ALLOC, BUDGET).field("", CellValue::from_bool(true)),
         );
         unchanged(&call, Some(head));
         assert!(matches!(call.result, Err(ApiError::Reserved)));

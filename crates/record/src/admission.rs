@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, btree_map::Entry};
 
-use golemdb_cells::{CellKind, CellLimits, CellName, CellNameError, CellValue, system};
+use golemdb_cells::{CellKind, CellLimits, CellName, CellNameError, CellValue};
 use golemdb_metering::{PlanningStep, WriteMeter};
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
 
 pub(crate) fn base(key: RecordKey, meter: &mut WriteMeter<'_>) -> Result<()> {
     meter.run_step(PlanningStep::AdmissionBase, || {
-        if system::by_key(&key.0).is_some() {
+        if key.is_reserved() {
             return Err(RecordError::Reserved);
         }
         Ok(())

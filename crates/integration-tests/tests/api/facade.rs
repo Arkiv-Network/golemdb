@@ -54,11 +54,8 @@ fn get(api: &dyn Api, target: ReadTarget) -> Record {
 fn allocator(api: &dyn Api, target: ReadTarget) -> u64 {
     api.get(
         target,
-        RecordOp::get(
-            RecordKey(system::ALLOC.key),
-            golemdb_api::Budget::Limited(u64::MAX),
-        )
-        .only(["#nextRecordID"]),
+        RecordOp::get(RecordKey::ALLOC, golemdb_api::Budget::Limited(u64::MAX))
+            .only(["#nextRecordID"]),
     )
     .into_result()
     .unwrap()
@@ -134,7 +131,7 @@ fn crud_pending_reads_projections_and_recreation() {
             .get(
                 ReadTarget::Branch(branch),
                 RecordOp::get(
-                    RecordKey(system::RECORD_KEYS.key),
+                    RecordKey::RECORD_KEYS,
                     golemdb_api::Budget::Limited(u64::MAX),
                 )
                 .only([KEY.0]),
@@ -260,7 +257,7 @@ fn checkpoints_rollback_seal_and_discard_share_state_across_clones() {
         assert_eq!(db.head().unwrap(), golemdb_branch::CommitId::new(0));
         assert!(clone.branch_info(branch).unwrap().sealed);
         assert_eq!(get(&db, ReadTarget::Branch(branch)), before);
-        let roots_key = RecordKey(system::ROOTS.key);
+        let roots_key = RecordKey::ROOTS;
         let roots = db
             .get(
                 ReadTarget::Branch(branch),
