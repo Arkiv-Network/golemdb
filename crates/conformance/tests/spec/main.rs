@@ -2,4 +2,6 @@
 //! Each test quotes the statement it checks.
 
 mod create;
+mod delete;
 mod get;
+mod patch;
