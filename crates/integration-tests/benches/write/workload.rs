@@ -13,10 +13,9 @@
 //! - `last_commit`: new terms in every commit;
 //! - `unique`: a new term for every create.
 
-use golemdb_api::{Api, ApiError, BranchId, Budget, CellValue, Database, RecordKey, RecordOp, op};
+use golemdb_api::{Api, ApiError, BranchId, CellValue, Database, RecordOp, op};
 
-/// Benchmarks measure the work itself, so operations are never cut short by gas.
-const BUDGET: Budget = Budget::Unlimited;
+use crate::common::{BUDGET, key};
 
 /// How many records one batch creates, patches and deletes.
 #[derive(Clone, Copy)]
@@ -81,14 +80,6 @@ impl Workload {
         *self = self.after(batch);
         Ok(())
     }
-}
-
-/// Reverses the bits of `n`, so that consecutive records get keys far apart, as
-/// hashed keys would be.
-fn key(n: u64) -> RecordKey {
-    let mut key = [0; 32];
-    key[..8].copy_from_slice(&n.reverse_bits().to_be_bytes());
-    RecordKey(key)
 }
 
 fn create(n: u64, commit: u64) -> RecordOp<op::Create> {
