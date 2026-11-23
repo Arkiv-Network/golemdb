@@ -39,6 +39,9 @@ jobs:
         shell: bash
         env:
           BENCH_STORAGE_JSON: ${{ github.workspace }}/storage.json
+          # Outside `target`, which the Rust cache keeps only in part: Criterion
+          # would compare against a half-restored run and break its output.
+          CRITERION_HOME: ${{ runner.temp }}/criterion
         run: |
           cargo bench -p golemdb-integration-tests --bench write --bench query \
             -- --output-format bencher | tee times.txt
