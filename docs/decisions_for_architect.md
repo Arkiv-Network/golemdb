@@ -385,7 +385,7 @@ evaluate(filter) at snapshot S:
   return result                                           // Roaring over recordIDs
 
 posting(p):
-  equality       one Index seek → bitmapHash → BitmapTrie walk → containers
+  equality       one Index seek → the term's adjacent container rows
   range / prefix  Index cursor over [lo, hi) in key order → ∪ of each term's posting list
 ```
 
@@ -421,9 +421,9 @@ adopted for its own reasons, not as a by-product of negation. C changes the mean
 
 | | A — not supported: a filter must contain ≥ 1 group with ≥ 1 positive literal; otherwise `InvalidQuery` | B — supported via a live-set index term maintained by the engine | C — supported by scanning `Cell` for `#key` cells |
 | --- | --- | --- | --- |
-| New mechanism | none | one system index term `#live` (or equivalent), a `BitmapTrie` over all live IDs; updated on create/delete | none |
+| New mechanism | none | one system index term `#live` (or equivalent), whose containers hold all live IDs; updated on create/delete | none |
 | Steady cost | none | +1 container write per create and per delete (the container for that ID's 48-bit region) — roughly +1/(n+1) on a record of n cells, same order as D08-A | none |
-| Query cost | — | one `BitmapTrie` walk: O(containers) = O(live IDs / 65 536) | O(all cells in the store): `Cell` interleaves every record's cells, so finding the `#key` rows is a full scan |
+| Query cost | — | one scan of its `Index` rows: O(containers) = O(live IDs / 65 536) | O(all cells in the store): `Cell` interleaves every record's cells, so finding the `#key` rows is a full scan |
 | Also gives | — | a universe for 1.1-B; a free `count(*)`; a natural "all records" export | — |
 | Arkiv need | Arkiv queries by owner or attribute; "list everything" is unbounded and not a product surface | as left | — |
 
@@ -472,17 +472,16 @@ which is precisely the adversarial input invariant 6 warns of.
 | Consistency with §13's "cost is the canonical execution, warm or cold" | consistent | consistent — the rule fixes *which* execution is canonical; this defines it |
 | Metering complexity | count terms and containers | count terms and containers; the container set is the pruned one |
 
-**Recommendation: B.** The two-tier index exists so that work scales with containers touched
-([§5](golemdb-design.md#why-the-posting-list-gets-a-second-tier)); charging for containers a correct evaluator never
+**Recommendation: B.** The posting list is split into containers so that work scales with containers touched
+([§5](golemdb-design.md#why-the-posting-list-is-split-into-containers)); charging for containers a correct evaluator never
 needs to open would contradict that rationale and make the API's "main optimization lever" claim
-false. The rule is one sentence: *canonical evaluation descends a term's `BitmapTrie` only into
-regions the running intermediate occupies; the first positive literal of each group has no
-intermediate and is descended fully.* The cost shape, for D10 to price:
+false. The rule is one sentence: *canonical evaluation reads only the containers whose region
+the running intermediate occupies; the first positive literal of each group has no
+intermediate and reads all of its term's containers.* The cost shape, for D10 to price:
 
 ```
-per literal      1 Index seek  (+ k cursor steps for a range/prefix over k terms)
-per term visited 1 BitmapTrie root read + interior-node reads along descended paths
-per container    1 BitmapContainer read + bytes decoded
+per literal      1 Index seek
+per container    1 Index row read (a seek or cursor step) + bytes decoded
 per group        Roaring ∧ / ∧¬ per container pair; per query, ∨ per group
 ```
 
@@ -1137,8 +1136,8 @@ is a value an independent encoder must produce identically, or the roots diverge
 | 9.8 | Absent pre-image in `CellChangeSet` | `typeTag = 0x00`, empty payload — the same bytes as an overlay tombstone (§10) | reject `0x00` with a non-empty payload |
 | 9.9 | `bool` | exactly one byte, `0x00` or `0x01` | reject other values or lengths |
 | 9.10 | Type-id map | the §3 grid **as shipped** is the map; frozen by the `Superblock` `format` value at genesis; a later `format` may add ids, never reassign | unknown id ⇒ `InvalidArgument` on write, corrupt-state error on read |
-| 9.11 | Cross-table key caps | genesis validation checks the **longest derived key**: `IndexChangeSet` = `8 + L` where `L` = `len(cellKey) + 1 + 1 + maxValueLen`; must be ≤ MDBX's max key size for the page size (4 KiB pages: 2022 B in libmdbx). State the formula, not the number | refuse genesis |
-| 9.12 | Leaf preimages (D06) | `CellTrie` leaf `Hash(0x00 ‖ trieKey ‖ Hash(typeTag ‖ value))`; `IndexTrie` leaf `Hash(0x02 ‖ trieKey ‖ bitmapHash)`; `BitmapTrie` leaf `Hash(0x04 ‖ hi48 ‖ roaring)` | — |
+| 9.11 | Cross-table key caps | genesis validation checks the **longest derived key**: `IndexChangeSet` = `8 + L` where `L` = `len(cellKey) + 2 + max(maxStrLen + 1, 32) + 6`, the longest term, then `hi48`; must be ≤ MDBX's max key size for the page size (4 KiB pages: 2022 B in libmdbx). State the formula, not the number | refuse genesis |
+| 9.12 | Leaf preimages (D06) | `CellTrie` leaf `Hash(0x00 ‖ recordID ‖ Hash(cellKey) ‖ typeTag ‖ value)`; `IndexTrie` leaf `Hash(0x04 ‖ Hash(term) ‖ hi48 ‖ roaring)`, one per container | — |
 | 9.13 | New `#params` caps (D01) | `#maxFilterGroups`, `#maxPredicatesPerGroup`: `u32` BE | as caps |
 | 9.14 | `#meta` value (added 2026-10-10) | `bytes32` field: `cells ‖ cellBytes ‖ indexedCells ‖ indexBytes`, each `u64` BE, sizes per metering D4 (design §3) | reject another type, kind or length |
 | 9.15 | Generated record key (added 2026-10-10) | `H("golemdb/record-key/v1" ‖ #keySeed ‖ recordID)`, `recordID` as `u64` BE (design §4 *Record-key modes*) | — |
@@ -1156,7 +1155,7 @@ CRoaring emits" without reading CRoaring's source, and the rule is three lines.
 ### Vectors (the acceptance check)
 
 ```
-V1  empty trie root; singleton CellTrie root; singleton IndexTrie root; singleton BitmapTrie root (one container)
+V1  empty trie root; singleton CellTrie root; singleton IndexTrie root (one container)
 V2  prefix_len 1, 3, 11 (odd) and 2, 10 (even) — node bytes and hash
 V3  bool true/false as attribute and as field; a 0x02 bool rejected
 V4  CellChangeSet absent pre-image; IndexChangeSet absent pre-image

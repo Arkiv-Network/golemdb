@@ -1,6 +1,6 @@
 use crate::{
-    BranchNodeCompact, BranchRef, Hash, HashProvider, Keccak256Hasher, LeafRef, LeafStorage,
-    MerkleError, Result, RootRef, Trie, TrieTable,
+    BranchNodeCompact, BranchRef, Hash, HashProvider, Keccak256Hasher, LeafRef, MerkleError,
+    Result, RootRef, Trie, TrieTable,
 };
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction};
 use proptest::prelude::*;
@@ -30,7 +30,6 @@ fn compact(
         child_hashes,
         leaf_paths,
         commits,
-        LeafStorage::InNode,
     )
 }
 
@@ -64,10 +63,7 @@ fn canonical_bytes_masks_and_domain_preimages() {
     let mut encoded = payload.clone();
     encoded.extend([0xab, 0xcd, 0, 0, 0, 0, 0xab, 0xce, 0, 0, 0, 0]);
     assert_eq!(node.encode(), encoded);
-    assert_eq!(
-        BranchNodeCompact::<6>::decode(&encoded, LeafStorage::InNode).unwrap(),
-        node
-    );
+    assert_eq!(BranchNodeCompact::<6>::decode(&encoded).unwrap(), node);
     for domain in u8::MIN..=u8::MAX {
         assert_eq!(
             node.hash(domain, &HASH),
@@ -104,7 +100,7 @@ fn canonical_bytes_masks_and_domain_preimages() {
     // complete path requires the owner's leaf preimage, unavailable to Merkle.
     let mut modified = encoded;
     *modified.last_mut().unwrap() = 1;
-    let other = BranchNodeCompact::<6>::decode(&modified, LeafStorage::InNode).unwrap();
+    let other = BranchNodeCompact::<6>::decode(&modified).unwrap();
     assert_eq!(
         other.hash(TEST_BRANCH_DOMAIN, &HASH),
         node.hash(TEST_BRANCH_DOMAIN, &HASH)
@@ -116,18 +112,18 @@ fn canonical_bytes_masks_and_domain_preimages() {
 fn malformed_node_encodings_are_rejected() {
     let good = node().encode();
     for len in 0..good.len() {
-        assert!(BranchNodeCompact::<6>::decode(&good[..len], LeafStorage::InNode).is_err());
+        assert!(BranchNodeCompact::<6>::decode(&good[..len]).is_err());
     }
     let mut trailing = good.clone();
     trailing.push(0);
-    assert!(BranchNodeCompact::<6>::decode(&trailing, LeafStorage::InNode).is_err());
+    assert!(BranchNodeCompact::<6>::decode(&trailing).is_err());
     let mut padding = good.clone();
     padding[2] |= 1;
-    assert!(BranchNodeCompact::<6>::decode(&padding, LeafStorage::InNode).is_err());
+    assert!(BranchNodeCompact::<6>::decode(&padding).is_err());
     // A tree-mask bit outside the state mask.
     let mut mask = good;
     mask[6] = 1;
-    assert!(BranchNodeCompact::<6>::decode(&mask, LeafStorage::InNode).is_err());
+    assert!(BranchNodeCompact::<6>::decode(&mask).is_err());
     for state in [0, 1, 0x8000] {
         assert!(compact(vec![], 0, state, 0, vec![], vec![]).is_err());
     }
@@ -139,9 +135,8 @@ fn malformed_node_encodings_are_rejected() {
 proptest! {
     #[test]
     fn arbitrary_decoding_is_panic_free_and_canonical(bytes in prop::collection::vec(any::<u8>(), 0..1200)) {
-        if let Ok(node) = BranchNodeCompact::<6>::decode(&bytes, LeafStorage::InNode) { prop_assert_eq!(&node.encode(), &bytes); }
-        if let Ok(node) = BranchNodeCompact::<6>::decode(&bytes, LeafStorage::Rows) { prop_assert_eq!(&node.encode(), &bytes); }
-        if let Ok(node) = BranchNodeCompact::<32>::decode(&bytes, LeafStorage::InNode) { prop_assert_eq!(node.encode(), bytes); }
+        if let Ok(node) = BranchNodeCompact::<6>::decode(&bytes) { prop_assert_eq!(&node.encode(), &bytes); }
+        if let Ok(node) = BranchNodeCompact::<32>::decode(&bytes) { prop_assert_eq!(node.encode(), bytes); }
     }
 }
 
@@ -251,7 +246,7 @@ fn branch_depth_is_checked_in_context() {
 #[test]
 fn child_commits_round_trip_unhashed_and_counts_are_strict() {
     let leaf_path = [0x10, 0, 0, 0, 0, 0];
-    let mixed = |commits: Vec<u64>, storage| {
+    let mixed = |commits: Vec<u64>| {
         BranchNodeCompact::<6>::new(
             vec![],
             0,
@@ -260,58 +255,37 @@ fn child_commits_round_trip_unhashed_and_counts_are_strict() {
             vec![[1; 32], [2; 32]],
             vec![leaf_path],
             commits,
-            storage,
         )
     };
-    let (in_node, rows) = (LeafStorage::InNode, LeafStorage::Rows);
-    let branch_commits = mixed(vec![7], in_node).unwrap();
-    let leaf_commits = mixed(vec![7, 9], rows).unwrap();
-    for (node, storage, other) in [
-        (&branch_commits, in_node, rows),
-        (&leaf_commits, rows, in_node),
-    ] {
-        assert_eq!(
-            &BranchNodeCompact::<6>::decode(&node.encode(), storage).unwrap(),
-            node
-        );
-        // Commits locate rows; they are stored but never hashed.
-        assert_eq!(node.hash_payload(), branch_commits.hash_payload());
-        assert_eq!(
-            node.child(0),
-            Some(RootRef::Branch(BranchRef {
-                hash: [1; 32],
-                commit: 7
-            }))
-        );
-        // The trie kind fixes the commit count.
-        assert!(BranchNodeCompact::<6>::decode(&node.encode(), other).is_err());
-    }
+    let node = mixed(vec![7]).unwrap();
     assert_eq!(
-        branch_commits.child(1),
-        Some(RootRef::Leaf(LeafRef::new(leaf_path, [2; 32])))
+        BranchNodeCompact::<6>::decode(&node.encode()).unwrap(),
+        node
     );
+    // Commits locate rows; they are stored but never hashed.
+    assert_eq!(node.hash_payload(), mixed(vec![8]).unwrap().hash_payload());
     assert_eq!(
-        leaf_commits.child(1),
-        Some(RootRef::Leaf(LeafRef {
-            path: leaf_path,
-            hash: [2; 32],
-            commit: 9
+        node.child(0),
+        Some(RootRef::Branch(BranchRef {
+            hash: [1; 32],
+            commit: 7
         }))
     );
-    // Each mode takes exactly its own commit count.
-    for (count, storage) in [(0, in_node), (2, in_node), (1, rows), (3, rows)] {
-        assert!(mixed(vec![0; count], storage).is_err());
+    assert_eq!(
+        node.child(1),
+        Some(RootRef::Leaf(LeafRef::new(leaf_path, [2; 32])))
+    );
+    // One commit per branch child, exactly.
+    for count in [0, 2] {
+        assert!(mixed(vec![0; count]).is_err());
     }
-    let good = leaf_commits.encode();
+    let good = node.encode();
     for extra in [1, 4, 8] {
         let mut bytes = good.clone();
         bytes.extend(vec![0; extra]);
-        assert!(BranchNodeCompact::<6>::decode(&bytes, LeafStorage::Rows).is_err());
+        assert!(BranchNodeCompact::<6>::decode(&bytes).is_err());
     }
     for missing in [1, 4] {
-        assert!(
-            BranchNodeCompact::<6>::decode(&good[..good.len() - missing], LeafStorage::Rows)
-                .is_err()
-        );
+        assert!(BranchNodeCompact::<6>::decode(&good[..good.len() - missing]).is_err());
     }
 }

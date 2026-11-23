@@ -6,12 +6,12 @@ use golemdb_immutable_data::{
     ImmutableDataColumn, ImmutableDataCompression, ImmutableDataConfig, ImmutableDataRow,
     ImmutableDataSegment, ImmutableDataStorage,
 };
-use golemdb_index::tables::{BITMAP_CONTAINER, BITMAP_TRIE, INDEX_TRIE};
-use golemdb_index::{BITMAP_BRANCH_DOMAIN, BITMAP_TRIE_PATH_BYTES, INDEX_BRANCH_DOMAIN};
+use golemdb_index::INDEX_BRANCH_DOMAIN;
+use golemdb_index::tables::INDEX_TRIE;
 use golemdb_merkle::Keccak256Hasher;
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, Table, WriteTransaction, scan_prefix};
 
-use crate::publication_tests::{bitmap_roots, key, reachable_rows, seed, value};
+use crate::publication_tests::{key, reachable_rows, seed, value};
 use golemdb_pruning::{MAX_WAIT_COMMITS, PruningConfig, STALE};
 
 use crate::{Branches, ROOTS};
@@ -27,43 +27,22 @@ fn versioned() -> Vec<Table> {
 
 type Rows = BTreeSet<(Table, Vec<u8>)>;
 
-/// Every row the head's tries reach, containers included.
+/// Every row the head's tries reach.
 fn reachable(db: &impl Store) -> Rows {
     let tx = db.begin_read().unwrap();
     let head = crate::read_head_state(&tx).unwrap();
     let roots = crate::head_roots(&tx, &head, &Keccak256Hasher).unwrap();
-    let bitmaps = bitmap_roots(db);
     let mut rows = Rows::new();
     let tagged = |table, keys: BTreeSet<Vec<u8>>| keys.into_iter().map(move |key| (table, key));
     let cell_domain = golemdb_cells::CELL_BRANCH_DOMAIN;
     rows.extend(tagged(
         CELL_TRIE.table(),
-        reachable_rows(&tx, CELL_TRIE, cell_domain, &[([], roots.state)]),
+        reachable_rows(&tx, CELL_TRIE, cell_domain, &[roots.state]),
     ));
     rows.extend(tagged(
         INDEX_TRIE.table(),
-        reachable_rows(&tx, INDEX_TRIE, INDEX_BRANCH_DOMAIN, &[([], roots.index)]),
+        reachable_rows(&tx, INDEX_TRIE, INDEX_BRANCH_DOMAIN, &[roots.index]),
     ));
-    rows.extend(tagged(
-        BITMAP_TRIE.table(),
-        reachable_rows(&tx, BITMAP_TRIE, BITMAP_BRANCH_DOMAIN, &bitmaps),
-    ));
-    for (term, root) in &bitmaps {
-        let trie = golemdb_merkle::PayloadTrie::<_, BITMAP_TRIE_PATH_BYTES, _>::namespaced(
-            BITMAP_TRIE,
-            BITMAP_CONTAINER,
-            *term,
-            BITMAP_BRANCH_DOMAIN,
-            &Keccak256Hasher,
-        );
-        for leaf in trie.walk(&tx, *root) {
-            let leaf = leaf.unwrap();
-            rows.insert((
-                BITMAP_CONTAINER.table(),
-                trie.leaf_key(leaf.commit, &leaf.path),
-            ));
-        }
-    }
     rows
 }
 

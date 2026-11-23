@@ -37,7 +37,7 @@ proptest! {
 
     #[test]
     fn build_encode_parse_round_trips((ty, value) in any_valid_cell(), indexable: bool) {
-        let indexable = indexable && ty != CellType::Bytes;
+        let indexable = indexable && ty != CellType::Bytes && !(ty == CellType::Str && value.contains(&0));
         let built = CellValueRef::new(ty, &value, indexable).unwrap();
         let encoded = built.encode();
         prop_assert_eq!(CellValueRef::parse(&encoded), Ok(built));

@@ -116,6 +116,7 @@ fn every_metadata_byte_and_length() {
             let accepted = match CellType::from_id(metadata & TYPE_MASK) {
                 Err(_) => false,
                 Ok(CellType::Bytes) if metadata & INDEXABLE_BIT != 0 => false,
+                Ok(CellType::Str) if metadata & INDEXABLE_BIT != 0 => !payload[..len].contains(&0),
                 Ok(ty) => match ty.width() {
                     Some(n) => len == n && ty.validate(&payload[..n]).is_ok(),
                     None => true,

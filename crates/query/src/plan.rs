@@ -14,7 +14,7 @@ use crate::{Bounds, ExistsType, Filter, InValues, QueryError, Result};
 pub(crate) enum Plan {
     /// One term read: the postings of one exact term.
     TermRead(IndexTerm),
-    /// One term read per term, in the set's order (ascending term key, as
+    /// One term read per term, in the set's order (ascending term order, as
     /// the proposal requires; `IndexTerm` orders by its bytes), each term
     /// once: the union of their postings.
     TermReads(BTreeSet<IndexTerm>),
@@ -38,7 +38,8 @@ impl Plan {
     /// [`QueryError::LimitExceeded`] on a node more than `max_depth` `And` /
     /// `Or` levels deep (a leaf adds no level; `None` sets no cap), with
     /// [`QueryError::InvalidQuery`] on an `And` or `Or` with no child, and
-    /// with [`QueryError::InvalidArgument`] on a leaf with a bad field name.
+    /// with [`QueryError::InvalidArgument`] on a leaf with a bad field name or
+    /// a value no attribute can hold, such as a `str` with `0x00`.
     /// A leaf that admits no value is [`Plan::Empty`]. `Eq` values, `In`
     /// values, `Range` bounds and `Exists` types are of one indexable type
     /// by construction.
@@ -116,11 +117,11 @@ impl Admission {
 }
 
 /// The terms of `field` between the bounds, in the run of their type, as
-/// [`TermRange::between`] builds them: a bad field name fails as an `Eq`
-/// leaf's would. Two unbounded sides are the whole run. `None` when the
-/// bounds admit no value. The bounds are of one indexable type by
-/// construction, so a type with no term cannot occur here, and a type
-/// mismatch is a broken invariant, not the caller's error.
+/// [`TermRange::between`] builds them: a bad field name, or a bound no
+/// attribute can hold, fails as an `Eq` leaf's would. Two unbounded sides
+/// are the whole run. `None` when the bounds admit no value. The bounds are
+/// of one indexable type by construction, so a type with no term cannot occur
+/// here, and a type mismatch is a broken invariant, not the caller's error.
 fn range(field: &CellName, bounds: &Bounds) -> Result<Option<TermRange>> {
     TermRange::between(
         field.as_view(),
@@ -135,7 +136,7 @@ fn range(field: &CellName, bounds: &Bounds) -> Result<Option<TermRange>> {
 }
 
 /// The terms of `field IN values`, one per value, in the values' order
-/// (ascending term key); `None` when there is no value, once the field's
+/// (in ascending term order); `None` when there is no value, once the field's
 /// name is checked. The values are of one indexable type by construction,
 /// so only the name can fail.
 fn terms(field: &CellName, values: &InValues) -> Result<Option<BTreeSet<IndexTerm>>> {
@@ -237,7 +238,7 @@ mod tests {
 
     #[test]
     fn in_terms_are_sorted_by_key_and_deduplicated() {
-        // The set iterates, and so is read, in term key order, not native
+        // The set iterates, and so is read, in term order, not native
         // order: -1 sorts before 1 once the sign bit is flipped, and "ab"
         // sorts before "b".
         let got = in_terms(&InValues::of(I32, [1, -1, 1])).expect("valid In");
@@ -251,7 +252,7 @@ mod tests {
 
     #[test]
     fn in_terms_follow_the_order_the_values_are_held_in() {
-        // `InValues` holds its values in term key order, one term each.
+        // `InValues` holds its values in term order, one term each.
         let f64 = |value| NotNan64::new(value).expect("not NaN");
         for values in [
             InValues::of(I32, [1, -1, 0, i32::MIN, i32::MAX, 1]),
