@@ -6,13 +6,13 @@ mod support;
 use std::collections::BTreeMap;
 
 use golemdb_api::{
-    ApiError, CellNameRef, Filter, InValues, RecordKey,
+    ApiError, CellNameRef, Filter, InValues, RecordKey, ValuesError,
     marker::{Date32, Dec32, I32},
 };
 use golemdb_cells::CellValue;
 use golemdb_index::TermError;
 use proptest::prelude::*;
-use support::{TestDb, eq, is_in, key, record, small_value, small_values_of_one_type};
+use support::{TestDb, eq, is_in, key, record, small_in_values, small_value};
 
 fn str(value: &str) -> CellValue {
     CellValue::from_str(value)
@@ -28,20 +28,33 @@ fn in_matches_records_holding_any_of_its_values() {
         record(key(4), &[("color", str("blue"))]),
         record(key(5), &[("shape", str("blue"))]),
     ]);
-    // Matches come in record ID order, whatever the order of the values.
-    let filter = is_in("color", [str("red"), str("pink"), str("blue")]);
+    // Matches come in record ID order, not in the order of the values.
+    let filter = is_in("color", [str("blue"), str("pink"), str("red")]);
     assert_eq!(test.keys(filter.clone()).unwrap(), [key(1), key(2), key(4)]);
     assert_eq!(test.count(filter).unwrap(), 3);
     assert!(test.keys(is_in("color", [str("pink")])).unwrap().is_empty());
 }
 
 #[test]
-fn repeated_values_match_once() {
-    let test = TestDb::default();
-    test.create([record(key(1), &[("n", CellValue::from_u64(7))])]);
-    let filter = is_in("n", [7, 7, 7].map(CellValue::from_u64));
-    assert_eq!(test.keys(filter.clone()).unwrap(), [key(1)]);
-    assert_eq!(test.count(filter).unwrap(), 1);
+fn values_out_of_order_or_repeated_are_invalid_arguments() {
+    fn in_values(values: Vec<CellValue>) -> Result<InValues, ApiError> {
+        Ok(InValues::try_from(values)?)
+    }
+    let cause = |result: Result<InValues, ApiError>| match result {
+        Err(ApiError::InvalidArgument {
+            source: Some(source),
+            ..
+        }) => source.downcast_ref::<ValuesError>().copied(),
+        _ => None,
+    };
+    assert_eq!(
+        cause(in_values([7, 7, 7].map(CellValue::from_u64).into())),
+        Some(ValuesError::Duplicate { index: 1 })
+    );
+    assert_eq!(
+        cause(in_values(vec![str("blue"), str("red"), str("pink")])),
+        Some(ValuesError::OutOfOrder { index: 2 })
+    );
 }
 
 #[test]
@@ -53,7 +66,7 @@ fn other_types_under_the_same_name_are_absent() {
         record(key(3), &[("amount", CellValue::from_i32(-1))]),
         record(key(4), &[("amount", str("1"))]),
     ]);
-    let i32s = is_in("amount", [1, -1].map(CellValue::from_i32));
+    let i32s = is_in("amount", [-1, 1].map(CellValue::from_i32));
     assert_eq!(test.keys(i32s).unwrap(), [key(1), key(3)]);
     let u32s = is_in("amount", [1, 2].map(CellValue::from_u32));
     assert_eq!(test.keys(u32s).unwrap(), [key(2)]);
@@ -67,11 +80,11 @@ fn typed_values_match_as_their_runtime_form_does() {
         record(key(2), &[("f", CellValue::from_i32(5))]),
         record(key(3), &[("f", CellValue::from_date32(5))]),
     ]);
-    let typed = |values| Filter::In {
+    let typed = |values: Result<InValues, ValuesError>| Filter::In {
         field: CellNameRef::parse_user(b"f", 32)
             .expect("valid name")
             .into(),
-        values,
+        values: values.expect("strictly ascending"),
     };
     // One Rust value, three cell types: the marker decides which matches.
     assert_eq!(
@@ -86,8 +99,8 @@ fn typed_values_match_as_their_runtime_form_does() {
     let runtime = is_in(
         "f",
         [
-            CellValue::from_dec32_unscaled(7),
             CellValue::from_dec32_unscaled(5),
+            CellValue::from_dec32_unscaled(7),
         ],
     );
     assert_eq!(runtime, typed(InValues::of(Dec32, [5, 7])));
@@ -137,7 +150,7 @@ proptest! {
             prop::collection::btree_map(field(), small_value(), 0..4),
             0..24,
         ),
-        filters in prop::collection::vec((field(), small_values_of_one_type(1..6)), 1..12),
+        filters in prop::collection::vec((field(), small_in_values(1..6)), 1..12),
     ) {
         let test = TestDb::default();
         test.create(records.iter().enumerate().map(|(n, cells)| {

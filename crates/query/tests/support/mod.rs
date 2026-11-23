@@ -107,12 +107,13 @@ fn f64_value(value: f64) -> CellValue {
 }
 
 /// Raw, so tests can also build names the grammar rejects. Through the
-/// runtime path: the values must be of one indexable type.
+/// runtime path: the values must be of one indexable type, strictly
+/// ascending.
 pub fn is_in(field: &str, values: impl IntoIterator<Item = CellValue>) -> Filter {
     Filter::In {
         field: CellNameRef::raw(field.as_bytes()).into(),
         values: InValues::try_from(values.into_iter().collect::<Vec<_>>())
-            .expect("values of one indexable type"),
+            .expect("strictly ascending values of one indexable type"),
     }
 }
 
@@ -277,6 +278,17 @@ pub fn small_values_of_one_type(
             (-2i8..=2).prop_map(move |n| typed_value(ty, n)),
             len.clone(),
         )
+    })
+}
+
+/// Up to `len` values of one random type, from [`small_value`]'s domain, as
+/// an `In` takes them: [`small_values_of_one_type`] sorted by [`native_cmp`],
+/// a reference for the index's order, without duplicates.
+pub fn small_in_values(len: std::ops::Range<usize>) -> impl Strategy<Value = Vec<CellValue>> {
+    small_values_of_one_type(len).prop_map(|mut values| {
+        values.sort_by(|a, b| native_cmp(a, b).expect("values of one type"));
+        values.dedup();
+        values
     })
 }
 

@@ -157,12 +157,13 @@ mod tests {
         }
     }
 
-    /// Through the runtime path: the values must be of one indexable type.
+    /// Through the runtime path: the values must be of one indexable type,
+    /// strictly ascending.
     fn is_in(field: &str, values: impl IntoIterator<Item = CellValue>) -> Filter {
         Filter::In {
             field: name(field.as_bytes()),
             values: InValues::try_from(values.into_iter().collect::<Vec<_>>())
-                .expect("values of one indexable type"),
+                .expect("strictly ascending values of one indexable type"),
         }
     }
 
@@ -280,12 +281,12 @@ mod tests {
             .with("color", str("red"), [2, 40])
             .with("color", str("green"), [3]);
         assert_eq!(
-            ids(&source, is_in("color", [str("red"), str("blue")])),
+            ids(&source, is_in("color", [str("blue"), str("red")])),
             [1, 2, 40]
         );
         assert_eq!(ids(&source, is_in("color", [str("green")])), [3]);
         assert_eq!(
-            ids(&source, is_in("color", [str("pink"), str("green")])),
+            ids(&source, is_in("color", [str("green"), str("pink")])),
             [3]
         );
         assert!(ids(&source, is_in("color", [str("pink")])).is_empty());
@@ -304,12 +305,12 @@ mod tests {
     }
 
     #[test]
-    fn in_reads_each_distinct_term_once_in_key_order() {
+    fn in_reads_one_term_per_value_in_key_order() {
         let source = RecordingSource {
             inner: FakeSource::default().with("n", CellValue::from_i32(-1), [1]),
             reads: RefCell::default(),
         };
-        let values = [1, -1, 1, 0, -1].map(CellValue::from_i32);
+        let values = [-1, 0, 1].map(CellValue::from_i32);
         let matches = evaluate(&source, &is_in("n", values)).expect("filter evaluates");
         assert_eq!(matches.treemap().iter().collect::<Vec<_>>(), [1]);
         let term =

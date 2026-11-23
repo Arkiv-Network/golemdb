@@ -11,7 +11,7 @@ use golemdb_index::TermError;
 use proptest::prelude::*;
 use support::{
     TestDb, eq, exists, indexable_type, is_between, is_in, key, prefix, range, range_of, record,
-    small_bounds_of_one_type, small_value, small_values_of_one_type,
+    small_bounds_of_one_type, small_in_values, small_value,
 };
 
 fn str(value: &str) -> CellValue {
@@ -86,7 +86,7 @@ fn every_kind_of_leaf_combines() {
         range("age", Bound::Included(u32(18)), Bound::Unbounded),
         Filter::Or(vec![
             eq("color", str("blue")),
-            is_in("color", [str("red"), str("green")]),
+            is_in("color", [str("green"), str("red")]),
         ]),
     ]);
     assert_eq!(test.keys(filter).unwrap(), [key(1), key(3)]);
@@ -247,8 +247,7 @@ impl Tree {
 fn leaf() -> impl Strategy<Value = Tree> {
     prop_oneof![
         (field(), small_value()).prop_map(|(field, value)| Tree::Eq(field, value)),
-        (field(), small_values_of_one_type(0..4))
-            .prop_map(|(field, values)| Tree::In(field, values)),
+        (field(), small_in_values(0..4)).prop_map(|(field, values)| Tree::In(field, values)),
         (field(), small_bounds_of_one_type())
             .prop_map(|(field, (ty, lower, upper))| Tree::Range(field, ty, lower, upper)),
         (field(), prop::sample::select(&["", "a", "ab", "é"][..]))

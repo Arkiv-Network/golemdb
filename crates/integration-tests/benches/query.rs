@@ -184,7 +184,8 @@ fn top(name: &str, values: u64, percent: u64) -> Filter {
     }
 }
 
-/// `terms` values spread evenly across `0..values`.
+/// `terms` values spread evenly across `0..values`, ascending, and distinct
+/// while `terms <= values`, as an `In` takes them.
 fn spread(terms: u64, values: u64) -> impl Iterator<Item = u64> {
     (0..terms).map(move |i| i * values / terms)
 }
@@ -239,7 +240,7 @@ fn query(c: &mut Criterion) {
     let mut union = Group::new(c, &fixture, "union");
     let number_in = |terms| Filter::In {
         field: field("number"),
-        values: InValues::of(marker::U64, spread(terms, NUMBERS)),
+        values: InValues::of(marker::U64, spread(terms, NUMBERS)).expect("spread ascends"),
     };
     // number IN (...), 8 values
     union.query("scattered/8", number_in(8));
@@ -248,7 +249,7 @@ fn query(c: &mut Criterion) {
     // cluster IN (...), 512 values
     let cluster_in = Filter::In {
         field: field("cluster"),
-        values: InValues::of(marker::U64, spread(512, CLUSTERS)),
+        values: InValues::of(marker::U64, spread(512, CLUSTERS)).expect("spread ascends"),
     };
     union.query("clustered/512", cluster_in);
     // number = a OR number = b OR ...: scattered/512's values, not in order

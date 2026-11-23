@@ -237,31 +237,23 @@ mod tests {
     }
 
     #[test]
-    fn in_terms_are_sorted_by_key_and_deduplicated() {
-        // The set iterates, and so is read, in term order, not native
-        // order: -1 sorts before 1 once the sign bit is flipped, and "ab"
+    fn in_terms_follow_the_order_the_values_are_given_in() {
+        // `In` values ascend in their type's order, which is term order, one
+        // term each: -1 sorts before 1 once the sign bit is flipped, and "ab"
         // sorts before "b".
-        let got = in_terms(&InValues::of(I32, [1, -1, 1])).expect("valid In");
-        let expected = [-1, 1].map(|n| term_of(&CellValue::from_i32(n)));
-        assert!(got.iter().eq(&expected), "{got:?}");
-
-        let got = in_terms(&InValues::of(Str, ["b", "ab", "b", "ab"])).expect("valid In");
-        let expected = ["ab", "b"].map(|s| term_of(&CellValue::from_str(s)));
-        assert!(got.iter().eq(&expected), "{got:?}");
-    }
-
-    #[test]
-    fn in_terms_follow_the_order_the_values_are_held_in() {
-        // `InValues` holds its values in term order, one term each.
         let f64 = |value| NotNan64::new(value).expect("not NaN");
         for values in [
-            InValues::of(I32, [1, -1, 0, i32::MIN, i32::MAX, 1]),
-            InValues::of(U32, [7, 0, u32::MAX]),
-            InValues::of(Str, ["b", "ab", "a", "", "é", "ab"]),
-            InValues::of(I256, [[0xff; 32], [0; 32], [0x7f; 32], [0x80; 32]]),
+            InValues::of(I32, [i32::MIN, -1, 0, 1, i32::MAX]),
+            InValues::of(U32, [0, 7, u32::MAX]),
+            InValues::of(Str, ["", "a", "ab", "b", "é"]),
+            InValues::of(I256, [[0x80; 32], [0xff; 32], [0; 32], [0x7f; 32]]),
             InValues::of(Dec256, [[0xff; 32], [0; 32]]),
-            InValues::of(F64, [f64(1.0), f64(-1.0), f64(f64::INFINITY), f64(-0.0)]),
+            InValues::of(
+                F64,
+                [f64(f64::NEG_INFINITY), f64(-1.0), f64(-0.0), f64(1.0)],
+            ),
         ] {
+            let values = values.expect("strictly ascending");
             let got = in_terms(&values).expect("valid In");
             assert!(
                 got.iter()
@@ -274,7 +266,7 @@ mod tests {
     #[test]
     fn in_with_one_value_reads_the_eq_term() {
         assert_eq!(
-            in_terms(&InValues::of(U64, [9])).expect("valid In"),
+            in_terms(&InValues::of(U64, [9]).expect("one value")).expect("valid In"),
             BTreeSet::from([term_of(&CellValue::from_u64(9))])
         );
     }
@@ -284,7 +276,7 @@ mod tests {
         let plan = |field: &[u8]| {
             admit(&Filter::In {
                 field: CellNameRef::raw(field).into(),
-                values: InValues::of(U32, []),
+                values: InValues::of(U32, []).expect("no value"),
             })
         };
         assert_eq!(plan(b"f").expect("valid In"), Plan::Empty);
@@ -305,7 +297,7 @@ mod tests {
     #[test]
     fn an_in_field_is_checked_as_an_eq_field() {
         let field: CellName = CellNameRef::raw(b"1bad").into();
-        let result = terms(&field, &InValues::of(U32, [1]));
+        let result = terms(&field, &InValues::of(U32, [1]).expect("one value"));
         assert!(matches!(
             result,
             Err(QueryError::InvalidArgument {

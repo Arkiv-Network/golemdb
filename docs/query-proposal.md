@@ -334,8 +334,6 @@ Gaps against this proposal:
 - The budget is an optional step, neither required nor enforced; it becomes a constructor
   argument. No receipt, no caps.
 - `QueryOp::from_filter` is to be renamed to `QueryOp::filter`.
-- `In` accepts values in any order and deduplicates them; it is to require strictly ascending
-  values.
 - `max_bytes` and `#maxQueryBytes` do not exist yet.
 
 **Steps:**

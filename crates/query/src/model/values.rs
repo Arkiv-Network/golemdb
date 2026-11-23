@@ -7,7 +7,8 @@ use golemdb_cells::{CellKind, CellType, CellValue};
 
 /// Why `CellValue`s cannot be one leaf's values: an `Eq`'s value, an `In`'s
 /// values, or a `Range`'s bounds; or why a `CellType` cannot be an
-/// `Exists`' type. The typed constructors cannot produce either case.
+/// `Exists`' type. The typed constructors can only fail on an `In`'s order:
+/// [`OutOfOrder`](Self::OutOfOrder) or [`Duplicate`](Self::Duplicate).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ValuesError {
     /// Values of two types: a leaf reads the terms of one type.
@@ -17,6 +18,20 @@ pub enum ValuesError {
     /// no index term.
     #[error("variable-length `bytes` values have no index term")]
     NotIndexable,
+    /// `In` values out of order: the value at `index` (from 0) is less
+    /// than the value before it, in their type's order.
+    #[error(
+        "`In` values must be strictly ascending in their type's order: \
+         the value at index {index} is less than the value before it"
+    )]
+    OutOfOrder { index: usize },
+    /// An `In` value given twice: the value at `index` (from 0) equals the
+    /// value before it.
+    #[error(
+        "`In` values must be strictly ascending, with no duplicates: \
+         the value at index {index} equals the value before it"
+    )]
+    Duplicate { index: usize },
 }
 
 /// `Ok` when every value is of type `expected`, and `expected` is
