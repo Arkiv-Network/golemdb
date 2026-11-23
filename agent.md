@@ -113,7 +113,7 @@ Ordered comparisons and scans are meaningful within a single name/type prefix.
 | `Superblock` | Metadata name | Format identifiers, genesis identity, or head. |
 | `Cell` | Encoded `CellKey` | Tagged canonical cell value. |
 | `CellTrie` | Commit and route | Compact branch bytes for 40-byte paths. |
-| `Index` | Term followed by the container's six-byte path | Canonical portable Roaring bytes. |
+| `Index` | Term followed by the container's six-byte `hi48` | Canonical portable Roaring bytes. |
 | `IndexTrie` | Commit and route | Compact branch bytes for 38-byte paths. |
 
 `Superblock/head` is `commit_id:u64_be || state_root:[u8;32] || index_root:[u8;32]`.
@@ -202,7 +202,7 @@ and payloads; supplying an old root with unrelated current flat state is invalid
 ### Attribute index and bitmap containers
 
 The flat `Index` table holds one live row per container, keyed by the term and
-the container's path, so a term's containers are adjacent and terms are in
+the container's `hi48`, so a term's containers are adjacent and terms are in
 value order. A variable-width value in a term ends with `0x00`; attribute
 strings cannot contain `0x00`. `IndexTrie` commits to every container at
 the path `H(term) || hi48`; its leaves are recomputed from the `Index` rows.
@@ -213,9 +213,9 @@ index_key     = term || hi48:6-byte big-endian
 index_value   = portable_roaring
 ```
 
-A container holds offsets in `0..=65535`. `Bitmap` assembles path-ordered containers
-into a `RoaringTreemap` for query set operations, rejecting duplicate or out-of-order
-paths and omitting empty chunks.
+A container holds offsets in `0..=65535`. `Bitmap` assembles containers in `hi48`
+order into a `RoaringTreemap` for query set operations, rejecting duplicate or
+out-of-order containers and omitting empty ones.
 
 Canonical serialization strips run compression, then optimizes, then serializes.
 For cardinality `N`, the base form is an array when `N <= 4096`, otherwise an

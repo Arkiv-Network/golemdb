@@ -3,7 +3,7 @@ use crate::support::mdbx as fixture;
 use std::{cell::RefCell, collections::BTreeMap};
 
 use golemdb_cells::CellType;
-use golemdb_index::{Index, IndexError, IndexTerm, PostingChange, tables};
+use golemdb_index::{ContainerId, Index, IndexError, IndexTerm, PostingChange, tables};
 use golemdb_merkle::{Keccak256Hasher, RootRef};
 use golemdb_storage::{
     ReadTransaction, Result, StorageError, Store, Table, WriteTransaction, scan_prefix,
@@ -103,7 +103,7 @@ impl<T: WriteTransaction> WriteTransaction for Observed<T> {
 }
 
 #[test]
-fn one_chunk_update_does_not_rebuild_256_chunk_postings() {
+fn one_container_update_does_not_rebuild_256_container_postings() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
     let mut tx = Observed::new(db.begin_write().unwrap());
@@ -112,7 +112,10 @@ fn one_chunk_update_does_not_rebuild_256_chunk_postings() {
             &mut tx,
             0,
             RootRef::Empty,
-            (0u64..256).flat_map(|hi| [add(term(0), hi << 16), add(term(1), hi << 16)]),
+            (0u64..256).flat_map(|hi| {
+                let id = ContainerId::new(hi).unwrap().record_id(0);
+                [add(term(0), id), add(term(1), id)]
+            }),
         )
         .unwrap();
     tx.reset();
