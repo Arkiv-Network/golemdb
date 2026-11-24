@@ -228,22 +228,23 @@ pub(crate) fn patch<R: ReadTransaction>(
             };
             Ok((before, location))
         })??;
-        let after =
-            match change {
-                CellPatch::Write(value) => Some(value),
-                CellPatch::Set(value) => {
-                    let old = before
-                        .as_ref()
-                        .ok_or_else(|| RecordError::CellNotFound { name: name.clone() })?;
-                    Some(value.with_kind(old.kind()).map_err(|source| {
-                        RecordError::InvalidInput {
-                            message: format!("set({name:?}): invalid cell value for stored kind"),
-                            source: Some(Box::new(source)),
-                        }
-                    })?)
-                }
-                CellPatch::Remove => None,
-            };
+        let after = match change {
+            CellPatch::Write(value) => Some(value),
+            CellPatch::Set(value) => {
+                let old = before
+                    .as_ref()
+                    .ok_or_else(|| RecordError::CellNotFound { name: name.clone() })?;
+                Some(value.with_kind(old.kind()).map_err(|source| {
+                    RecordError::invalid_step(
+                        "set",
+                        &name,
+                        "invalid cell value for stored kind",
+                        Some(Box::new(source)),
+                    )
+                })?)
+            }
+            CellPatch::Remove => None,
+        };
         indexes(reader, &name, before.as_ref(), after.as_ref(), meter)?;
         plan.cell(address, before, after, location, meter)?;
     }

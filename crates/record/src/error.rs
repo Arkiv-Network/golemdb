@@ -1,4 +1,5 @@
 use golemdb_branch::{BranchError, CommitId, OperationError};
+use golemdb_cells::CellName;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RecordError {
@@ -35,6 +36,26 @@ pub enum RecordError {
     Storage(#[from] golemdb_storage::StorageError),
     #[error(transparent)]
     Branch(#[from] BranchError),
+}
+
+impl RecordError {
+    /// `step("name"): message`, the form every step error takes.
+    pub(crate) fn invalid_step(
+        step: &str,
+        name: &CellName,
+        message: &str,
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        // A length rejection must not scan/copy an arbitrarily large name just to
+        // format its diagnostic. The typed source still carries the full length.
+        let bytes = name.as_bytes();
+        let shown = &bytes[..bytes.len().min(64)];
+        let suffix = if shown.len() < bytes.len() { "..." } else { "" };
+        Self::InvalidInput {
+            message: format!("{step}(\"{}{suffix}\"): {message}", shown.escape_ascii()),
+            source,
+        }
+    }
 }
 
 impl From<OperationError<RecordError>> for RecordError {
