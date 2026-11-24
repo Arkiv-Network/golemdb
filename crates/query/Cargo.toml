@@ -12,6 +12,7 @@ golemdb-index.workspace = true
 golemdb-merkle.workspace = true
 golemdb-metering.workspace = true
 golemdb-record.workspace = true
+golemdb-pruning.workspace = true
 golemdb-storage.workspace = true
 thiserror.workspace = true
 

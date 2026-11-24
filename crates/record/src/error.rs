@@ -30,6 +30,8 @@ pub enum RecordError {
     #[error("commit {requested} unavailable: only current head {head} is supported")]
     CommitUnavailable { requested: CommitId, head: CommitId },
     #[error(transparent)]
+    ReadTarget(#[from] golemdb_pruning::PruningError),
+    #[error(transparent)]
     Cells(#[from] golemdb_cells::CellError),
     #[error(transparent)]
     Storage(#[from] golemdb_storage::StorageError),

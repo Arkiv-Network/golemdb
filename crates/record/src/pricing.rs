@@ -7,7 +7,8 @@ use crate::RecordLimits;
 
 /// Shared record pricing supplied by the owning connection layer.
 /// Limits and provider must match the initialized deployment. Each call captures
-/// the provider's snapshot at its selected commit before admission; depths apply only to writes.
+/// the provider's snapshot at its branch origin or committed head before admission,
+/// independently of historical data selection; depths apply only to writes.
 #[derive(Debug, Clone)]
 pub struct WritePricing {
     pub provider: Arc<PricingProvider>,

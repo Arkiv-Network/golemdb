@@ -3,24 +3,63 @@
 
 use golemdb_branch::{CommitId, read_head};
 use golemdb_cells::{CellKey, CellName, CellReader, reserved};
-use golemdb_storage::{ReadTransaction, Store};
+use golemdb_pruning::{Pruner, PruningConfig};
+use golemdb_storage::ReadTransaction;
 
 use crate::{Record, RecordCells, RecordError, Result, state};
 
-/// Open one storage snapshot for a committed read and resolve `commit`
-/// against its head: `None` reads the head; `Some(c)` must name it, because
-/// historical reads are not supported yet. Returns the snapshot and its head.
-pub fn committed_snapshot<S: Store>(
-    store: &S,
-    commit: Option<CommitId>,
-) -> Result<(S::Read<'_>, CommitId)> {
-    let tx = store.begin_read()?;
-    let head = read_head(&tx)?;
-    match commit {
-        Some(requested) if requested != head => {
-            Err(RecordError::CommitUnavailable { requested, head })
+/// One committed storage snapshot and its independently selected data target.
+/// Pricing uses `head`, never the historical `target`.
+pub struct CommittedRead<R> {
+    tx: R,
+    head: CommitId,
+    target: CommitId,
+}
+
+impl<R: ReadTransaction> CommittedRead<R> {
+    pub fn new(tx: R) -> Result<Self> {
+        let head = read_head(&tx)?;
+        Ok(Self {
+            tx,
+            head,
+            target: head,
+        })
+    }
+
+    pub fn head(&self) -> CommitId {
+        self.head
+    }
+
+    pub fn target(&self) -> CommitId {
+        self.target
+    }
+
+    pub fn transaction(&self) -> &R {
+        &self.tx
+    }
+
+    /// Select data at a supported commit without opening another snapshot.
+    /// Head reads do not depend on historical metadata or perform history work.
+    /// A rejected selection leaves the previous target unchanged.
+    pub fn select_target(
+        &mut self,
+        requested: Option<CommitId>,
+        pruning: Option<PruningConfig>,
+    ) -> Result<()> {
+        let target = requested.unwrap_or(self.head);
+        if target != self.head {
+            Pruner::validate_target(&self.tx, self.head.get(), target.get(), pruning)?;
         }
-        Some(_) | None => Ok((tx, head)),
+        self.target = target;
+        Ok(())
+    }
+
+    pub fn cells(&self) -> CellReader<'_, R> {
+        if self.target == self.head {
+            CellReader::new(&self.tx)
+        } else {
+            CellReader::at(&self.tx, self.target.get())
+        }
     }
 }
 

@@ -159,6 +159,11 @@ impl<'tx, R: ReadTransaction> CellReader<'tx, R> {
         }
     }
 
+    /// Whether this reader resolves cells through history at a selected commit.
+    pub fn uses_history(&self) -> bool {
+        self.target.is_some()
+    }
+
     pub fn get(&self, key: &CellKey) -> Result<Option<CellValue>> {
         self.with_encoded_value(key, |bytes| {
             bytes

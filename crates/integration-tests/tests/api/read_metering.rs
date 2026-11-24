@@ -178,6 +178,7 @@ fn get_shapes_and_budget_cutoffs_match_on_branches_and_committed_storage() {
         exercise(ReadTarget::Branch(branch), db.head().unwrap());
         let head = db.commit(branch).unwrap();
         exercise(ReadTarget::Head, head);
+        exercise(ReadTarget::Commit(head), head);
         let stale = db.get(
             ReadTarget::Branch(branch),
             RecordOp::get(KEY, Budget::Unlimited),
@@ -185,12 +186,12 @@ fn get_shapes_and_budget_cutoffs_match_on_branches_and_committed_storage() {
         assert!(matches!(stale.result, Err(ApiError::HandleInvalid)));
         assert_eq!(stale.receipt, Receipt::default());
         let unavailable = db.get(
-            ReadTarget::Commit(CommitId::GENESIS),
+            ReadTarget::Commit(CommitId::new(head.get() + 1)),
             RecordOp::get(KEY, Budget::Unlimited),
         );
         assert!(matches!(
             unavailable.result,
-            Err(ApiError::CommitUnavailable { .. })
+            Err(ApiError::CommitInFuture { .. })
         ));
         check(&unavailable, 0, head, &db); // Existing target-before-admission order.
 

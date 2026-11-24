@@ -19,9 +19,9 @@ pub enum ReadTarget {
     Head,
     /// Current work in progress, including all successful uncommitted mutations.
     Branch(BranchId),
-    /// An explicit committed snapshot. Only the head of the acquired storage
-    /// snapshot is supported; older and future IDs return
-    /// [`crate::RecordError::CommitUnavailable`].
+    /// A committed data version within the node's supported history interval.
+    /// Prices come from the acquired snapshot's head, independently of this target.
+    /// Requesting that head uses the live read path.
     Commit(CommitId),
 }
 

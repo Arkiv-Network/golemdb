@@ -189,6 +189,11 @@ impl<S: Store, H: HashProvider> Branches<S, H> {
         &self.inner.store
     }
 
+    /// Node-local retention settings shared by publication and historical reads.
+    pub fn pruning(&self) -> Option<PruningConfig> {
+        self.inner.pruner.map(|pruner| pruner.config())
+    }
+
     /// The hash provider shared by this manager. Committed readers use it to
     /// decode index roots in their own snapshot.
     pub fn hasher(&self) -> &H {

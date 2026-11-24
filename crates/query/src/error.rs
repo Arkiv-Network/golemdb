@@ -36,6 +36,8 @@ pub enum QueryError {
     /// Only the head of the read snapshot can be queried for now.
     #[error("commit {requested} unavailable: only current head {head} is supported")]
     CommitUnavailable { requested: CommitId, head: CommitId },
+    #[error(transparent)]
+    ReadTarget(#[from] golemdb_pruning::PruningError),
     /// Reading committed state failed, or found it inconsistent; or an
     /// operand's invariant was broken, a bug rather than the caller's error.
     #[error("internal error")]
@@ -64,6 +66,7 @@ impl From<RecordError> for QueryError {
             RecordError::CommitUnavailable { requested, head } => {
                 Self::CommitUnavailable { requested, head }
             }
+            RecordError::ReadTarget(error) => Self::ReadTarget(error),
             error => Self::Internal(Box::new(error)),
         }
     }

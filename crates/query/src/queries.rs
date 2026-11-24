@@ -3,7 +3,7 @@
 //! Checks run in this order:
 //!
 //! 1. Open one storage snapshot and select its head. A requested commit other
-//!    than that head is rejected; historical reads are not implemented yet.
+//!    than that head is rejected; historical queries are not implemented yet.
 //! 2. `query` only: reject a `limit` of 0 or above `max_query_limit`.
 //! 3. Admit the filter, then, for `query`, the sort: no more keys than
 //!    `max_sort_keys`, then each key's name, in order. Evaluate the filter,
@@ -20,7 +20,7 @@ use golemdb_branch::CommitId;
 use golemdb_cells::CellReader;
 use golemdb_index::Index;
 use golemdb_merkle::HashProvider;
-use golemdb_record::{Effects, Outcome, RecordError, committed_snapshot, read_committed_by_id};
+use golemdb_record::{CommittedRead, Effects, Outcome, RecordError, read_committed_by_id};
 use golemdb_storage::Store;
 
 use crate::{
@@ -164,17 +164,33 @@ impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
         commit: Option<CommitId>,
         operation: impl FnOnce(&S::Read<'_>, CommitId) -> Result<T>,
     ) -> Outcome<T, QueryError> {
-        let (snapshot, head) = match committed_snapshot(&self.store, commit) {
-            Ok(selected) => selected,
+        let context = match self
+            .store
+            .begin_read()
+            .map_err(RecordError::from)
+            .and_then(CommittedRead::new)
+        {
+            Ok(context) => context,
             Err(error) => {
-                let priced_at = match &error {
-                    RecordError::CommitUnavailable { head, .. } => Some(*head),
-                    _ => None,
-                };
-                return Outcome::new(Err(error.into()), priced_at, Effects::default());
+                return Outcome::new(Err(error.into()), None, Effects::default());
             }
         };
-        Outcome::new(operation(&snapshot, head), Some(head), Effects::default())
+        let head = context.head();
+        // Keep query/count head-only until their index and cell sources support history.
+        if let Some(requested) = commit
+            && requested != head
+        {
+            return Outcome::new(
+                Err(QueryError::CommitUnavailable { requested, head }),
+                Some(head),
+                Effects::default(),
+            );
+        }
+        Outcome::new(
+            operation(context.transaction(), head),
+            Some(head),
+            Effects::default(),
+        )
     }
 }
 
