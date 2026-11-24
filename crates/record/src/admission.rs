@@ -108,7 +108,7 @@ fn validate_lengths(
     // Inspect declared lengths before traversing names or preparing map entries.
     let max = limits.max_cell_name_len as usize;
     if name.as_bytes().len() > max {
-        return Err(invalid(
+        return Err(RecordError::invalid_step(
             step,
             name,
             "invalid cell name",
@@ -119,9 +119,9 @@ fn validate_lengths(
         ));
     }
     if let Some(value) = value {
-        limits
-            .validate_value(value.as_view())
-            .map_err(|source| invalid(step, name, "invalid cell value", Some(Box::new(source))))?;
+        limits.validate_value(value.as_view()).map_err(|source| {
+            RecordError::invalid_step(step, name, "invalid cell value", Some(Box::new(source)))
+        })?;
     }
     Ok(())
 }
@@ -129,16 +129,16 @@ fn validate_lengths(
 fn validate_name(limits: &CellLimits, step: &str, name: &CellName) -> Result<()> {
     // Name bytes are validated once, within execution. CellValue is already a
     // canonical typed value; construction/transport decoding is host work.
-    limits
-        .parse_user_name(name.as_bytes())
-        .map_err(|source| invalid(step, name, "invalid cell name", Some(Box::new(source))))?;
+    limits.parse_user_name(name.as_bytes()).map_err(|source| {
+        RecordError::invalid_step(step, name, "invalid cell name", Some(Box::new(source)))
+    })?;
     Ok(())
 }
 
 fn with_kind(step: &str, name: &CellName, value: CellValue, kind: CellKind) -> Result<CellValue> {
-    value
-        .with_kind(kind)
-        .map_err(|source| invalid(step, name, "invalid cell value", Some(Box::new(source))))
+    value.with_kind(kind).map_err(|source| {
+        RecordError::invalid_step(step, name, "invalid cell value", Some(Box::new(source)))
+    })
 }
 
 fn insert<T>(
@@ -152,28 +152,11 @@ fn insert<T>(
             entry.insert(value);
             Ok(())
         }
-        Entry::Occupied(entry) => Err(invalid(
+        Entry::Occupied(entry) => Err(RecordError::invalid_step(
             step,
             entry.key(),
             "the operation already writes or removes this cell",
             None,
         )),
-    }
-}
-
-fn invalid(
-    step: &str,
-    name: &CellName,
-    message: &str,
-    source: Option<Box<dyn std::error::Error + Send + Sync>>,
-) -> RecordError {
-    // A length rejection must not scan/copy an arbitrarily large name just to
-    // format its diagnostic. The typed source still carries the full length.
-    let bytes = name.as_bytes();
-    let shown = &bytes[..bytes.len().min(64)];
-    let suffix = if shown.len() < bytes.len() { "..." } else { "" };
-    RecordError::InvalidInput {
-        message: format!("{step}(\"{}{suffix}\"): {message}", shown.escape_ascii()),
-        source,
     }
 }
