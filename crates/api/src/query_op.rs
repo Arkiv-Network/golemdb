@@ -1,69 +1,58 @@
-//! [`QueryOp`] and [`CountOp`]: typed requests built step by step.
+//! Query and count operation builders. Execution belongs to `golemdb_query`.
 //!
-//! Budgets are explicit at construction. Steps never fail; an invalid name, a cap exceeded, or
-//! both `after` and `offset` are reported by the call that runs the request.
+//! Budgets are explicit at construction and passed separately to execution.
+//! Builder steps do not validate requests; admission runs after snapshot selection.
+//! Query projections retain their existing deduplication in byte order.
 
-use golemdb_cells::CellName;
+use golemdb_query::QueryRequest;
 
-use crate::{Budget, Filter, SortKey};
+use crate::{Budget, CellName, Filter, SortKey};
 
-/// A filtered, optionally sorted and projected, paged read.
+/// A filtered, optionally sorted and projected, paged read with an explicit budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct QueryOp {
-    pub filter: Filter,
-    /// Empty: record ID ascending.
-    pub sort: Vec<SortKey>,
-    /// `None` selects full records; `Some([])` selects no cells.
-    pub projection: Option<Vec<CellName>>,
-    /// The most records the page holds, the first in query order. `None`:
-    /// up to the `max_query_limit` of the [`Queries`](crate::Queries) it runs
-    /// on.
-    pub limit: Option<u64>,
-    // /// Resume after a previous page. At most one of `after` and `offset`.
-    // pub after: Option<Cursor>,
-    /// How many matches, in query order, come before the page. `None`: 0.
-    pub offset: Option<u64>,
-    pub with_total: bool,
-    /// Explicit budget, stored but not enforced yet.
-    pub budget: Budget,
+    request: QueryRequest,
+    budget: Budget,
 }
 
 impl QueryOp {
     pub fn from_filter(filter: Filter, budget: Budget) -> Self {
         Self {
-            filter,
-            sort: Vec::new(),
-            projection: None,
-            limit: None,
-            // after: None,
-            offset: None,
-            with_total: false,
+            request: QueryRequest {
+                filter,
+                sort: Vec::new(),
+                projection: None,
+                limit: None,
+                offset: None,
+                with_total: false,
+            },
             budget,
         }
     }
 
     /// Replace the ordering with `keys`, most significant first.
     pub fn sort(mut self, keys: impl IntoIterator<Item = SortKey>) -> Self {
-        self.sort = keys.into_iter().collect();
+        self.request.sort = keys.into_iter().collect();
         self
     }
 
-    /// Replace the projection, as for `get`: raw names, deduplicated in byte
-    /// order. An empty selection returns no cells.
+    /// Replace the projection: raw names, deduplicated in byte order.
+    /// An empty selection returns no cells.
     pub fn only<I, N>(mut self, names: I) -> Self
     where
         I: IntoIterator<Item = N>,
         N: AsRef<[u8]>,
     {
-        self.projection = Some(CellName::projection(names));
+        self.request.projection = Some(CellName::projection(names));
         self
     }
 
     /// Return at most `limit` records, the first in query order. The call
     /// rejects a limit of 0, and one above the `max_query_limit` of the
-    /// [`Queries`](crate::Queries) it runs on.
+    /// [`golemdb_query::Queries`] it runs on.
     pub fn limit(mut self, limit: u64) -> Self {
-        self.limit = Some(limit);
+        self.request.limit = Some(limit);
         self
     }
 
@@ -71,13 +60,13 @@ impl QueryOp {
     /// next page's offset is this one plus the records returned; an offset
     /// past the last match gives an empty page.
     pub fn offset(mut self, offset: u64) -> Self {
-        self.offset = Some(offset);
+        self.request.offset = Some(offset);
         self
     }
 
     /// Ask for `total_matched`.
     pub fn with_total(mut self) -> Self {
-        self.with_total = true;
+        self.request.with_total = true;
         self
     }
 
@@ -85,14 +74,29 @@ impl QueryOp {
         self.budget = budget;
         self
     }
+
+    /// The query description, for inspection without consuming the operation.
+    pub fn request(&self) -> &QueryRequest {
+        &self.request
+    }
+
+    /// The explicit budget passed to query execution.
+    pub fn requested_budget(&self) -> Budget {
+        self.budget
+    }
+
+    pub(crate) fn into_parts(self) -> (QueryRequest, Budget) {
+        (self.request, self.budget)
+    }
 }
 
 /// The size of a filter's match set.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
 pub struct CountOp {
-    pub filter: Filter,
+    filter: Filter,
     /// Explicit budget, stored but not enforced yet.
-    pub budget: Budget,
+    budget: Budget,
 }
 
 impl CountOp {
@@ -103,6 +107,20 @@ impl CountOp {
     pub fn budget(mut self, budget: Budget) -> Self {
         self.budget = budget;
         self
+    }
+
+    /// The filter, for inspection without consuming the operation.
+    pub fn predicate(&self) -> &Filter {
+        &self.filter
+    }
+
+    /// The explicit budget passed to count execution.
+    pub fn requested_budget(&self) -> Budget {
+        self.budget
+    }
+
+    pub(crate) fn into_parts(self) -> (Filter, Budget) {
+        (self.filter, self.budget)
     }
 }
 
@@ -132,12 +150,14 @@ mod tests {
         assert_eq!(
             QueryOp::from_filter(color_is_blue(), crate::Budget::Limited(u64::MAX)),
             QueryOp {
-                filter: color_is_blue(),
-                sort: vec![],
-                projection: None,
-                limit: None,
-                offset: None,
-                with_total: false,
+                request: QueryRequest {
+                    filter: color_is_blue(),
+                    sort: vec![],
+                    projection: None,
+                    limit: None,
+                    offset: None,
+                    with_total: false,
+                },
                 budget: Budget::Limited(u64::MAX),
             }
         );
@@ -154,16 +174,18 @@ mod tests {
             .with_total()
             .budget(Budget::Limited(1_000));
         assert_eq!(
-            op,
-            QueryOp {
-                filter: color_is_blue(),
-                sort: vec![price],
-                projection: Some(vec![name(b"owner"), name(b"status")]),
-                limit: Some(50),
-                offset: Some(10),
-                with_total: true,
-                budget: Budget::Limited(1_000),
-            }
+            op.into_parts(),
+            (
+                QueryRequest {
+                    filter: color_is_blue(),
+                    sort: vec![price],
+                    projection: Some(vec![name(b"owner"), name(b"status")]),
+                    limit: Some(50),
+                    offset: Some(10),
+                    with_total: true,
+                },
+                Budget::Limited(1_000),
+            )
         );
     }
 
@@ -171,10 +193,13 @@ mod tests {
     fn projection_is_deduplicated_in_byte_order_and_may_be_empty() {
         let op = QueryOp::from_filter(color_is_blue(), crate::Budget::Limited(u64::MAX))
             .only(["status", "owner", "status"]);
-        assert_eq!(op.projection, Some(vec![name(b"owner"), name(b"status")]));
+        assert_eq!(
+            op.request().projection,
+            Some(vec![name(b"owner"), name(b"status")])
+        );
         let none = QueryOp::from_filter(color_is_blue(), crate::Budget::Limited(u64::MAX))
             .only(Vec::<&str>::new());
-        assert_eq!(none.projection, Some(vec![]));
+        assert_eq!(none.request().projection, Some(vec![]));
     }
 
     #[test]
@@ -188,24 +213,19 @@ mod tests {
             .limit(2)
             .budget(Budget::Limited(1))
             .budget(Budget::Unlimited);
-        assert_eq!(op.sort, [date]);
-        assert_eq!(op.limit, Some(2));
-        assert_eq!(op.budget, Budget::Unlimited);
+        assert_eq!(op.request().sort, [date]);
+        assert_eq!(op.request().limit, Some(2));
+        assert_eq!(op.requested_budget(), Budget::Unlimited);
     }
 
     #[test]
     fn a_count_takes_a_filter_and_a_budget() {
+        let op = CountOp::filter(color_is_blue(), Budget::Limited(u64::MAX));
+        assert_eq!(op.predicate(), &color_is_blue());
+        assert_eq!(op.requested_budget(), Budget::Limited(u64::MAX));
         assert_eq!(
-            CountOp::filter(color_is_blue(), crate::Budget::Limited(u64::MAX))
-                .budget(Budget::Limited(7)),
-            CountOp {
-                filter: color_is_blue(),
-                budget: Budget::Limited(7),
-            }
-        );
-        assert_eq!(
-            CountOp::filter(color_is_blue(), crate::Budget::Limited(u64::MAX)).budget,
-            Budget::Limited(u64::MAX)
+            op.budget(Budget::Limited(7)).into_parts(),
+            (color_is_blue(), Budget::Limited(7))
         );
     }
 }

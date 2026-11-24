@@ -14,13 +14,11 @@ use std::{
 };
 
 const SUPERBLOCK: Table = Table("Superblock");
-const TABLES: [Table; 8] = [
+const TABLES: [Table; 6] = [
     tables::CELL,
     tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX,
     golemdb_index::tables::INDEX_TRIE.table(),
-    golemdb_index::tables::BITMAP_TRIE.table(),
-    golemdb_index::tables::BITMAP_CONTAINER.table(),
     SUPERBLOCK,
     Table("Roots"),
 ];
@@ -296,6 +294,18 @@ impl<W: ReadTransaction> ReadTransaction for ControlledWrite<W> {
     }
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
         self.inner.cursor(table, key)
+    }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if matches!(self.fault, Fault::HeadRead) && table == SUPERBLOCK && key == b"head" {
+            return Err(injected());
+        }
+        self.inner.with_value(table, key, inspect)
     }
 }
 impl<W> ControlledWrite<W> {

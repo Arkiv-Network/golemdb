@@ -7,5 +7,6 @@ mod opening;
 mod opening_failure;
 mod pricing;
 mod pruning;
+mod read_metering;
 mod receipts;
 mod write_metering;

@@ -295,6 +295,15 @@ impl<T: ReadTransaction> ReadTransaction for FaultWrite<T> {
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
         self.inner.cursor(table, key)
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        self.inner.with_value(table, key, inspect)
+    }
 }
 impl<T: WriteTransaction> WriteTransaction for FaultWrite<T> {
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> golemdb_storage::Result<()> {

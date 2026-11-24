@@ -484,6 +484,16 @@ impl<R: ReadTransaction> ReadTransaction for FaultRead<R> {
             reads: &self.reads,
         })
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        check_fault(&self.fail, &self.reads)?;
+        self.origin.with_value(table, key, inspect)
+    }
 }
 
 impl<C: ReadCursor> ReadCursor for FaultCursor<'_, C> {
@@ -494,6 +504,14 @@ impl<C: ReadCursor> ReadCursor for FaultCursor<'_, C> {
     fn prev(&mut self) -> golemdb_storage::Result<Option<Entry>> {
         check_fault(self.fail, self.reads)?;
         self.inner.prev()
+    }
+
+    fn with_next<Output>(
+        &mut self,
+        inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        check_fault(self.fail, self.reads)?;
+        self.inner.with_next(inspect)
     }
 }
 

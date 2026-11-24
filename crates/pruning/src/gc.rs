@@ -6,13 +6,14 @@ use crate::{PruningError, Result};
 /// an empty value; `commit` is the one that superseded the row.
 pub const STALE: Table = Table("Stale");
 
+/// Bytes of the big-endian commit a `Stale` key starts with.
+const COMMIT_BYTES: usize = size_of::<u64>();
+
 /// The versioned tables, by their code in `Stale` keys. The codes are
 /// persisted: append only, never reorder.
-const TABLES: [Table; 4] = [
+const TABLES: [Table; 2] = [
     golemdb_cells::tables::CELL_TRIE.table(),
     golemdb_index::tables::INDEX_TRIE.table(),
-    golemdb_index::tables::BITMAP_TRIE.table(),
-    golemdb_index::tables::BITMAP_CONTAINER.table(),
 ];
 
 /// List the rows `commit` superseded.
@@ -78,12 +79,12 @@ pub(crate) fn sweep(tx: &mut impl WriteTransaction, cutoff: u64, batch: Batch) -
 
 /// The commit a `Stale` key starts with.
 fn commit(key: &[u8]) -> Option<u64> {
-    Some(u64::from_be_bytes(*key.first_chunk::<8>()?))
+    Some(u64::from_be_bytes(*key.first_chunk::<COMMIT_BYTES>()?))
 }
 
 /// The table and key of the row a `Stale` key lists.
 fn row(key: &[u8]) -> Option<(Table, &[u8])> {
-    let (code, row) = key.get(8..)?.split_first()?;
+    let (code, row) = key.get(COMMIT_BYTES..)?.split_first()?;
     Some((*TABLES.get(*code as usize)?, row))
 }
 
@@ -265,15 +266,9 @@ mod tests {
 
     #[test]
     fn table_codes_are_pinned_and_unversioned_tables_are_rejected() {
-        use golemdb_index::tables::{BITMAP_CONTAINER, BITMAP_TRIE, INDEX, INDEX_TRIE};
-        let codes = [
-            CELL_TRIE,
-            INDEX_TRIE.table(),
-            BITMAP_TRIE.table(),
-            BITMAP_CONTAINER.table(),
-        ]
-        .map(|t| code(t).unwrap());
-        assert_eq!(codes, [0, 1, 2, 3]);
+        use golemdb_index::tables::{INDEX, INDEX_TRIE};
+        let codes = [CELL_TRIE, INDEX_TRIE.table()].map(|t| code(t).unwrap());
+        assert_eq!(codes, [0, 1]);
         assert!(matches!(
             code(INDEX),
             Err(crate::PruningError::UnversionedTable("Index"))

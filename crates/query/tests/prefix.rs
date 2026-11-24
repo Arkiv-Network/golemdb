@@ -6,7 +6,7 @@ mod support;
 use std::collections::{BTreeMap, BTreeSet};
 
 use golemdb_api::{ApiError, RecordKey, RecordOp};
-use golemdb_cells::CellValue;
+use golemdb_cells::{CellValue, CellValueParseError};
 use golemdb_index::TermError;
 use proptest::prelude::*;
 use support::{TestDb, key, prefix, record, small_value};
@@ -62,7 +62,7 @@ fn prefixes_match_the_strings_that_start_with_them() {
                 .map(|(end, _)| &value[..end])
                 .chain([*value])
         })
-        .chain(["abd", "c", "é\u{0}", "\u{10FFFF}b"])
+        .chain(["abd", "c", "é\u{1}", "\u{10FFFF}b"])
         .collect();
     for start in prefixes {
         let expected: Vec<RecordKey> = STRINGS
@@ -80,6 +80,21 @@ fn prefixes_match_the_strings_that_start_with_them() {
             "{start:?}"
         );
     }
+    // No indexed string holds 0x00, so a prefix with one is invalid.
+    let nul = test.keys(prefix("f", "é\u{0}"));
+    let Err(ApiError::InvalidArgument {
+        source: Some(source),
+        ..
+    }) = &nul
+    else {
+        panic!("expected InvalidArgument, got {nul:?}");
+    };
+    assert_eq!(
+        source.downcast_ref::<TermError>().copied(),
+        Some(TermError::Value(
+            CellValueParseError::NulInStrAttributeValue
+        ))
+    );
 }
 
 #[test]

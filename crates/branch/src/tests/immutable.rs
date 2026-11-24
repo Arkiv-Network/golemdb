@@ -528,6 +528,20 @@ impl<T: ReadTransaction> ReadTransaction for MetadataRead<T> {
         }
         self.inner.cursor(table, key)
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if table == metadata::KEYS && self.fail.load(Ordering::SeqCst) {
+            return Err(golemdb_storage::StorageError::Backend(
+                "injected key read failure".into(),
+            ));
+        }
+        self.inner.with_value(table, key, inspect)
+    }
 }
 impl Store for FailMetadata {
     type Read<'a> = MetadataRead<<MemoryStore as Store>::Read<'a>>;

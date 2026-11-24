@@ -459,6 +459,18 @@ impl ReadTransaction for FaultRead {
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
         self.inner.cursor(table, key)
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if table == SUPERBLOCK && self.fail_head.load(Ordering::Relaxed) {
+            return Err(StorageError::Poisoned("injected head read failure"));
+        }
+        self.inner.with_value(table, key, inspect)
+    }
 }
 
 #[test]

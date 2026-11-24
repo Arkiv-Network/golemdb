@@ -20,10 +20,10 @@ use golemdb_storage::{Table, WriteTransaction, scan};
 
 /// Due rows a sweep waits for before deleting a batch, so each batch is large
 /// enough for rows sharing a page to be deleted together.
-pub const MIN_BATCH_ROWS: usize = 75_000;
+pub const MIN_BATCH_ROWS: usize = 10_000;
 
 /// Most rows one sweep deletes, bounding the commit that carries a batch.
-pub const MAX_BATCH_ROWS: usize = 150_000;
+pub const MAX_BATCH_ROWS: usize = 40_000;
 
 /// Commits a due row waits at most: past this, a sweep deletes a smaller batch,
 /// so a quiet node still drains.

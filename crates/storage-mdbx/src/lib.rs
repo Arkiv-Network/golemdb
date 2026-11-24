@@ -265,6 +265,24 @@ impl<K: TransactionKind> ReadTransaction for MdbxTransaction<'_, K> {
         }
     }
 
+    fn with_value<T>(
+        &self,
+        table: Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> T,
+    ) -> Result<T> {
+        table.validate()?;
+        self.limits.key(key)?;
+        let value = match self.table(table)? {
+            Some(handle) => self
+                .inner
+                .get::<std::borrow::Cow<'_, [u8]>>(&handle, key)
+                .map_err(backend)?,
+            None => None,
+        };
+        Ok(inspect(value.as_deref()))
+    }
+
     fn cursor(&self, table: Table, key: &[u8]) -> Result<Self::Cursor<'_>> {
         table.validate()?;
         self.limits.key(key)?;
@@ -345,13 +363,19 @@ pub struct MdbxCursor<'tx, K: TransactionKind> {
 }
 
 impl<K: TransactionKind> MdbxCursor<'_, K> {
-    fn advance(&mut self, forward: bool) -> Result<Option<Entry>> {
+    fn advance<T>(
+        &mut self,
+        forward: bool,
+        inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> T,
+    ) -> Result<T> {
         let Some(cursor) = &mut self.inner else {
-            return Ok(None);
+            return Ok(inspect(None));
         };
         let row = match &self.position {
             Position::Start(key) => {
-                let row = cursor.set_range::<Vec<u8>, Vec<u8>>(key).map_err(backend)?;
+                let row = cursor
+                    .set_range::<Vec<u8>, std::borrow::Cow<'_, [u8]>>(key)
+                    .map_err(backend)?;
                 if forward {
                     row
                 } else {
@@ -375,15 +399,26 @@ impl<K: TransactionKind> MdbxCursor<'_, K> {
         } else {
             Position::Before
         };
-        Ok(row)
+        Ok(inspect(
+            row.as_ref()
+                .map(|(key, value)| (key.as_slice(), value.as_ref())),
+        ))
     }
 }
 
 impl<K: TransactionKind> ReadCursor for MdbxCursor<'_, K> {
     fn next(&mut self) -> Result<Option<Entry>> {
-        self.advance(true)
+        self.advance(true, |row| {
+            row.map(|(key, value)| (key.to_vec(), value.to_vec()))
+        })
     }
     fn prev(&mut self) -> Result<Option<Entry>> {
-        self.advance(false)
+        self.advance(false, |row| {
+            row.map(|(key, value)| (key.to_vec(), value.to_vec()))
+        })
+    }
+
+    fn with_next<T>(&mut self, inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> T) -> Result<T> {
+        self.advance(true, inspect)
     }
 }

@@ -10,10 +10,10 @@ pub enum FailureReason {
     Pricing(#[from] PricingError),
 }
 
-/// Maps to OutOfBudget at the API boundary. The accounting is always completed
-/// planning work; prospective mutations appear only in a successful final total.
+/// Maps to OutOfBudget at the API boundary. Accounting contains charged read or
+/// write-planning work; prospective mutations appear only in an approved total.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("write metering failed: {reason} (spent: {}, required: {required:?})", accounting.cost)]
+#[error("metering failed: {reason} (spent: {}, required: {required:?})", accounting.cost)]
 pub struct MeteringFailure {
     pub accounting: Accounting,
     pub required: Option<u64>,

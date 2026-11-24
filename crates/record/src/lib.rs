@@ -22,9 +22,9 @@
 //! live here; admission does not reread parameters from the branch.
 //!
 //! User records carry a [`RecordMeta`] bytes32 field. Counts come from the same
-//! effects as receipts and are updated atomically. Reads return stored cells
-//! without validating `#meta`. Patch and delete validate metadata before using
-//! its counters; missing or malformed metadata and counter underflow are state errors.
+//! effects as receipts and are updated atomically. Projections return stored cells;
+//! full `get`, patch and delete validate metadata before using its counters.
+//! Missing or malformed metadata and counter underflow are state errors.
 //!
 //! Every CRUD operation requires an explicit [`golemdb_metering::Budget`] and
 //! returns an [`Outcome`] with execution context and actual user effects for
@@ -32,7 +32,8 @@
 //! failure. CUD always uses [`golemdb_metering::WriteMeter`] through a shared
 //! admission/plan/approve/apply path. Prices are captured once at the validated
 //! branch origin. Explicit zero weights keep writes free with full ledgers;
-//! missing weights stop only the operations that need them. Reads are unmetered.
+//! missing weights stop only the operations that need them. `get` uses
+//! [`golemdb_metering::ReadMeter`], charging admission, lookups, scans and returned bytes.
 //! [`ReadTarget::Head`] selects and reads the current head in one snapshot.
 //! Commit-targeted reads support the head only and explicitly reject other
 //! commits until history is available. Deletes enumerate and tombstone every
@@ -75,6 +76,7 @@ mod meta;
 mod outcome;
 mod plan;
 mod pricing;
+mod read;
 mod state;
 mod types;
 

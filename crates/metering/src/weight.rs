@@ -4,7 +4,7 @@ use std::{borrow::Cow, fmt};
 ///
 /// Names are open-ended so future models and host weights do not change the
 /// receipt type. The constants declare GolemDB code version 1's weight names,
-/// including read/log weights whose execution metering is still deferred.
+/// including query/log weights whose execution metering is still deferred.
 /// Declaration/form checks at genesis and activation belong to their loader;
 /// constructing a name does not declare or price it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -18,7 +18,7 @@ macro_rules! define_weights {
         }
 
         /// Names declared by GolemDB code version 1 (metering D10). Declaring
-        /// read/log names permits configuration before their execution metering.
+        /// query/log names permits configuration before their execution metering.
         pub const GOLEMDB_WEIGHT_NAMES: &[&str] = &[$($name),*];
     };
 }

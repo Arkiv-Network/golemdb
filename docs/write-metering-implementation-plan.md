@@ -14,7 +14,7 @@ Sources: [metering specification](golemdb-metering.md), [API receipts](golemdb-a
 - Change the API before introducing actual charges. All six operations return `Metered<T>`, including failures. Initially `cost = 0`; successful write effects and `priced_at` must already be correct.
 - Add `#meta` before enforcing write prices. Its four counters describe one record's user cells, not database-wide populations or accumulated operation charges.
 - The record crate builds and applies write plans. The metering calculation engine prices logical steps and mutations without storage access or executable plans. Separate modules in the metering crate load and validate reserved model/weight cells through `cells` and `storage`; they do not depend on record, query or branch.
-- Define `Budget` in the metering crate and re-export it from API and query. Keep `QueryOp` and `CountOp` in query for now; moving their public builders into API is deferred.
+- Define `Budget` in the metering crate and re-export it from API and query. Query/count builders now live in API; query execution takes a query-owned `QueryRequest` or a count filter, with the budget passed separately.
 - Planning reads are budgeted while the plan is being built. Building an unrestricted plan and pricing it afterward would not meet the specification.
 - Use index-term existence at the branch base for the initial creation surcharge. Do not implement a branch-aware index overlay for pricing in this work.
 - Keep actual index maintenance exact. Use the named `INITIAL_DEPTHS` constant (6 for both tries) initially; database-wide population counters and D3 depth selection are deferred. The pricing simplifications do not change committed user data or index contents.
@@ -24,12 +24,12 @@ Sources: [metering specification](golemdb-metering.md), [API receipts](golemdb-a
 
 | Layer | Responsibility |
 | --- | --- |
-| `api` | Public CRUD requests, query/count and `Budget` re-exports, `Metered<T>`, receipts and error conversion; genesis/admin integration and database construction. |
+| `api` | Public CRUD and query/count builders, `Budget` re-export, `Metered<T>`, receipts and error conversion; genesis/admin integration and database construction. |
 | `record` | Admission, record semantics, metered planning reads, `WritePlan`, metadata and effect calculation, final approval and application. |
 | `metering` | `Budget`, immutable schedules, supported code identifiers, checked pricing/count arithmetic, explicit modeled depths, ledgers and per-call accounting; persisted model codecs, loading and a shared immutable pricing provider over `cells`/`storage`. The calculation engine remains pure. |
 | `branch` | A stable state view while planning/applying, origin/head validation, overlay mutation, rollback, sealing and commit; access to base state needed by record planning. |
 | `cells` / `index` | Encodings and storage primitives, including a point lookup that checks whether a term exists without loading its posting list. Record calls using these primitives are charged through the meter; the storage crates neither choose prices nor track a caller's budget. |
-| `query` | Query/count request builders, existing query planning/execution and receipt context now; its own metered execution later. |
+| `query` | Plain query request, filter/operand and result types, query planning/execution and receipt context now; accepts budgets separately, with its own metered execution later. |
 
 ### The metering crate does not create plans
 

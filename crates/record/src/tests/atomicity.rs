@@ -64,6 +64,23 @@ impl<R: ReadTransaction> ReadTransaction for FaultRead<R> {
             fail: self.fail.clone(),
         })
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if self.fail.load(Ordering::Relaxed)
+            && table == tables::CELL
+            && key == CellKey::new(64, CellNameRef::raw(b"z")).encode()
+        {
+            return Err(StorageError::Backend(
+                "injected late patch read failure".into(),
+            ));
+        }
+        self.inner.with_value(table, key, inspect)
+    }
 }
 
 impl<C: ReadCursor> ReadCursor for FaultCursor<C> {
@@ -84,6 +101,25 @@ impl<C: ReadCursor> ReadCursor for FaultCursor<C> {
 
     fn prev(&mut self) -> golemdb_storage::Result<Option<golemdb_storage::Entry>> {
         self.inner.prev()
+    }
+
+    fn with_next<Output>(
+        &mut self,
+        inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        self.inner.with_next(|row| {
+            if self.fail.load(Ordering::Relaxed)
+                && self.table == tables::CELL
+                && row.as_ref().is_some_and(|(key, _)| {
+                    *key == CellKey::new(64, CellNameRef::raw(b"z")).encode()
+                })
+            {
+                return Err(StorageError::Backend(
+                    "injected late delete scan failure".into(),
+                ));
+            }
+            Ok(inspect(row))
+        })?
     }
 }
 

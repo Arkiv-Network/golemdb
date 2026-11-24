@@ -5,7 +5,7 @@ use golemdb_branch::{CommitId, read_head};
 use golemdb_cells::{CellKey, CellName, CellReader, reserved};
 use golemdb_storage::{ReadTransaction, Store};
 
-use crate::{Record, RecordCells, RecordError, RecordKey, Result, state};
+use crate::{Record, RecordCells, RecordError, Result, state};
 
 /// Open one storage snapshot for a committed read and resolve `commit`
 /// against its head: `None` reads the head; `Some(c)` must name it, because
@@ -41,20 +41,6 @@ pub fn read_committed_by_id<R: ReadTransaction>(
         .get(&CellKey::new(id, reserved::KEY))?
         .ok_or(RecordError::CorruptState("record has no #key"))?;
     let key = state::identity_key(&identity).ok_or(RecordError::CorruptState("invalid #key"))?;
-    let cells = read_cells(cell_reader, id, projection)?;
-    Ok(Record { key, cells })
-}
-
-/// The committed record bound to `key`, after checking the binding against
-/// the record's `#key`.
-pub(crate) fn read_committed_by_key<R: ReadTransaction>(
-    cell_reader: &CellReader<'_, R>,
-    key: RecordKey,
-    projection: Option<&[CellName]>,
-) -> Result<Record> {
-    let id = state::record_id(key, cell_reader.get(&state::binding(key))?)?
-        .ok_or(RecordError::NotFound)?;
-    state::check_identity(key, cell_reader.get(&CellKey::new(id, reserved::KEY))?)?;
     let cells = read_cells(cell_reader, id, projection)?;
     Ok(Record { key, cells })
 }

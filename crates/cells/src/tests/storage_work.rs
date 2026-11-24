@@ -47,6 +47,18 @@ impl<T: ReadTransaction> ReadTransaction for Observed<T> {
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
         self.inner.cursor(table, key)
     }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        if table == tables::CELL {
+            self.reads.set(self.reads.get() + 1);
+        }
+        self.inner.with_value(table, key, inspect)
+    }
 }
 impl<T: WriteTransaction> WriteTransaction for Observed<T> {
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> golemdb_storage::Result<()> {
@@ -166,6 +178,16 @@ impl ReadCursor for FailingCursor {
     fn prev(&mut self) -> golemdb_storage::Result<Option<golemdb_storage::Entry>> {
         unreachable!()
     }
+
+    fn with_next<Output>(
+        &mut self,
+        inspect: impl FnOnce(Option<(&[u8], &[u8])>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        let row = self.next()?;
+        Ok(inspect(
+            row.as_ref().map(|(k, v)| (k.as_slice(), v.as_slice())),
+        ))
+    }
 }
 impl ReadTransaction for FailingRead {
     type Cursor<'a> = FailingCursor;
@@ -174,6 +196,17 @@ impl ReadTransaction for FailingRead {
     }
     fn cursor(&self, _: Table, _: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
         Ok(FailingCursor { called: false })
+    }
+
+    fn with_value<Output>(
+        &self,
+        table: golemdb_storage::Table,
+        key: &[u8],
+        inspect: impl FnOnce(Option<&[u8]>) -> Output,
+    ) -> golemdb_storage::Result<Output> {
+        let _ = (table, key, inspect);
+
+        Err(StorageError::Poisoned("injected read failure"))
     }
 }
 

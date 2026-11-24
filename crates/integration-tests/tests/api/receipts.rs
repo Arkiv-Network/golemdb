@@ -13,7 +13,7 @@ use std::error::Error;
 use super::facade::each_backend;
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
-// Writes enforce this budget against explicit zero weights; reads remain unmetered.
+// CRUD enforces this budget against explicit zero weights; query/count remain unmetered.
 const BUDGET: Budget = Budget::Limited(0);
 
 fn create() -> RecordOp<op::Create> {
@@ -104,7 +104,7 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
         );
         let before = db.get(ReadTarget::Branch(branch), RecordOp::get(KEY, BUDGET));
         unchanged(&before, Some(head));
-        assert!(before.receipt.ledger.is_empty());
+        assert_eq!(before.receipt.ledger.count("read.cell_scan"), 2);
         let before = before.result.unwrap();
         assert_eq!(
             before.cells[b"color".as_slice()].kind(),

@@ -189,8 +189,9 @@ record_keys: caller_assigned     # or:  record_keys: { generated: { seed: "0x…
 Validation at opening, against the store's physical limits:
 
 - `max_cell_name_len` must be positive.
-- Required key size: `max(name + 8, name + 2 + max(max_str_len, 32), 40)` bytes, where `name`
-  is `max_cell_name_len`. It must fit the store's maximum key.
+- Required key size: `max(name + 8, name + 2 + max(max_str_len + 1, 32) + 6, 40)` bytes,
+  where `name` is `max_cell_name_len`: a string term ends with a terminator, and an index key
+  adds the container's 6-byte region. It must fit the store's maximum key.
 - Required value size: `max(1 + max(max_bytes_len, max_str_len), 16 KiB)`. The 16 KiB floor
   covers internal values: trie nodes, metadata, root pairs and Roaring containers. It must fit
   the store's maximum value.
@@ -281,7 +282,7 @@ every record and reserved-record check.
 
 Initialization writes, in one store transaction:
 
-1. **Superblock rows:** `format` = 1 (`u32` BE), `hash_fn` (`u16` BE: 1 Keccak-256,
+1. **Superblock rows:** `format` = 2 (`u32` BE), `hash_fn` (`u16` BE: 1 Keccak-256,
    2 Blake3), `roaring` = 1 (`u16` BE), `genesis_id` (32 bytes), and `head`.
 2. **Genesis cells,** all of kind `field`:
    - for each reserved record (see [Reserved records](#reserved-records)): its `#key` cell
@@ -426,7 +427,7 @@ valid value.
 All other IDs up to 127 are reserved. Fixed-width types have no configurable limit.
 
 **Kind** is chosen per write, not per name: `attribute` or `field`. Two records may give the
-same name different types and kinds.
+same name different types and kinds. An attribute `str` cannot contain `0x00`; a field can.
 
 ### Rust values
 
@@ -475,7 +476,7 @@ pub struct RecordMeta { pub cells: u64, pub cell_bytes: u64, pub indexed_cells: 
 | `cells` | user cells |
 | `cell_bytes` | Σ `(8 + |name|) + (1 + |value|)`: cell key plus encoded value |
 | `indexed_cells` | user cells of kind attribute |
-| `index_bytes` | Σ over attributes of `|name| + 2 + |value|`: the index term key |
+| `index_bytes` | Σ over attributes of `|name| + 2 + |value|`: the index term, less a string's terminator |
 
 `|value|` is the payload without the tag. **Encoding:** the four fields in this order, each
 `u64` BE, 32 bytes, stored as a `bytes32` field. It is under the state root, so it is
@@ -487,10 +488,6 @@ normative.
   `Record::meta()` decodes it, returning `None` if the read did not include it.
 - A user record without `#meta`, or a count that would fall below zero, is reported as
   corrupt state (`Internal`), never repaired.
-- **Completeness.** A client with a trusted root that receives `cells + 2` distinct cells of
-  a record (user cells, `#key`, `#meta`), each with a valid inclusion proof, has the whole
-  record. This needs every mutation to keep the counts exact. It does not cover projections,
-  withheld records or query results. Proofs themselves are not implemented yet.
 
 ---
 
@@ -548,7 +545,7 @@ accessors come from `feature/golem-db-api`, where `changes()` yields `Option<&Ce
 | Problem | Message |
 | --- | --- |
 | a name violating the grammar | `attribute("x y"): invalid cell name`, cause as source |
-| a value that cannot convert (NaN) or cannot take the kind (`bytes` as attribute) | `field("f"): invalid cell value`, cause as source |
+| a value that cannot convert (NaN) or cannot take the kind (`bytes`, or a `str` containing `0x00`, as attribute) | `field("f"): invalid cell value`, cause as source |
 | a name written or removed twice in one operation | `remove("x"): the operation already writes or removes this cell` |
 | `.key` given twice | `key(): the record key is given twice` |
 
@@ -828,7 +825,7 @@ internal failures keep their causes as sources.
 | `KeyModeMismatch` | a create's key does not match the key mode |
 | `OutOfBudget { required: Option<u64> }` (agreed shape) | the call's budget cannot cover its next step or its total; not returned yet |
 | `Reserved` | create, patch or delete addresses a reserved key |
-| `InvalidArgument { message, source }` | a builder problem, or a name or value over a genesis limit |
+| `InvalidArgument { message, source }` | a builder problem, a name or value over a genesis limit, or a query `str` operand containing `0x00` |
 | `HandleInvalid` | an unknown, consumed or stale branch handle, on any call including `commit` |
 | `Conflict` | reserved for an optimistic-concurrency mismatch, should record versioning be added ([Open items](#open-items)); not raised today |
 | `Sealed` | a record write, checkpoint or rollback on a sealed branch; the handle stays valid |
@@ -1125,7 +1122,8 @@ to a party holding nothing but the root.
 - **Any past commit is provable, not just the head:** a light client holding the current root can
   verify the root at a past commit, from `#roots`, and descend from it.
 - **Proofs attest typed values,** since the type tag is inside the hashed value.
-- **Whole-record completeness** follows from a proof of `#meta` ([`#meta`](#meta)).
+- **Whole-record completeness** follows from a proof of the record's `CellTrie` subtree, which
+  holds exactly its cells ([design §3](golemdb-design.md#record-shape-the-meta-cell)).
 - **`id_of` and `key_of`** come with proofs: a cell's trie path is derived from the record ID, so a
   verifier needs it. They are fixed-size point reads (metering D6).
 
@@ -1242,7 +1240,7 @@ Four ideas run through the differences below:
 | --- | --- | --- | --- |
 | Call shape | `create(branch, key?, cells, budget, debug?)` etc. | one `RecordOp<Op>` argument per call, returning `Metered<T>` | Ideas 1 and 2. An operation is also a plain value: it can be cloned to retry after losing a commit race and compared in a mock. |
 | Key modes | `CallerAssigned` / `EngineAssigned`, per branch lineage | `CallerAssigned` / `Generated { seed }`, fixed in genesis, with a specified derivation | Idea 3. Generated keys are predictable, so mixing modes would let a caller claim a future generated key; one mode per database rules that out. A specified derivation makes generated keys reproducible on every node. |
-| Reading `#meta` | dedicated `meta` accessor | `get`, full or `.only(["#meta"])`, decoded by `Record::meta()` | Idea 4. A completeness proof needs `#meta` in the same read as the cells, so `get` must return it anyway; a projection on `#meta` is already a fixed-size point read. |
+| Reading `#meta` | dedicated `meta` accessor | `get`, full or `.only(["#meta"])`, decoded by `Record::meta()` | Idea 4. `#meta` is a cell of the record, so `get` returns it anyway; a projection on `#meta` is already a fixed-size point read. |
 | `id_of`, `key_of` | record accessors | not built; to come with proofs | Idea 4. Exposing record IDs makes them part of the contract. Their only consumer is proof verification, whose cell paths are derived from the ID. |
 | Receipt details | opt-in (`debug?`) | always present | Idea 2. In process they are a small struct computed anyway: the same counting path maintains `#meta`. Arkiv prices storage lifetime from the bytes written and deleted. Opt-in remains for transports, where receipt size matters (metering R9). |
 | Writes to a sealed branch | `HandleInvalid` | `Sealed`; the handle stays valid | A host must know that it can still commit or discard the branch. `HandleInvalid` would tell it the handle is gone. |

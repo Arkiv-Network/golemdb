@@ -1,15 +1,16 @@
 //! Queries over committed state: [`Queries::query`] and [`Queries::count`].
 //!
-//! A [`QueryOp`] or [`CountOp`] is plain data the caller builds around a
-//! [`Filter`]. Leaves are typed: `amount = EqValue::of(marker::I32, 100)` reads
-//! only the `i32` run of `amount`, so a cell of another type under the same
+//! A [`QueryRequest`] describes a query; counting takes a [`Filter`] directly.
+//! Both calls receive an explicit [`Budget`] separately. Leaves are typed:
+//! `amount = EqValue::of(marker::I32, 100)` reads only the `i32` run of `amount`,
+//! so a cell of another type under the same
 //! name is treated as absent. Only attribute cells are indexed, so only they match.
 //!
 //! Queries select the committed head (`None`) or a named commit before admission.
 //! The selected snapshot supplies the pricing head, index reads and materialized
 //! records, including on failure. Non-head historical reads remain unsupported.
 //! Report variants retain that context for API receipts. Explicit budgets are
-//! stored but not enforced yet. Filter evaluation uses a private index seam.
+//! accepted but not enforced yet. Filter evaluation uses a private index seam.
 //!
 //! Callers reach queries through `golemdb_api::Database`, which builds its
 //! [`Queries`] over the store its branch manager writes through:
@@ -51,19 +52,19 @@ mod error;
 mod eval;
 #[cfg(test)]
 mod fakes;
+mod model;
 mod plan;
 mod posting_source;
 mod queries;
-mod query_op;
 mod sorting;
 
 pub use cell_source::CellSource;
 pub use error::{QueryError, Result};
 pub use golemdb_metering::Budget;
-pub use posting_source::PostingSource;
-pub use queries::Queries;
-pub use query_op::{
-    Bounds, CountOp, Direction, EqValue, ExistsType, Filter, InValues, QueryOp, QueryPage, SortKey,
+pub use model::{
+    Bounds, Direction, EqValue, ExistsType, Filter, InValues, QueryPage, QueryRequest, SortKey,
     ValuesError,
 };
+pub use posting_source::PostingSource;
+pub use queries::Queries;
 pub use sorting::{FetchAndSort, SortLevel, SortPlan, SortingStrategy, Window};

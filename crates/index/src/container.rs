@@ -1,38 +1,40 @@
-use crate::BITMAP_LEAF_DOMAIN;
-use golemdb_merkle::{Hash, HashProvider};
 use roaring::RoaringBitmap;
 
-use crate::{error::BitmapError, path};
+use crate::{ContainerId, container_id::MAX_OFFSET, error::BitmapError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitmapContainer {
-    path: u64,
+    container_id: ContainerId,
     values: RoaringBitmap,
 }
 
 impl BitmapContainer {
-    pub fn new(path: u64, values: RoaringBitmap) -> Result<Self, BitmapError> {
-        if !path::is_valid_path(path) {
-            return Err(BitmapError::PathOutOfRange { path });
-        }
+    /// Like [`Self::from_values`], but from a Roaring bitmap; fails if an
+    /// offset doesn't fit in 16 bits.
+    pub fn new(container_id: ContainerId, values: RoaringBitmap) -> Result<Self, BitmapError> {
         if let Some(value) = values.max()
-            && value > u16::MAX as u32
+            && value > MAX_OFFSET
         {
             return Err(BitmapError::OffsetOutOfRange { value });
         }
 
-        Ok(Self { path, values })
+        Ok(Self {
+            container_id,
+            values,
+        })
     }
 
-    pub fn empty(path: u64) -> Result<Self, BitmapError> {
-        Self::new(path, RoaringBitmap::new())
+    /// The container `container_id` with no offsets.
+    pub fn empty(container_id: ContainerId) -> Self {
+        Self::from_values(container_id, [])
     }
 
-    pub fn from_values(
-        path: u64,
-        values: impl IntoIterator<Item = u16>,
-    ) -> Result<Self, BitmapError> {
-        Self::new(path, values.into_iter().map(u32::from).collect())
+    /// The container `container_id` holding `values`, its record IDs' offsets.
+    pub fn from_values(container_id: ContainerId, values: impl IntoIterator<Item = u16>) -> Self {
+        Self {
+            container_id,
+            values: values.into_iter().map(u32::from).collect(),
+        }
     }
 
     pub fn insert(&mut self, offset: u16) -> bool {
@@ -55,55 +57,40 @@ impl BitmapContainer {
     pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         self.values
             .iter()
-            .map(|offset| (self.path << 16) | u64::from(offset))
+            .map(|offset| self.container_id.record_id(offset as u16))
     }
 
-    /// Append `hi48_be || canonical_roaring` to the output. Equal logical
-    /// containers encode identically regardless of their mutation history.
-    /// Call once per finalized dirty chunk, not after each offset change.
-    pub fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), BitmapError> {
+    /// Canonical Roaring bytes, without the [`ContainerId`]. Equal logical containers
+    /// encode identically regardless of their mutation history.
+    pub fn encode(&self) -> Result<Vec<u8>, BitmapError> {
         if self.is_empty() {
             return Err(BitmapError::EmptyContainer);
         }
         let mut values = self.values.clone();
         values.remove_run_compression();
         values.optimize();
-        out.extend_from_slice(&path::path_bytes(self.path)?);
-        values
-            .serialize_into(out)
-            .expect("writing to Vec cannot fail");
-        Ok(())
-    }
-
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, BitmapError> {
         let mut out = Vec::new();
-        self.encode_into(&mut out)?;
+        values
+            .serialize_into(&mut out)
+            .expect("writing to Vec cannot fail");
         Ok(out)
     }
 
-    /// `H(0x04 || hi48_be || canonical_roaring)`. Empty working chunks have no
-    /// leaf hash.
-    pub fn leaf_hash(&self, hasher: &impl HashProvider) -> Result<Hash, BitmapError> {
-        Ok(hasher.hash_parts(&[&[BITMAP_LEAF_DOMAIN], &self.canonical_bytes()?]))
-    }
-
-    /// Decode only canonical persisted bytes, including the full path.
+    /// Decode only canonical Roaring bytes for the container `container_id`.
     /// Reject alternate representations and trailing bytes rather than silently
     /// normalizing data whose content hash may already be stored.
-    pub fn decode(bytes: &[u8]) -> Result<Self, BitmapError> {
-        let hi = bytes.get(..6).ok_or(BitmapError::TruncatedPath)?;
-        let mut path_bytes = [0u8; 8];
-        path_bytes[2..].copy_from_slice(hi);
-        let values = RoaringBitmap::deserialize_from(&bytes[6..]).map_err(BitmapError::Decode)?;
-        let container = Self::new(u64::from_be_bytes(path_bytes), values)?;
-        if container.canonical_bytes()? != bytes {
+    pub fn decode(container_id: ContainerId, bytes: &[u8]) -> Result<Self, BitmapError> {
+        let values = RoaringBitmap::deserialize_from(bytes).map_err(BitmapError::Decode)?;
+        let container = Self::new(container_id, values)?;
+        if container.encode()? != bytes {
             return Err(BitmapError::NonCanonicalEncoding);
         }
         Ok(container)
     }
 
-    pub const fn path(&self) -> u64 {
-        self.path
+    /// The container's ID: the top 48 bits its record IDs share.
+    pub const fn container_id(&self) -> ContainerId {
+        self.container_id
     }
 
     pub const fn bitmap(&self) -> &RoaringBitmap {

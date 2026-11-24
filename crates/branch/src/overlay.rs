@@ -123,12 +123,100 @@ pub struct CellRead<'a, R: ReadTransaction> {
 }
 
 impl<'a, R: ReadTransaction> CellRead<'a, R> {
+    /// The same cell view over a committed snapshot, without staged changes.
+    pub fn committed(origin: &'a R) -> Self {
+        static EMPTY: std::sync::LazyLock<CellOverlay> =
+            std::sync::LazyLock::new(CellOverlay::default);
+        Self::new(&EMPTY, origin)
+    }
+
     pub(crate) fn new(overlay: &'a CellOverlay, origin: &'a R) -> Self {
         Self { overlay, origin }
     }
 
     pub fn get(&self, key: &CellKey) -> Result<Option<CellValue>> {
         self.overlay.get(self.origin, key)
+    }
+
+    /// Expose the encoded value without cloning an overlay hit or a committed
+    /// payload. Inspection and result construction belong to the caller.
+    pub fn with_encoded_value<T>(
+        &self,
+        key: &CellKey,
+        inspect: impl FnOnce(Option<&[u8]>) -> T,
+    ) -> Result<T> {
+        match self.overlay.entries.get(key) {
+            Some(value) => Ok(inspect(value.as_ref().map(CellValue::encoded_bytes))),
+            None => {
+                Ok(golemdb_cells::CellReader::new(self.origin).with_encoded_value(key, inspect)?)
+            }
+        }
+    }
+
+    /// Visit a record's merged rows without copying their values. `before_next`
+    /// runs before each origin cursor attempt (including the terminating probe)
+    /// and each overlay-only entry, including tombstones. A shadowed origin row
+    /// shares its attempt with its overlay replacement. Returning an error from
+    /// either callback stops immediately. User records with known counts should
+    /// use `scan_user_cells` to skip hidden runs instead.
+    pub fn visit_record<C, E: From<crate::BranchError>>(
+        &self,
+        record: u64,
+        context: &mut C,
+        mut before_next: impl FnMut(&mut C) -> std::result::Result<(), E>,
+        mut visit: impl FnMut(&mut C, &CellKey, &[u8]) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        use golemdb_storage::ReadCursor;
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let first = CellKey::new(record, golemdb_cells::CellNameRef::raw(b""));
+        let end = record.checked_add(1).map_or(Unbounded, |id| {
+            Excluded(CellKey::new(id, golemdb_cells::CellNameRef::raw(b"")))
+        });
+        let mut overlay = self
+            .overlay
+            .entries
+            .range((Included(first), end))
+            .peekable();
+        let prefix = record.to_be_bytes();
+        let mut cursor = self
+            .origin
+            .cursor(tables::CELL, &prefix)
+            .map_err(crate::BranchError::from)?;
+        loop {
+            before_next(context)?;
+            let more = cursor
+                .with_next(|row| -> std::result::Result<bool, E> {
+                    let row = row.filter(|(key, _)| key.starts_with(&prefix));
+                    let mut shadowed = false;
+                    while let Some((key, value)) = overlay.peek() {
+                        let encoded = key.encode();
+                        if row.is_some_and(|(origin, _)| encoded.as_slice() > origin) {
+                            break;
+                        }
+                        let same = row.is_some_and(|(origin, _)| encoded.as_slice() == origin);
+                        if !same {
+                            before_next(context)?;
+                        }
+                        if let Some(value) = value {
+                            visit(context, key, value.encoded_bytes())?;
+                        }
+                        shadowed |= same;
+                        overlay.next();
+                    }
+                    if let Some((key, value)) = row.filter(|_| !shadowed) {
+                        visit(
+                            context,
+                            &CellKey::decode(key).map_err(crate::BranchError::from)?,
+                            value,
+                        )?;
+                    }
+                    Ok(row.is_some())
+                })
+                .map_err(crate::BranchError::from)??;
+            if !more {
+                return Ok(());
+            }
+        }
     }
 
     /// Check one attribute term at this branch's committed origin. Staged cell
