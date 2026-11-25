@@ -119,7 +119,7 @@ fn lifecycle<S: Store + Clone + Send + Sync + 'static, H: HashProvider + Copy>(
     ] {
         assert_eq!(
             reader.get(&CellKey::new(system::PARAMS.id, name)).unwrap(),
-            Some(CellValue::from_u64(cap))
+            Some(CellValue::from_u32(cap))
         );
     }
     for record in system::ALL {

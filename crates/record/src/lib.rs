@@ -12,7 +12,7 @@
 //! Opening/initialization belongs to the caller. Every record in
 //! [`golemdb_cells::system::ALL`] must have its bytes32 `#key` and a u64 binding
 //! in `#recordKeys`. The `#params` record must contain u32 `#maxCellNameLen`,
-//! `#maxStrLen`, and `#maxBytesLen` cells, and u64 `#maxRecordCells` and
+//! `#maxStrLen`, and `#maxBytesLen` cells, and u32 `#maxRecordCells` and
 //! `#maxRecordIndexedCells` caps; `#alloc.#nextRecordID` must be a u64
 //! starting at [`golemdb_cells::system::FIRST_USER_RECORD_ID`]. These system
 //! cells are non-indexed. Initialize the cell trie and head consistently and

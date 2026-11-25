@@ -52,7 +52,7 @@ fn initial_cells(config: &Genesis) -> OpenResult<BTreeMap<CellKey, CellValue>> {
     ] {
         cells.insert(
             CellKey::new(system::PARAMS.id, name),
-            CellValue::from_u64(value),
+            CellValue::from_u32(value),
         );
     }
     cells.insert(

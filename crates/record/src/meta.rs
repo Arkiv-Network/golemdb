@@ -98,8 +98,8 @@ impl RecordMeta {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordLimits {
-    pub max_cells: u64,
-    pub max_indexed_cells: u64,
+    pub max_cells: u32,
+    pub max_indexed_cells: u32,
 }
 
 impl RecordLimits {
@@ -112,7 +112,7 @@ impl RecordLimits {
                 self.max_indexed_cells,
             ),
         ] {
-            if count > cap {
+            if count > u64::from(cap) {
                 return Err(RecordError::InvalidInput {
                     message: format!("resulting record count {count} exceeds {name} ({cap})"),
                     source: None,

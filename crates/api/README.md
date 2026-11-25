@@ -461,7 +461,7 @@ immutable data, or `Genesis::new(hash, cell_limits, record_limits,
 Some(ImmutableDataConfig::new(shard_span, segments)))` to enable it. These
 configuration types own their declarations and implement `Clone`, not `Copy`.
 
-`RecordLimits { max_cells, max_indexed_cells }` contains explicit `u64` caps,
+`RecordLimits { max_cells, max_indexed_cells }` contains explicit `u32` caps,
 stored at genesis as `#params.#maxRecordCells` and `#params.#maxRecordIndexedCells`.
 Creates and patches check the final user-cell counts before writing; violations
 return `InvalidArgument` with zero applied effects and do not consume an ID.
