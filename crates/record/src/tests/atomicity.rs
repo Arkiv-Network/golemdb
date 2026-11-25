@@ -157,7 +157,7 @@ fn late_patch_failure(remove: bool) {
         tx.put(
             tables::CELL,
             &CellKey::new(system::PARAMS.id, name).encode(),
-            CellValue::from_u64(100).encoded_bytes(),
+            CellValue::from_u32(100).encoded_bytes(),
         )
         .unwrap();
     }

@@ -98,7 +98,7 @@ fn initialize(db: &impl Store) {
         reserved::MAX_RECORD_CELLS,
         reserved::MAX_RECORD_INDEXED_CELLS,
     ] {
-        put(system::PARAMS.id, name, u64_value(100));
+        put(system::PARAMS.id, name, CellValue::from_u32(100));
     }
     put(system::ALLOC.id, reserved::NEXT_RECORD_ID, u64_value(64));
     let hash = Keccak256Hasher;
