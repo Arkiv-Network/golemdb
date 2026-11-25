@@ -52,12 +52,7 @@ pub fn record_changes(
         if change.before == change.after {
             continue;
         }
-        tables::HISTORY.record(
-            tx,
-            &change.key.encode(),
-            commit,
-            change.before.as_deref().unwrap_or_default(),
-        )?;
+        tables::HISTORY.record(tx, &change.key.encode(), commit, change.before.as_deref())?;
     }
     Ok(())
 }
@@ -73,7 +68,7 @@ pub(crate) fn with_encoded_container<T>(
     Ok(
         tables::HISTORY.with_resolved(tx, key, target, |source| match source {
             ValueSource::Live => tx.with_value(tables::INDEX, key, inspect),
-            ValueSource::Preimage(bytes) => Ok(inspect((!bytes.is_empty()).then_some(bytes))),
+            ValueSource::Preimage(bytes) => Ok(inspect(bytes)),
         })??,
     )
 }

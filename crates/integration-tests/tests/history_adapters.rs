@@ -280,10 +280,10 @@ fn malformed_selected_payloads_fail_and_only_empty_preimages_mean_absence() {
     let cs = changeset_key(20, &cell.encode());
     let is = changeset_key(20, &key.encode());
     cell_tables::HISTORY
-        .record(&mut tx, &cell.encode(), 20, &[])
+        .record(&mut tx, &cell.encode(), 20, None)
         .unwrap();
     index_tables::HISTORY
-        .record(&mut tx, &key.encode(), 20, &[])
+        .record(&mut tx, &key.encode(), 20, None)
         .unwrap();
     assert!(CellReader::at(&tx, 10).get(&cell).unwrap().is_none());
     assert!(IndexReader::at(&tx, 10).container(&key).unwrap().is_none());
@@ -392,10 +392,15 @@ fn reader_accesses_are_borrowed_and_head_paths_do_not_consult_history() {
     )
     .unwrap();
     cell_tables::HISTORY
-        .record(&mut tx, &cell.encode(), 20, value.encoded_bytes())
+        .record(&mut tx, &cell.encode(), 20, Some(value.encoded_bytes()))
         .unwrap();
     index_tables::HISTORY
-        .record(&mut tx, &key.encode(), 20, &container.encode().unwrap())
+        .record(
+            &mut tx,
+            &key.encode(),
+            20,
+            Some(&container.encode().unwrap()),
+        )
         .unwrap();
     tx.commit().unwrap();
     let mut tx = Observed {

@@ -42,10 +42,7 @@ pub fn record_changes(
         if change.before == change.after {
             continue;
         }
-        let preimage = change
-            .before
-            .as_ref()
-            .map_or(&[][..], CellValue::encoded_bytes);
+        let preimage = change.before.as_ref().map(CellValue::encoded_bytes);
         tables::HISTORY.record(tx, &change.key.encode(), commit, preimage)?;
     }
     Ok(())
@@ -62,7 +59,7 @@ pub(crate) fn with_encoded_value<T>(
     Ok(
         tables::HISTORY.with_resolved(tx, key, target, |source| match source {
             ValueSource::Live => tx.with_value(tables::CELL, key, inspect),
-            ValueSource::Preimage(bytes) => Ok(inspect((!bytes.is_empty()).then_some(bytes))),
+            ValueSource::Preimage(bytes) => Ok(inspect(bytes)),
         })??,
     )
 }

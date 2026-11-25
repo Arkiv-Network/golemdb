@@ -523,6 +523,7 @@ version = "0.1.0"
 dependencies = [
  "golemdb-branch",
  "golemdb-cells",
+ "golemdb-history",
  "golemdb-immutable-data",
  "golemdb-index",
  "golemdb-merkle",
