@@ -32,10 +32,11 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
       - run: rustup show
+      - uses: extractions/setup-just@v3
       - uses: Swatinem/rust-cache@v2
 
       - name: Run benchmarks
-        # Adds pipefail, so a failing `cargo bench` fails the step despite `tee`.
+        # Adds pipefail, so a failing benchmark run fails the step despite `tee`.
         shell: bash
         env:
           BENCH_STORAGE_JSON: ${{ github.workspace }}/storage.json
@@ -43,8 +44,7 @@ jobs:
           # would compare against a half-restored run and break its output.
           CRITERION_HOME: ${{ runner.temp }}/criterion
         run: |
-          cargo bench -p golemdb-integration-tests --bench write --bench query \
-            -- --output-format bencher | tee times.txt
+          just bench --args="-- --output-format bencher" | tee times.txt
 
       # The latest baseline main saved. Cache keys are immutable, so each run
       # attempt saves under its own key.

@@ -28,6 +28,15 @@ cargo bench -p golemdb-integration-tests --bench write -- 'commit/'
 cargo bench -p golemdb-integration-tests --bench query -- 'query/100k/eq'
 ```
 
+`just bench` runs the integration suites: the write and query suites by default,
+or the ones named, with any `cargo bench` arguments in `--args`:
+
+```sh
+just bench
+just bench write
+just bench --args query/100k/eq
+```
+
 Compile without running, or execute every fixture once without collecting timing
 statistics:
 
@@ -44,12 +53,13 @@ background load comparable.
 
 ### CI
 
-The `Benchmarks` workflow runs the write and query suites. Pushes to `main` save
-the results as the baseline, and pull requests compare against the latest one,
-in the job summary. A pull request gets a comment when a case is over 25%
-slower, or when a commit's bytes written or syncs change at all, either way,
-since those are the same on every machine. Nothing fails the check. The write
-suite writes those storage numbers as JSON to the file `BENCH_STORAGE_JSON` names.
+The `Benchmarks` workflow runs the write and query suites with `just bench`.
+Pushes to `main` save the results as the baseline, and pull requests compare
+against the latest one, in the job summary. A pull request gets a comment when
+a case is over 25% slower, or when a commit's bytes written or syncs change at
+all, either way, since those are the same on every machine. Nothing fails the
+check. The write suite writes those storage numbers as JSON to the file
+`BENCH_STORAGE_JSON` names.
 
 ### Checking a change for regressions
 
