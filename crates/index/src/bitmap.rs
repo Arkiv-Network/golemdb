@@ -2,7 +2,7 @@ use std::ops::{BitAndAssign, BitOrAssign, SubAssign};
 
 use roaring::RoaringTreemap;
 
-use crate::{BitmapContainer, BitmapError};
+use crate::{BitmapContainer, BitmapError, Regions};
 
 /// A materialized query bitmap assembled from stored containers.
 ///
@@ -55,6 +55,17 @@ impl Bitmap {
         self.values
     }
 
+    /// The record IDs of `self` that lie in `regions`: what a read confined
+    /// to them returns.
+    pub fn within(&self, regions: &Regions) -> Self {
+        let mut values = RoaringTreemap::new();
+        for region in regions.as_slice() {
+            values.insert_range(region.record_id(0)..=region.record_id(u16::MAX));
+        }
+        values &= &self.values;
+        Self { values }
+    }
+
     /// The record IDs in ascending order past the first `n`, as
     /// `treemap().iter().skip(n)` yields them. The first one is found by its
     /// rank, so the skipped IDs are not walked one by one. Empty when the
@@ -102,6 +113,17 @@ mod tests {
         Bitmap {
             values: ids.into_iter().collect(),
         }
+    }
+
+    #[test]
+    fn within_keeps_the_ids_of_the_given_regions() {
+        let bitmap = bitmap_of([1, u16::MAX.into(), 1 << 16, 2 << 16, 1 << 40, u64::MAX]);
+        let regions = Regions::of(&bitmap_of([7, 2 << 16, u64::MAX]));
+        assert_eq!(
+            bitmap.within(&regions),
+            bitmap_of([1, u16::MAX.into(), 2 << 16, u64::MAX])
+        );
+        assert_eq!(bitmap.within(&Regions::default()), Bitmap::default());
     }
 
     #[test]

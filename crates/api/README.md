@@ -636,7 +636,9 @@ Queries support `Eq`, `In`, `Range`, `Prefix` and `Exists` filters, combined by 
 first child, removes its own child's matches from the `And`'s; a record whose cell is absent, or
 of another type, matches it. A `Not` anywhere else, standalone, removes its child's matches from
 every live record: it reads the index's `#live` term first, and when that is empty, skips its
-child. A filter nests at most 64 `And` / `Or` / `Not` levels, a
+child. Every child of an `And` after its first, and everything under it, reads only the index
+containers in the regions (blocks of 65 536 record IDs) the `And`'s running set occupies, skipping
+the rest of each posting list. A filter nests at most 64 `And` / `Or` / `Not` levels, a
 hardcoded cap until it is read from genesis; a deeper one returns `ApiError::LimitExceeded`. A query returns at most 100 records, the first matches in record ID
 order, a hardcoded page size until it is read from genesis; `total_matched` and `count` still
 count every match. `limit(n)` returns at most `n` records: a `limit` of 0 returns

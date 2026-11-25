@@ -202,7 +202,7 @@ mod tests {
         CellKind, CellName,
         marker::{Str, U32},
     };
-    use golemdb_index::{IndexError, IndexTerm, TermRange};
+    use golemdb_index::{IndexError, IndexTerm, Regions, TermRange};
 
     use super::*;
     use crate::{
@@ -237,6 +237,18 @@ mod tests {
         fn scan(
             &self,
             _: TermRange,
+        ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
+            Err::<std::iter::Empty<_>, _>(IndexError::Corruption("the index was read"))
+        }
+
+        fn postings_within(&self, _: &IndexTerm, _: &Regions) -> golemdb_index::Result<Bitmap> {
+            Err(IndexError::Corruption("the index was read"))
+        }
+
+        fn scan_within(
+            &self,
+            _: TermRange,
+            _: &Regions,
         ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
             Err::<std::iter::Empty<_>, _>(IndexError::Corruption("the index was read"))
         }

@@ -464,6 +464,11 @@ which is precisely the adversarial input invariant 6 warns of.
 
 ### 1.4 Canonical evaluation and cost shape
 
+> **Status (2026-11-25): B adopted for queries** and implemented: a further child of an `And`, and
+> everything under it, reads only the containers in the running set's regions. The charges are in
+> [metering D6.2](golemdb-metering.md#d62-query-reads) (proposed): loaded containers `read.container`,
+> containers passed over `read.term_step`.
+
 | | A — canonical work = full posting list per literal (every container of every term visited); region-pruning is an implementation optimisation whose saving goes to the operator | B — canonical work includes region-pruning: for the 2nd and later positives, and for negatives, only containers whose 48-bit region is present in the running intermediate are loaded |
 | --- | --- | --- |
 | Determinism | pure function of (state, filter) | pure function of (state, filter) — the intermediate is deterministic |

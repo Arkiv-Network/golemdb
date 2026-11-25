@@ -614,8 +614,8 @@ reference execution: the execution rules of the
 
 | Step | When | Weight |
 | --- | --- | --- |
-| Term stepped | `Range`, `Prefix`, `Exists`: per further index entry read in a scan | `read.term_step` |
-| Bitmap container loaded | per bitmap container of a term's posting list | `read.container` |
+| Term stepped | `Range`, `Prefix`, `Exists`: per further index entry read in a scan; in a confined read, per container passed over | `read.term_step` |
+| Bitmap container loaded | per bitmap container of a term's posting list; in a confined read, in the running set's regions only | `read.container` |
 | Set combination | per bitmap container processed by a union, intersection or difference | `read.set_container` |
 | Sort comparison | modeled, from the match count and the number of sort terms | `read.sort_compare` (deferred) |
 
@@ -665,6 +665,26 @@ reference execution: the execution rules of the
   positive child intersected, a `Not` child subtracted. As soon as the running set is empty, the remaining children are
   neither evaluated nor charged. An implementation must not reorder the children, for example by
   size, nor load them in advance.
+- **Further children read confined.** A further child of an `And`, positive or `Not`, and
+  everything under it, reads only the bitmap containers in the **regions** of the running set as
+  it stands before that child: the distinct upper 48-bit values of its record IDs, `C(running)` of
+  them. A container in any other region holds none of the running set's records, so it cannot
+  change the intersection or difference that follows: it is neither loaded nor charged, and the
+  result is the same. The regions narrow with the running set: each further child is confined to
+  the regions before it, and the further children of an `And` nested in it to that `And`'s own
+  running set. At the top of a filter, and in an `And`'s first child beyond the `And`'s own
+  confinement, nothing is confined.
+  - A **confined term read** positions at the term's first wanted region: one `read.term`, as an
+    unconfined lookup. Each of the term's entries it then reads is a container either in a wanted
+    region, loaded and charged one `read.container`, or in a region not wanted, passed over
+    unloaded and charged one `read.term_step`. After a container below the next wanted region, the
+    read repositions at that region, so it passes over at most one container per wanted region,
+    however many the term has. The entry past the term's last container ends the read, uncharged,
+    as for an unconfined read.
+  - A **confined scan** steps through its terms, charged as an unconfined scan (`read.term`, then
+    `read.term_step`s); each term's containers are then read confined, as above.
+  - A **standalone `Not`** under a further child reads the `#live` term confined the same way.
+  - Combinations are charged on the container counts of the confined sets they take.
 - **`Or`** evaluates every child, in the written order, with no early exit, and unions them.
 - **`Not`** after an `And`'s first child is subtracted from the running set, as above. A
   standalone `Not` first reads the set of all live records, the `#live` term
@@ -715,7 +735,10 @@ reference execution: the execution rules of the
 | difference: running set (1) minus child (1) | 2 `read.set_container` |
 
 Had the intersection left the running set empty, the last two rows would not happen: the `Not`
-child would be neither loaded nor charged.
+child would be neither loaded nor charged. The example also assumes every container of the price
+terms and of `flagged=true` lies in a region the running set occupies when they are read. One
+outside them would not be loaded: it would cost one `read.term_step` if the read passed over it,
+and nothing if a repositioning skipped it.
 
 **Implementation notes** (not normative). Loading a container today recomputes its hash and
 re-encodes it canonically to compare, on every read, and query sets are rebuilt as a
@@ -808,7 +831,9 @@ I(s₁…s_m)                = Σᵢ₌₂…ₘ (C(rᵢ₋₁) + C(sᵢ)) × re
                                                                       the running set and of each further set
 ```
 
-`C(s)` is the container count of a set (D6.2). In an `And`, `r₁ = s₁` and `rᵢ = rᵢ₋₁ ∩ sᵢ` is the
+`C(s)` is the container count of a set (D6.2). Under a further child of an `And`, every term read
+is confined (D6.2): `C(t)` counts the containers loaded, those in the running set's regions, and
+each container passed over adds one `read.term_step`. In an `And`, `r₁ = s₁` and `rᵢ = rᵢ₋₁ ∩ sᵢ` is the
 running set after the `i`-th child; a `Not` child subtracts instead, `rᵢ = rᵢ₋₁ − sᵢ`, and is charged
 the same. `m` is the first `i` whose running set `rᵢ` is empty, or `k` if none is: the children after
 it are neither evaluated nor charged. The page and `sort` follow D6.2.
@@ -1004,7 +1029,7 @@ F1: once every item is settled, the rules above carry its content and the list i
 | 26 | query | Union of fewer than two inputs | proposed | not charged |
 | 9 | all | Admission for reads | proposed | [read call frame](#the-read-call-frame): D2's three-part shape, own weights starting at D2's values; one entry per filter node, operand value, projected name and sort key; operands valid by construction |
 | 11 | query | Purge read: equality, record-ID order, empty projection, limit | decided shape | charges follow from items 5 and 8 |
-| 12 | query | `And` | decided | written order; early exit when the running set is empty, remaining children not charged; intersection and difference per container of both sets |
+| 12 | query | `And` | decided; confined-read charges proposed | written order; early exit when the running set is empty, remaining children not charged; intersection and difference per container of both sets; further children read only the running set's regions (D01 1.4-B), loaded containers `read.container`, passed-over ones `read.term_step` |
 | 13 | query | `Or`, `Not` | decided; standalone `Not` proposed | `Or` evaluates every child, one union charged per container of every input; a standalone `Not` reads the `#live` term like an equality leaf, then its child unless no record is live, one difference per container of both sets |
 | 14 | query | `count` | decided | admission, call base, leaves and combinations only; no materialization |
 | 27 | query | No early exit on the match set | proposed | every query builds its whole match set; `total_matched` free |

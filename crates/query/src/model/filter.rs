@@ -49,7 +49,10 @@ pub enum Filter {
     /// Every child matches: the intersection of the children's match sets,
     /// less the match set under each `Not` child. Children are evaluated in
     /// the written order, and once no record is left, the remaining children
-    /// are skipped and not read. At least one child.
+    /// are skipped and not read. Every child after the first, and everything
+    /// under it, reads only the index containers in the regions (blocks of
+    /// 65 536 record IDs) of the records left so far, so a selective first
+    /// child makes the rest cheaper. At least one child.
     And(Vec<Filter>),
     /// Some child matches: the union of the children's match sets. Every
     /// child is evaluated, in the written order. At least one child.

@@ -996,7 +996,10 @@ right, so a condition shared by several branches is written, and read, once.
 
 - **`And`:** children intersect in written order, carrying a running set; the node stops early
   when that set is empty, and its remaining children are not read. This is the caller's main
-  optimization lever. A `Not` child after the first subtracts from the running set.
+  optimization lever. A `Not` child after the first subtracts from the running set. Every further
+  child, and everything under it, reads only the index containers in the regions (blocks of
+  65 536 record IDs) the running set occupies, so a selective first child makes every later one
+  cheaper, not only an empty one; records created around the same time share regions.
 - **A standalone `Not`**, one with no running set (the whole filter, under an `Or` or another
   `Not`, or an `And`'s first child), subtracts its child's matches from every live record. It
   reads the set of live records first, from the index's `#live` term

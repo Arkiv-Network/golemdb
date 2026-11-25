@@ -8,8 +8,8 @@ use std::{
 
 use golemdb_cells::{CellNameRef, CellType, CellValue, Width};
 use golemdb_index::{
-    BitmapContainer, ContainerId, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexKey, IndexTerm,
-    PostingChange, TermRange, tables,
+    Bitmap, BitmapContainer, ContainerId, INDEX_TRIE_PATH_BYTES, Index, IndexError, IndexKey,
+    IndexTerm, PostingChange, Regions, TermRange, tables,
 };
 use golemdb_merkle::{HASH_BYTES, HashProvider, Keccak256Hasher, LeafRef, RootRef, Trie};
 use golemdb_storage::{MemoryStore, ReadTransaction, Store, WriteTransaction, scan_prefix};
@@ -454,6 +454,63 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
     // Excluded neighbours with no value between are still a key range: the
     // scan finds no term in it.
     assert!(u32_run(Bound::Excluded(5), Bound::Excluded(6)).is_empty());
+}
+
+#[test]
+fn confined_reads_hold_the_containers_of_the_given_regions() {
+    let (_dir, db) = fixture::db();
+    let index = Index::new(&HASH);
+    // Three terms, each in regions 0 to 7 and in one far region.
+    let ids = |value: u8| {
+        (0..8)
+            .map(move |region| record_id(region, u16::from(value) + 1))
+            .chain([record_id(1 << 30, 7)])
+    };
+    let mut tx = db.begin_write().unwrap();
+    let changes = (0..3).flat_map(|value| ids(value).map(move |id| add(&term(value), id)));
+    index.apply(&mut tx, 0, RootRef::Empty, changes).unwrap();
+    tx.commit().unwrap();
+    let read = db.begin_read().unwrap();
+    let regions_of = |regions: &[u64]| {
+        let containers = regions
+            .iter()
+            .map(|&region| BitmapContainer::from_values(ContainerId::new(region).unwrap(), [0]));
+        Regions::of(&Bitmap::from_containers(containers).unwrap())
+    };
+    for wanted in [
+        &[3][..],
+        &[0, 1, 2],
+        &[1, 4, 7, 1 << 30],
+        &[8, 9, 1 << 31],
+        &[],
+    ] {
+        let regions = regions_of(wanted);
+        for value in 0..4 {
+            assert_eq!(
+                index
+                    .postings_within(&read, &term(value), &regions)
+                    .unwrap(),
+                index
+                    .postings(&read, &term(value))
+                    .unwrap()
+                    .within(&regions),
+                "{wanted:?}, {value}"
+            );
+        }
+        let confined = index
+            .terms_within(&read, TermRange::all(), &regions)
+            .collect::<golemdb_index::Result<Vec<_>>>()
+            .unwrap();
+        let full = index
+            .terms(&read, TermRange::all())
+            .unwrap()
+            .map(|entry| entry.map(|(term, bitmap)| (term, bitmap.within(&regions))))
+            .collect::<golemdb_index::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(confined, full, "{wanted:?}");
+        // Every term is still stepped, with its containers in the regions.
+        assert_eq!(confined.len(), 3);
+    }
 }
 
 #[test]

@@ -1440,6 +1440,11 @@ motivated strongly enough to be worth its complexity:
   metered as a flat cost per container touched, with no need to account for how long the posting list
   behind it is. Cost then scales with how many containers a write touches rather than with how many
   records already match the term — a far easier quantity to price deterministically.
+- **Confined reads.** A query intersects or subtracts most posting lists with a running set
+  already in hand, and only the containers in that set's regions can change the result. Keyed by
+  `term ‖ hi48`, those containers are reached by a seek each and the rest are skipped, so a
+  selective first condition makes every later one cheap, however long its posting list
+  ([query proposal](query-proposal.md#execution-rules-normative), rule 3).
 
 Accordingly, the engine splits the bitmap into **16-bit Roaring containers**, one `Index` row each,
 keyed by the term and the container's region, and commits each container as a leaf of `IndexTrie`

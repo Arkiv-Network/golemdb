@@ -208,7 +208,12 @@ The written order of the tree is the execution order. Cost and stopping point ar
 3. **`And`:** the running set starts with the first child's match set, whatever the child (a
    `Not` first is standalone, rule 5); each further positive child intersects it, each further
    `Not` child subtracts from it. When the running set becomes empty, the
-   remaining children are skipped and not charged.
+   remaining children are skipped and not charged. Each further child, and everything under it,
+   reads only the index containers in the **regions** of the running set before it, the blocks of
+   65 536 record IDs it occupies (D01 1.4-B): a container in any other region cannot change the
+   result, so it is neither loaded nor charged. The regions only narrow as the `And` proceeds, and a
+   nested `And` narrows them further for its own further children
+   ([metering D6.2](golemdb-metering.md#d62-query-reads)).
 4. **`Or`:** every child is evaluated in order and unioned; no early exit.
 5. **`Not`** needs a set to subtract from: inside an `And`, after its first child, the running
    set. A standalone `Not`, anywhere else, subtracts from the set of all live records, the

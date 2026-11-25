@@ -6,7 +6,7 @@
 use std::{collections::BTreeMap, ops::RangeBounds};
 
 use golemdb_cells::{CellKind, CellName, CellNameRef, CellValue};
-use golemdb_index::{Bitmap, BitmapContainer, ContainerId, IndexTerm, TermRange};
+use golemdb_index::{Bitmap, BitmapContainer, ContainerId, IndexTerm, Regions, TermRange};
 
 use crate::{CellSource, PostingSource};
 
@@ -58,6 +58,24 @@ impl PostingSource for FakeSource {
         range: TermRange,
     ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
         Ok(self.run(range).map(|(_, postings)| Ok(postings.clone())))
+    }
+
+    fn postings_within(
+        &self,
+        term: &IndexTerm,
+        regions: &Regions,
+    ) -> golemdb_index::Result<Bitmap> {
+        Ok(self.postings(term)?.within(regions))
+    }
+
+    fn scan_within(
+        &self,
+        range: TermRange,
+        regions: &Regions,
+    ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
+        Ok(self
+            .run(range)
+            .map(move |(_, postings)| Ok(postings.within(regions))))
     }
 }
 

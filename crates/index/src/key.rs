@@ -74,7 +74,7 @@ pub(crate) fn bounds(
 }
 
 /// The lower bound just past every key that starts with `term`.
-fn after(term: &[u8]) -> Bound<Vec<u8>> {
+pub(crate) fn after(term: &[u8]) -> Bound<Vec<u8>> {
     match past(term.to_vec()) {
         Bound::Excluded(next) => Bound::Included(next),
         // Only an all-0xff prefix has no key after it, and every term
