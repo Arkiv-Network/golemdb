@@ -347,16 +347,17 @@ Failures are `CorruptState`. This is startup validation, not an audit of every u
 
 ### Records
 
-A record is its key, zero or more user cells, and two cells the database maintains:
+A record is its key, zero or more user cells, and three cells the database maintains:
 
 | Cell | Written by | Content |
 | --- | --- | --- |
 | user cells | the caller, through `create` and `patch` | typed values |
 | `#key` | the database | the record key, `bytes32` field |
 | `#meta` | the database | four counts over the user cells ([`#meta`](#meta)) |
+| `#live` | the database | `true`, a `bool` attribute: its one index term lists every live record |
 | binding in `#recordKeys` | the database | record key → record ID, `u64` field |
 
-So `create` writes n + 3 cells and `delete` removes n + 3. **Empty records are legal:** a
+So `create` writes n + 4 cells and `delete` removes n + 4. **Empty records are legal:** a
 create may name no cells and a patch may remove the last one. Only `delete` removes a record.
 
 Records are addressed internally by a dense `u64` ID, allocated from `#nextRecordID` and never
@@ -586,7 +587,7 @@ is written:
    2. key already bound → `AlreadyExists` in caller-assigned mode; corrupt state in generated
       mode.
 
-On success it writes the user cells, `#key`, `#meta`, the binding and the advanced allocator
+On success it writes the user cells, `#key`, `#meta`, `#live`, the binding and the advanced allocator
 as one atomic branch operation, and returns the key.
 
 ### `get`
@@ -607,7 +608,7 @@ pub enum ReadTarget { Head, Branch(BranchId), Commit(CommitId) }
 Order of checks: the target first, at no cost (an invalid branch handle → `HandleInvalid`; an
 unavailable commit → `CommitUnavailable`); then the binding (`NotFound`); then the cells.
 
-A full read returns every cell, `#key` and `#meta` included. With `.only(names)`, missing
+A full read returns every cell, `#key`, `#meta` and `#live` included. With `.only(names)`, missing
 cells are omitted, and an empty list returns no cells but still checks that the record exists.
 A missing record is `NotFound`. For committed reads, the binding and `#key` must agree, or the
 read reports corrupt state.
@@ -646,7 +647,7 @@ operation.
 
 Order of checks: handle → `HandleInvalid` / `Sealed`; reserved key → `Reserved`; key not bound
 → `NotFound`.
-It then removes every live cell of the record, `#key` and `#meta` included, and the binding.
+It then removes every live cell of the record, `#key`, `#meta` and `#live` included, and the binding.
 The allocator does not move back; re-creating the key gives a new ID.
 
 ---

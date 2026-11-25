@@ -309,9 +309,10 @@ fn work_in_progress_is_isolated_and_projection_preserves_identity() {
         .get(ReadTarget::Branch(a), KEY, None, Budget::Unlimited)
         .result
         .unwrap();
-    assert_eq!(full.cells.len(), 3);
+    assert_eq!(full.cells.len(), 4);
     assert_eq!(full.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
     assert!(!full.cells[b"#key".as_slice()].is_indexable());
+    assert_eq!(full.cells[b"#live".as_slice()], CellValue::live());
     for target in [
         ReadTarget::Branch(b),
         ReadTarget::Commit(golemdb_branch::CommitId::new(0)),
@@ -579,7 +580,7 @@ fn patches_update_cells_and_no_ops_add_no_journal_entries() {
         .get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited)
         .result
         .unwrap();
-    assert_eq!(record.cells.len(), 3);
+    assert_eq!(record.cells.len(), 4);
     assert_eq!(record.cells[b"replacement".as_slice()].as_u64(), Some(7));
 }
 
@@ -849,8 +850,9 @@ fn committed_cell_reader_keeps_one_snapshot_when_head_advances() {
         .unwrap()
         .collect::<golemdb_cells::Result<Vec<_>>>()
         .unwrap();
-    assert_eq!(stored.len(), 3);
-    assert_eq!(stored[2].1, text("before", true));
+    // #key, #live, #meta, then the user cell.
+    assert_eq!(stored.len(), 4);
+    assert_eq!(stored[3].1, text("before", true));
     assert_eq!(
         records
             .get(
@@ -1023,6 +1025,59 @@ fn metadata_has_the_specified_encoding_and_equal_size_updates_do_not_rewrite_it(
             .meta(),
         Some(expected)
     );
+}
+
+#[test]
+fn full_reads_and_deletes_require_the_live_marker() {
+    for bad in [
+        None,
+        Some(CellValue::from_bool(true)),
+        Some(
+            CellValue::from_bool(false)
+                .with_kind(golemdb_cells::CellKind::Attribute)
+                .unwrap(),
+        ),
+    ] {
+        let (_, branches, records) = setup();
+        let b = branches.begin().unwrap();
+        records
+            .create(b, KEY, create_entries(values("Alice")), Budget::Unlimited)
+            .result
+            .unwrap();
+        branches
+            .write(b, |writer| {
+                match bad.clone() {
+                    Some(value) => writer.put(CellKey::new(64, reserved::LIVE), value),
+                    None => writer.delete(CellKey::new(64, reserved::LIVE)),
+                }
+                Ok::<_, RecordError>(())
+            })
+            .unwrap();
+        let before = snapshot(&branches, b);
+        assert!(matches!(
+            records
+                .get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited)
+                .result,
+            Err(RecordError::CorruptState(_))
+        ));
+        assert!(matches!(
+            records.delete(b, KEY, Budget::Unlimited).result,
+            Err(RecordError::CorruptState(_))
+        ));
+        assert_eq!(snapshot(&branches, b), before);
+        // A projection returns the stored cell as it is.
+        let projection = [name(b"#live")];
+        let record = records
+            .get(
+                ReadTarget::Branch(b),
+                KEY,
+                Some(projection.as_slice()),
+                Budget::Unlimited,
+            )
+            .result
+            .unwrap();
+        assert_eq!(record.cells.get(b"#live".as_slice()), bad.as_ref());
+    }
 }
 
 #[test]

@@ -127,6 +127,16 @@ fn allocated<S: Store>(
         .as_u64()
         .unwrap()
 }
+/// The record IDs the index lists as live: the postings of `#live = true`.
+fn live_ids(tx: &impl golemdb_storage::ReadTransaction) -> Vec<u64> {
+    let term = IndexTerm::from_cell_name(reserved::LIVE, CellValue::live().as_view()).unwrap();
+    Index::new(&Keccak256Hasher)
+        .bitmap(tx, &term)
+        .unwrap()
+        .map(|bitmap| bitmap.treemap().iter().collect())
+        .unwrap_or_default()
+}
+
 fn id<S: Store>(
     branches: &Branches<S, Keccak256Hasher>,
     b: golemdb_branch::BranchId,
@@ -234,6 +244,7 @@ fn lifecycle(db: impl Store + Clone) {
             .collect::<Vec<_>>(),
         vec![64]
     );
+    assert_eq!(live_ids(&db.begin_read().unwrap()), [64]);
     // Changing kind/type removes the old posting. Another indexed cell is
     // deleted during recreation; the new incarnation must use only its own ID.
     let b = branches.begin().unwrap();
@@ -268,6 +279,8 @@ fn lifecycle(db: impl Store + Clone) {
     assert_eq!(id(&branches, b, KEY), 65);
     branches.commit(b).unwrap();
     let tx = db.begin_read().unwrap();
+    // The deleted incarnation leaves the live set; the new one joins it.
+    assert_eq!(live_ids(&tx), [65]);
     assert_eq!(
         Index::new(&Keccak256Hasher)
             .bitmap(&tx, &term)
@@ -288,7 +301,7 @@ fn lifecycle(db: impl Store + Clone) {
             .is_none()
     );
     drop(tx);
-    let reopened = Branches::new(db, Keccak256Hasher, None, None).unwrap();
+    let reopened = Branches::new(db.clone(), Keccak256Hasher, None, None).unwrap();
     let records = Records::new(reopened.clone(), zero_pricing());
     let b = reopened.begin().unwrap();
     assert_eq!(allocated(&reopened, b), 66);
@@ -305,7 +318,7 @@ fn lifecycle(db: impl Store + Clone) {
             .unwrap()
             .cells
             .len(),
-        3
+        4
     );
     assert!(
         reopened
@@ -317,6 +330,7 @@ fn lifecycle(db: impl Store + Clone) {
     );
     records.delete(b, KEY, Budget::Unlimited).result.unwrap();
     reopened.commit(b).unwrap();
+    assert!(live_ids(&db.begin_read().unwrap()).is_empty());
     assert!(matches!(
         records
             .get(

@@ -16,7 +16,8 @@ use golemdb_cells::{CellName, CellType, CellValue};
 use golemdb_index::{Bitmap, IndexTerm};
 
 use crate::{
-    CellSource, Direction, PostingSource, QueryError, Result, SortKey, plan::invalid_argument,
+    CellSource, Direction, PostingSource, QueryError, Result, SortKey,
+    plan::{invalid_argument, user_field},
 };
 
 /// How a match set is put in sort order.
@@ -100,7 +101,7 @@ pub struct SortLevel {
 
 impl SortLevel {
     fn admit(key: &SortKey) -> Result<Self> {
-        IndexTerm::check_cell_name(key.field().as_view())
+        IndexTerm::check_cell_name(user_field(key.field())?)
             .map_err(|source| invalid_argument(key.field(), source))?;
         Ok(Self {
             field: key.field().clone(),
@@ -227,7 +228,16 @@ mod tests {
 
     #[test]
     fn a_key_with_a_bad_name_is_an_invalid_argument() {
-        for name in [&b"1bad"[..], b"a b", b"", &[0xff]] {
+        // Engine names are the engine's, even the indexed `#live`.
+        for name in [
+            &b"1bad"[..],
+            b"a b",
+            b"",
+            &[0xff],
+            b"#live",
+            b"#key",
+            b"@admin",
+        ] {
             // As the only key, and after a good one.
             for keys in [
                 vec![SortKey::asc(name, U32)],

@@ -126,21 +126,23 @@ A record is implemented as a flat list of cells. Each cell is a key-value pair:
 - **Key:** the record's ID prefix (`u64`, 8 bytes) followed by the cell name.
 - **Value:** a type tag (1 byte) followed by the encoded value.
 
-Every user record has two system cells:
+Every user record has three system cells:
 
 - `#key`: maps the record to its record key.
 - `#meta`: four counters describing the record's user cells ([below](#the-meta-cell)).
+- `#live`: the bool attribute `true`. Its one index term lists every live user record
+  ([design §3](golemdb-design.md#record-shape-the-live-cell)).
 
-Both have fixed-length encodings. Empty user records are legal: `create` may supply
+All three have fixed-length encodings. Empty user records are legal: `create` may supply
 zero user-defined cells, and `patch` may remove the last one without deleting the
-record. Such a record still has `#key` and `#meta`, with all four user counts in `#meta`
+record. Such a record still has `#key`, `#meta` and `#live`, with all four user counts in `#meta`
 equal to zero, plus its binding in `#recordKeys`. `get` succeeds for the existing record;
 only `delete` removes it and its binding from live state.
 
-Empty records are not free: creating one pays admission, record-base and the three
-system-cell creates (binding, `#key`, `#meta`), with no user-cell or index operations.
-Deleting an empty record pays the corresponding admission, record-base and system-cell
-deletion costs. A host may impose stricter content requirements without GolemDB doing so.
+Empty records are not free: creating one pays admission, record-base, the four
+system-cell creates (binding, `#key`, `#meta`, `#live`) and the index join of `#live`,
+with no user-cell operations. Deleting an empty record pays the corresponding admission,
+record-base and system-cell deletion costs, and the index leave of `#live`. A host may impose stricter content requirements without GolemDB doing so.
 
 The reverse mapping, record key → record ID, lives in the system record `#recordKeys`: one binding cell per live record, keyed by the 32-byte record key, holding the record ID.
 
@@ -306,11 +308,11 @@ covered by their own weights; including either would charge it twice.
 
 | Record operation | System cell operations |
 | --- | --- |
-| `create` | create binding, create `#key`, create `#meta`; no reads, the record is new and the binding read is in the record base |
+| `create` | create binding, create `#key`, create `#meta`, create `#live` and join its term; no cell reads, the record is new and the binding read is in the record base |
 | `patch` | read `#meta` (`read.cell`), even for empty patches; update it only when a count changes |
-| `delete` | delete binding (read in the record base), read and delete `#key`, read and delete `#meta` |
+| `delete` | delete binding (read in the record base), read and delete `#key`, read and delete `#meta`, read and delete `#live` and leave its term |
 
-System cells have fixed-length encodings, so their byte terms are constants. They are not included in `#meta`'s counts or the receipt's user-cell counts (D4).
+System cells have fixed-length encodings, so their byte terms are constants. They are not included in `#meta`'s counts or the receipt's user-cell counts (D4). The `#live` term is joined and left like a user attribute's: a `read.term`, then a `write.index.join` (with `write.index_term_create` for the first live record) or a `write.index.leave`.
 
 **Cell operations.** On `create`, every user cell is a cell create, without a read: the record is new. On `patch` and `delete`, a read of each touched user cell decides the operation:
 
@@ -440,7 +442,8 @@ By D2, deleting a record costs:
 
 ```
 delete cost = admission cost + read.key + write.record.delete
-            + system cell deletes                        (binding, #key, #meta; fixed size)
+            + system cell deletes                        (binding, #key, #meta, #live; fixed size)
+            + the #live leave (read.term + write.index.leave + index_trie_depth × write.index_trie_update)
             + cells         × (read.cell + write.cell.delete + cell_trie_depth  × write.cell_trie_update)
             + indexed cells × (read.term + write.index.leave + index_trie_depth × write.index_trie_update)
 ```
@@ -1283,10 +1286,11 @@ Admission weights and exact reference counts are not assigned numerical values h
 | binding in `#recordKeys` | system | (8 + 32) + (1 + 8) = 49 | – |
 | `#key` | system | (8 + 4) + (1 + 32) = 45 | – |
 | `#meta` (four `u64` counts) | system | (8 + 5) + (1 + 32) = 46 | – |
+| `#live` (`bool` attribute) | system | (8 + 5) + (1 + 1) = 15 | 5 + 2 + 1 = 8 |
 
 ### Create
 
-The key has no binding. The term `owner` = 0x71C7… is new; the term `status` = "active" already has other members.
+The key has no binding. The term `owner` = 0x71C7… is new; the term `status` = "active" and the `#live` term already have other members.
 
 | Operation | Terms | Cost |
 | --- | --- | --- |
@@ -1294,16 +1298,18 @@ The key has no binding. The term `owner` = 0x71C7… is new; the term `status` =
 | Create binding | 350 + 600 + 49 × 2 | 1,048 |
 | Create `#key` | 350 + 600 + 45 × 2 | 1,040 |
 | Create `#meta` | 350 + 600 + 46 × 2 | 1,042 |
+| Create `#live` | 350 + 600 + 15 × 2 | 980 |
 | Create `owner` | 350 + 600 + 34 × 2 | 1,018 |
 | Create `status` | 350 + 600 + 21 × 2 | 992 |
 | Create `payload` | 350 + 600 + 272 × 2 | 1,494 |
 | `owner` joins a new term | 100 + 400 + 650 + 600 + 27 × 2 | 1,804 |
 | `status` joins "active" | 100 + 650 + 600 + 14 × 2 | 1,378 |
-| **Subtotal excluding admission** | | **10,116** |
+| `#live` joins its term | 100 + 650 + 600 + 8 × 2 | 1,366 |
+| **Subtotal excluding admission** | | **12,462** |
 
-Full cost: `A_create + 10,116`.
+Full cost: `A_create + 12,462`.
 
-No cell reads: the record is new. Receipt: 3 cells created, 2 index joins, 1 term created, 327 cell bytes and 41 index bytes written. `#meta` afterwards: 3 cells, 327 cell bytes, 2 indexed cells, 41 index bytes.
+No cell reads: the record is new. The receipt reports user cells only (D4): 3 cells created, 2 index joins, 1 term created, 327 cell bytes and 41 index bytes written. `#meta` afterwards: 3 cells, 327 cell bytes, 2 indexed cells, 41 index bytes.
 
 ### Patch
 
@@ -1351,22 +1357,24 @@ the call instead stops before that step with `OutOfBudget` and no `required` tot
 | Delete binding | 350 + 600 (read in the record base) | 950 |
 | Read and delete `#key` | 100 + 350 + 600 | 1,050 |
 | Read and delete `#meta` | 100 + 350 + 600 | 1,050 |
+| Read and delete `#live` | 100 + 350 + 600 | 1,050 |
 | Read and delete `owner`, `status`, `payload` | 3 × (100 + 350 + 600) | 3,150 |
 | `owner` leaves; term emptied and removed | 100 + 650 + 600 (removal pre-paid) | 1,350 |
 | `status` leaves "closed" | 100 + 650 + 600 | 1,350 |
-| **Subtotal excluding admission** | | **9,150** |
+| `#live` leaves its term | 100 + 650 + 600 | 1,350 |
+| **Subtotal excluding admission** | | **11,550** |
 
-Full cost: `A_delete + 9,150`.
+Full cost: `A_delete + 11,550`.
 
 Receipt: 3 cells deleted, 2 index leaves; 171 cell bytes and 41 index bytes deleted, reported only.
 
 ### What the Example Shows
 
-- **D5 holds.** From `#meta` (3 cells, 2 indexed cells) and the fixed admission cost of a valid delete, D5 gives `A_delete + 250 + 3,050 + 3 × 1,050 + 2 × 1,350 = A_delete + 9,150`. Byte counts are not needed.
-- **Structure dominates the non-admission subtotal.** The payload's write-byte term contributes 544 of the create subtotal's 10,116 (about 5%). Any admission byte processing is charged separately; a host that prices storage over time adds that on top.
-- **Deleting and creating have similar non-admission costs** (9,150 against 10,116): every row, trie path and index entry has to be touched either way. Their full costs also include their respective admission charges.
+- **D5 holds.** From `#meta` (3 cells, 2 indexed cells) and the fixed admission cost of a valid delete, D5 gives `A_delete + 250 + 4,100 + 1,350 + 3 × 1,050 + 2 × 1,350 = A_delete + 11,550`: base, system cells, the `#live` leave, user cells, user leaves. Byte counts are not needed.
+- **Structure dominates the non-admission subtotal.** The payload's write-byte term contributes 544 of the create subtotal's 12,462 (about 4%). Any admission byte processing is charged separately; a host that prices storage over time adds that on top.
+- **Deleting and creating have similar non-admission costs** (11,550 against 12,462): every row, trie path and index entry has to be touched either way. Their full costs also include their respective admission charges.
 - **An index value change dominates a small patch's non-admission cell work.** Changing `status` costs 3,820 excluding admission and record-level overhead, of which 2,728 is the index leave and join: two terms, two trie paths.
-- **A record's fixed non-admission cost** is 3,430 on `create` (base plus three system cells) and 3,300 on `delete`, before any user cell. Admission is added separately.
+- **A record's fixed non-admission cost** is 5,776 on `create` (base, four system cells and the `#live` join) and 5,700 on `delete`, before any user cell. Admission is added separately.
 
 ## Worked Example: Reads
 

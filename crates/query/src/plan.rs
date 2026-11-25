@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use golemdb_cells::{CellName, CellValue};
+use golemdb_cells::{CellName, CellNameRef, CellValue};
 use golemdb_index::{IndexTerm, RangeError, TermError, TermRange};
 
 use crate::{Bounds, ExistsType, Filter, InValues, QueryError, Result};
@@ -82,11 +82,11 @@ impl Admission {
             Filter::Range { field, bounds } => {
                 Ok(range(field, bounds)?.map_or(Plan::Empty, Plan::Scan))
             }
-            Filter::Prefix { field, prefix } => TermRange::with_prefix(field.as_view(), prefix)
+            Filter::Prefix { field, prefix } => TermRange::with_prefix(user_field(field)?, prefix)
                 .map(Plan::Scan)
                 .map_err(|source| invalid_argument(field, source)),
             Filter::Exists { field, ty } => {
-                TermRange::of_name(field.as_view(), ty.map(ExistsType::cell_type))
+                TermRange::of_name(user_field(field)?, ty.map(ExistsType::cell_type))
                     .map(Plan::Scan)
                     .map_err(|source| invalid_argument(field, source))
             }
@@ -170,7 +170,7 @@ impl Admission {
 /// here, and a type mismatch is a broken invariant, not the caller's error.
 fn range(field: &CellName, bounds: &Bounds) -> Result<Option<TermRange>> {
     TermRange::between(
-        field.as_view(),
+        user_field(field)?,
         bounds.cell_type(),
         bounds.lower().map(CellValue::as_view),
         bounds.upper().map(CellValue::as_view),
@@ -187,7 +187,7 @@ fn range(field: &CellName, bounds: &Bounds) -> Result<Option<TermRange>> {
 /// so only the name can fail.
 fn terms(field: &CellName, values: &InValues) -> Result<Option<BTreeSet<IndexTerm>>> {
     match values.as_slice() {
-        [] => IndexTerm::check_cell_name(field.as_view())
+        [] => IndexTerm::check_cell_name(user_field(field)?)
             .map(|()| None)
             .map_err(|source| invalid_argument(field, source)),
         values => values
@@ -201,8 +201,18 @@ fn terms(field: &CellName, values: &InValues) -> Result<Option<BTreeSet<IndexTer
 /// The term `field = value` is indexed under, built as seal builds it, so
 /// queries and writes share one encoding.
 fn term(field: &CellName, value: &CellValue) -> Result<IndexTerm> {
-    IndexTerm::from_cell_name(field.as_view(), value.as_view())
+    IndexTerm::from_cell_name(user_field(field)?, value.as_view())
         .map_err(|source| invalid_argument(field, source))
+}
+
+/// `field` as a query may name it: a user name. An engine name (`#…`,
+/// `@…`) is the engine's, the indexed `#live` included, and fails as a name
+/// outside the grammar does; the index checks the rest of the grammar.
+pub(crate) fn user_field(field: &CellName) -> Result<CellNameRef<'_>> {
+    match field.as_bytes() {
+        [b'#' | b'@', ..] => Err(invalid_argument(field, TermError::InvalidName)),
+        _ => Ok(field.as_view()),
+    }
 }
 
 pub(crate) fn invalid_argument(field: &CellName, source: TermError) -> QueryError {
@@ -235,6 +245,51 @@ mod tests {
         let value = CellValue::from_u32(7);
         let expected = IndexTerm::from_str_name("price", value.as_view()).expect("valid term");
         assert_eq!(term(&field, &value).expect("valid leaf"), expected);
+    }
+
+    #[test]
+    fn a_leaf_cannot_name_an_engine_cell_not_even_the_indexed_live_marker() {
+        use golemdb_cells::marker::Bool;
+        for name in [&b"#live"[..], b"#key", b"@admin"] {
+            let field: CellName = CellNameRef::raw(name).into();
+            for filter in [
+                Filter::Eq {
+                    field: field.clone(),
+                    value: EqValue::of(Bool, true),
+                },
+                Filter::In {
+                    field: field.clone(),
+                    values: InValues::of(Bool, [true]),
+                },
+                Filter::In {
+                    field: field.clone(),
+                    values: InValues::of(Bool, []),
+                },
+                Filter::Range {
+                    field: field.clone(),
+                    bounds: Bounds::new(I64, Included(1), Unbounded),
+                },
+                Filter::Prefix {
+                    field: field.clone(),
+                    prefix: "a".into(),
+                },
+                Filter::Exists {
+                    field: field.clone(),
+                    ty: None,
+                },
+            ] {
+                assert!(
+                    matches!(
+                        admit(&filter),
+                        Err(QueryError::InvalidArgument {
+                            source: TermError::InvalidName,
+                            ..
+                        })
+                    ),
+                    "{filter:?}"
+                );
+            }
+        }
     }
 
     #[test]

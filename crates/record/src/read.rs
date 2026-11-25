@@ -19,6 +19,11 @@ const META_CELL_BYTES: u64 =
     (size_of::<u64>() + reserved::META.as_bytes().len() + size_of::<u8>() + size_of::<[u64; 4]>())
         as u64;
 
+/// D4 size: record ID + name + value tag + bool = 8 + 5 + 1 + 1 = 15.
+const LIVE_CELL_BYTES: u64 =
+    (size_of::<u64>() + reserved::LIVE.as_bytes().len() + size_of::<u8>() + size_of::<bool>())
+        as u64;
+
 pub(crate) fn get<R: ReadTransaction>(
     reader: &CellRead<'_, R>,
     key: RecordKey,
@@ -70,9 +75,12 @@ pub(crate) fn get<R: ReadTransaction>(
                 .get(&CellKey::new(id, reserved::META))?
                 .ok_or(RecordError::CorruptState("user record has no #meta"))?;
             let meta = meta::required(Some(&metadata))?;
+            meter.charge(ReadStep::CellRead)?;
+            let live = reader.get(&state::live_key(id))?;
+            state::check_live(live.as_ref())?;
             let returned_bytes = meta
                 .cell_bytes
-                .checked_add(KEY_CELL_BYTES + META_CELL_BYTES)
+                .checked_add(KEY_CELL_BYTES + META_CELL_BYTES + LIVE_CELL_BYTES)
                 .ok_or(RecordError::AccountingOverflow)?;
             meter.charge(ReadStep::FullRecordScan {
                 cells: meta.cells,
@@ -98,6 +106,7 @@ pub(crate) fn get<R: ReadTransaction>(
             }
             values.insert(reserved::KEY.into(), identity);
             values.insert(reserved::META.into(), metadata);
+            values.insert(reserved::LIVE.into(), CellValue::live());
         }
         None => {
             reader.visit_record(

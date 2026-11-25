@@ -200,11 +200,12 @@ fn field_filtering_names_and_unsupported_types() {
         "erc20:balance",
         "created-at",
         "snake_case",
+        "#live",
     ] {
         assert!(IndexTerm::from_cell(name, cell).unwrap().is_some());
     }
     for name in [
-        "", "$", "$$a", "a$b", "0name", "#key", "@admin", "a\0b", "a b", "é",
+        "", "$", "$$a", "a$b", "0name", "#key", "@admin", "#live.x", "a\0b", "a b", "é",
     ] {
         assert!(matches!(
             IndexTerm::from_cell(name, cell),

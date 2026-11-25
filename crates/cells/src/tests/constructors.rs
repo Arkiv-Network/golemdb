@@ -148,6 +148,18 @@ fn kind_conversion_only_changes_metadata_and_rejects_unindexable_bytes() {
 }
 
 #[test]
+fn the_live_marker_is_the_bool_true_as_an_attribute() {
+    let live = CellValue::live();
+    assert_eq!(
+        live,
+        CellValue::from_bool(true)
+            .with_kind(CellKind::Attribute)
+            .unwrap()
+    );
+    assert_eq!(CellValue::parse(live.clone().into_bytes()), Ok(live));
+}
+
+#[test]
 fn float_construction_normalizes_zero_and_rejects_nan_but_parsing_stays_strict() {
     assert_eq!(
         CellValue::from_f32(-0.0).unwrap(),

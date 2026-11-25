@@ -80,6 +80,7 @@ The metering layer itself (property 7 in §1) is out of scope here: it is specif
   - [The Cell Key](#the-cell-key)
   - [Record Identity: the `#key` Cell](#record-identity-the-key-cell)
   - [Record Shape: the `#meta` Cell](#record-shape-the-meta-cell)
+  - [Record Shape: the `#live` Cell](#record-shape-the-live-cell)
   - [Cell Names](#cell-names)
   - [Cell Kinds and Types](#cell-kinds-and-types)
   - [Benefits and Trade-offs of the Cell Decomposition](#benefits-and-trade-offs-of-the-cell-decomposition)
@@ -690,6 +691,34 @@ for is in the [metering record model](golemdb-metering.md#the-meta-cell).
 proof of that subtree at commit _c_ shows that a whole-record read at _c_ withholds no cell; `#meta`
 is not needed for it. Projections use per-name non-inclusion proofs, and index queries are a
 separate question (D06).
+
+### Record Shape: the `#live` Cell
+
+Every user record carries a third reserved cell, a liveness marker. It is the one engine cell that
+is an `attribute`, so the index holds the set of live user records:
+
+```
+Cell:  recordID ‖ "#live"                          →   typeTag(attribute, bool) ‖ 0x01
+Term:  "#live" ‖ 0x00 ‖ typeTag(attribute, bool) ‖ 0x01   →   every live user record's ID
+```
+
+A negation needs a set to subtract from. Inside an `And` the running set serves; a standalone
+`Not`, or one under an `Or`, needs every live record (product decision P08). Without this term,
+that set is either the allocated ID range, which still holds deleted records, or a scan of every
+record. With it, the set is one term's containers: one read per 65 536 live IDs, never one per
+record.
+
+- **User records only.** System and admin records carry no `#live`, as they carry no `#meta`.
+- **Engine-maintained.** `create` writes it, `delete` removes it with the record, and seal
+  derives its postings from the cell diff as for any attribute. The name starts with `#`, so no user
+  cell can take it and the data plane cannot write it. A filter or sort key cannot name it either:
+  the engine reads the term itself.
+- **The only indexed engine name.** An index term's name is a user name or `#live`. Any other
+  engine cell is a `field`, and an indexed one is rejected at seal as a broken invariant.
+- **Charged as a system cell**, together with its term's join on `create` and leave on `delete`
+  ([metering](golemdb-metering.md#record-model)). It is not counted in `#meta`.
+- **Read with `get`**: a full read includes `#live`, so a whole-record read still withholds no
+  cell. A missing or different `#live` on a live record is corrupt state.
 
 ### Cell Names
 
@@ -1327,7 +1356,9 @@ To support filtering queries on cell values (`WHERE Price = 100`, `WHERE Price >
 Price <= 500`), the engine maintains an index over those values in the `Index` table. Each row holds
 one bounded Roaring container of the records matching an _index term_, so a term's posting list is
 the run of rows the term prefixes; `IndexTrie` commits to every container
-([§6](#6-merkleizing-the-posting-list)).
+([§6](#6-merkleizing-the-posting-list)). Besides user attributes, the index holds one engine term:
+`#live = true`, which lists every live user record
+([§3](#record-shape-the-live-cell)).
 
 > **Notation.** `WHERE …`, `SELECT …`, `FIND RECORDS … AT COMMIT …` and similar fragments throughout
 > this document are illustrative pseudo-syntax for a predicate, projection or historical read. Golem

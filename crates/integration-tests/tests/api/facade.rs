@@ -98,8 +98,9 @@ fn crud_pending_reads_projections_and_recreation() {
         }
         let pending = get(api.as_ref(), ReadTarget::Branch(branch));
         assert_eq!(pending.key, KEY);
-        assert_eq!(pending.cells.len(), 4);
+        assert_eq!(pending.cells.len(), 5);
         assert_eq!(pending.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
+        assert_eq!(pending.cells[b"#live".as_slice()], CellValue::live());
         assert!(pending.cells[b"price".as_slice()].is_indexable());
         let selected = api
             .get(
@@ -516,7 +517,8 @@ fn empty_records_keep_identity_through_patch_rollback_commit_and_delete() {
         .unwrap();
         let empty = get(&db, ReadTarget::Branch(branch));
         assert_eq!(empty.key, KEY);
-        assert_eq!(empty.cells.len(), 2);
+        // #key, #live and #meta.
+        assert_eq!(empty.cells.len(), 3);
         assert_eq!(empty.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
         assert_eq!(allocator(&db, ReadTarget::Branch(branch)), 65);
         assert!(matches!(
@@ -545,6 +547,9 @@ fn empty_records_keep_identity_through_patch_rollback_commit_and_delete() {
             .into_result(),
             Err(ApiError::NotFound)
         ));
+        // The empty record's index holds only the live set.
+        let created = db.seal(branch).unwrap();
+        assert_ne!(created.index_root, db.info().index_root);
         db.commit(branch).unwrap();
         assert_eq!(get(&db, ReadTarget::Head), empty);
 
@@ -592,7 +597,8 @@ fn empty_records_keep_identity_through_patch_rollback_commit_and_delete() {
         .into_result()
         .unwrap();
         let seal = db.seal(branch).unwrap();
-        assert_eq!(seal.index_root, db.info().index_root); // Removing the last attribute empties the index.
+        // Removing the last attribute leaves the index as it was with the empty record.
+        assert_eq!(seal.index_root, created.index_root);
         assert_eq!(get(&db, ReadTarget::Branch(branch)), empty);
         db.commit(branch).unwrap();
         assert_eq!(get(&db, ReadTarget::Head), empty);
@@ -679,7 +685,7 @@ fn mdbx_reopens_empty_records_created_directly_or_by_removing_all_cells() {
                 )
                 .into_result()
                 .unwrap();
-            assert_eq!(record.cells.len(), 2);
+            assert_eq!(record.cells.len(), 3);
             assert_eq!(record.cells[b"#key".as_slice()].as_bytes32(), Some(key.0));
         }
         assert_eq!(allocator(&db, ReadTarget::Head), 66);

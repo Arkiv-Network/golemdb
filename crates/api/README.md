@@ -123,8 +123,8 @@ name bytes (duplicates included), `read.base`, and `read.key`. Distinct projecte
 names cost `read.cell` each, including absent cells; found cells also pay `read.byte`
 on encoded key + tagged value size, before decoding/copying. An empty projection
 only resolves the binding. `#key` consistency is checked when that cell is returned.
-A full user record reads `#key` and `#meta` (two `read.cell`), then atomically charges
-`meta.cells * read.cell_scan + (meta.cell_bytes + 91) * read.byte` before scanning.
+A full user record reads `#key`, `#meta` and `#live` (three `read.cell`), then atomically charges
+`meta.cells * read.cell_scan + (meta.cell_bytes + 106) * read.byte` before scanning.
 Its metadata must be valid. A full reserved record has no `#meta`: it charges scan
 attempts and returned bytes incrementally. Attempts include the terminating probe,
 overlay-only entries (including tombstones), and origin rows even when shadowed.
@@ -203,7 +203,7 @@ or discard.
 
 ## Empty records
 
-A record may have zero user cells. A full read still contains its system `#key` and `#meta`;
+A record may have zero user cells. A full read still contains its system `#key`, `#meta` and `#live`;
 its binding and identity remain until `delete`. Removing the last user cell does
 not delete the record. An empty projection returns no cells but still verifies
 that the record exists. Operation pricing remains deferred.
@@ -476,6 +476,13 @@ Projections return stored metadata. `Record::meta()` returns its decoded `Record
 or `None` if the cell is absent or malformed. Full `get`, patch and delete validate
 metadata before using its counters: missing or malformed metadata, or counter
 underflow, returns `Internal` without repair.
+
+Each user record also stores `#live`: the `bool` `true` as an attribute, the one indexed
+engine cell. Its single index term, `#live = true`, lists every live user record, the set a
+standalone `Not` will subtract from. `create` writes it and `delete` removes it; both pay for
+the cell and for joining or leaving its term, like any attribute. Filters and sort keys cannot
+name it. Full `get` and delete require it, and a missing or different `#live` returns
+`Internal`.
 
 Segment names match `[a-z][a-z0-9_]{0,63}` and are rejected rather than normalized
 when invalid. Column names use the cell user-name grammar, independently of the

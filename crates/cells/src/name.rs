@@ -175,6 +175,10 @@ pub mod reserved {
     pub const KEY: CellNameRef<'static> = CellNameRef(b"#key");
     /// A user record's four u64 counters, encoded as a bytes32 field.
     pub const META: CellNameRef<'static> = CellNameRef(b"#meta");
+    /// A user record's liveness marker: the bool attribute
+    /// [`CellValue::live`](crate::CellValue::live), the one engine cell that is
+    /// indexed. Its single index term lists every live user record.
+    pub const LIVE: CellNameRef<'static> = CellNameRef(b"#live");
     /// Maximum number of user cells per record (u64).
     pub const MAX_RECORD_CELLS: CellNameRef<'static> = CellNameRef(b"#maxRecordCells");
     /// Maximum number of indexed user cells per record (u64).
@@ -197,6 +201,7 @@ pub mod reserved {
     pub const ALL: &[CellNameRef<'static>] = &[
         KEY,
         META,
+        LIVE,
         MAX_RECORD_CELLS,
         MAX_RECORD_INDEXED_CELLS,
         NEXT_RECORD_ID,
@@ -206,4 +211,8 @@ pub mod reserved {
         SHARD_SPAN,
         IMMUTABLE_DATA_SEGMENTS,
     ];
+
+    /// The engine names that are indexed: the only names besides user names
+    /// an index term may carry. Every other engine cell is a field.
+    pub const INDEXED: &[CellNameRef<'static>] = &[LIVE];
 }

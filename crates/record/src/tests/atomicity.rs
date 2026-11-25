@@ -181,6 +181,7 @@ fn late_patch_failure(remove: bool) {
             }
             .encode(),
         ),
+        (CellKey::new(64, reserved::LIVE), CellValue::live()),
         (
             CellKey::new(64, CellNameRef::raw(b"a")),
             value(CellType::Str, b"original"),

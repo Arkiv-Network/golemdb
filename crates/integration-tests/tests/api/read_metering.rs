@@ -73,8 +73,8 @@ fn get_shapes_and_budget_cutoffs_match_on_branches_and_committed_storage() {
     each_backend(genesis(), |db| {
         let branch = create(&db);
         let exercise = |target, commit| {
-            // User cells occupy 16 + 17 bytes, and #key/#meta occupy 91.
-            // Base = 2 + 3 + 7; full = base + 2*11 + 2*13 + 124*2 = 308.
+            // User cells occupy 16 + 17 bytes, and #key/#meta/#live 45 + 46 + 15.
+            // Base = 2 + 3 + 7; full = base + 3*11 + 2*13 + 139*2 = 349.
             for (budget, spent) in [
                 (0, 0),
                 (1, 0),
@@ -87,15 +87,18 @@ fn get_shapes_and_budget_cutoffs_match_on_branches_and_committed_storage() {
                 (23, 23),
                 (33, 23),
                 (34, 34),
-                (307, 34),
-                (308, 308),
+                (44, 34),
+                (45, 45),
+                (348, 45),
+                (349, 349),
             ] {
                 let call = db.get(target, RecordOp::get(KEY, Budget::Limited(budget)));
                 check(&call, spent, commit, &db);
-                if budget == 308 {
-                    assert_eq!(call.result.unwrap().cells.len(), 4);
+                if budget == 349 {
+                    assert_eq!(call.result.unwrap().cells.len(), 5);
+                    assert_eq!(call.receipt.ledger.count("read.cell"), 3);
                     assert_eq!(call.receipt.ledger.count("read.cell_scan"), 2);
-                    assert_eq!(call.receipt.ledger.count("read.byte"), 124);
+                    assert_eq!(call.receipt.ledger.count("read.byte"), 139);
                 } else {
                     assert!(matches!(
                         call.result,
@@ -277,8 +280,8 @@ fn get_zero_missing_and_overflowing_prices_preserve_completed_accounting() {
             RecordOp::get(KEY, Budget::Limited(0)),
         );
         check(&call, 0, db.head().unwrap(), &db);
-        assert_eq!(call.result.unwrap().cells.len(), 4);
+        assert_eq!(call.result.unwrap().cells.len(), 5);
         assert_eq!(call.receipt.ledger.count("read.cell_scan"), 2);
-        assert_eq!(call.receipt.ledger.count("read.byte"), 124);
+        assert_eq!(call.receipt.ledger.count("read.byte"), 139);
     });
 }

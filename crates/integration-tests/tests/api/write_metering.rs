@@ -111,8 +111,11 @@ fn cud_exact_budgets_preserve_state_and_return_only_completed_work_on_failure() 
             (1, 0, None),
             (18, 11, None),
             (23, 22, None),
-            (24, 24, Some(278)),
-            (277, 24, Some(278)),
+            // The `#live` term read.
+            (24, 24, None),
+            (25, 24, None),
+            (26, 26, Some(330)),
+            (329, 26, Some(330)),
         ] {
             let call = db.create(branch, create(KEY, Budget::Limited(budget)));
             refused(&call, spent, required);
@@ -128,12 +131,14 @@ fn cud_exact_budgets_preserve_state_and_return_only_completed_work_on_failure() 
                 Err(ApiError::NotFound)
             ));
         }
-        let created = db.create(branch, create(KEY, Budget::Limited(278)));
+        // `#live` adds a term read 2, a cell create 5 + 6 + 15 bytes and a
+        // join 3 + 6 + 8 bytes, of a new term 7: 278 + 52.
+        let created = db.create(branch, create(KEY, Budget::Limited(330)));
         created.result.unwrap();
-        accounting(&db, &created.receipt, 278, head);
-        assert_eq!(created.receipt.ledger.count("write.cell.create"), 5);
-        assert_eq!(created.receipt.ledger.count("write.cell_trie_update"), 30);
-        assert_eq!(created.receipt.ledger.count("write.cell_byte"), 173);
+        accounting(&db, &created.receipt, 330, head);
+        assert_eq!(created.receipt.ledger.count("write.cell.create"), 6);
+        assert_eq!(created.receipt.ledger.count("write.cell_trie_update"), 36);
+        assert_eq!(created.receipt.ledger.count("write.cell_byte"), 188);
         assert_eq!(created.receipt.details.cells_created, 2);
         assert_eq!(created.receipt.details.cell_bytes_written, 33);
         let before = record(&db, branch, KEY);
@@ -161,16 +166,18 @@ fn cud_exact_budgets_preserve_state_and_return_only_completed_work_on_failure() 
         let branch = db.begin().unwrap();
         let before = record(&db, branch, KEY);
         let info = db.branch_info(branch).unwrap();
-        for (budget, spent, required) in [(14, 13, None), (72, 15, Some(73))] {
+        // `#live` adds a cell read 2 and a term read 2 before approval, and a
+        // cell delete 4 + 6 and a leave 2 + 6 to it: 73 + 22.
+        for (budget, spent, required) in [(14, 13, None), (18, 17, None), (94, 19, Some(95))] {
             let call = db.delete(branch, RecordOp::delete(KEY, Budget::Limited(budget)));
             refused(&call, spent, required);
             accounting(&db, &call.receipt, spent, head);
             assert_eq!(record(&db, branch, KEY), before);
             assert_eq!(db.branch_info(branch).unwrap(), info);
         }
-        let deleted = db.delete(branch, RecordOp::delete(KEY, Budget::Limited(73)));
+        let deleted = db.delete(branch, RecordOp::delete(KEY, Budget::Limited(95)));
         deleted.result.unwrap();
-        accounting(&db, &deleted.receipt, 73, head);
+        accounting(&db, &deleted.receipt, 95, head);
         assert_eq!(deleted.receipt.details.cells_deleted, 2);
         assert_eq!(deleted.receipt.ledger.count("write.cell_byte"), 0);
         let receipt = deleted.receipt.clone();
@@ -286,12 +293,13 @@ fn missing_weights_and_overflow_fail_under_limited_and_unlimited_budgets() {
     config.metering.weights.remove("write.cell.delete");
     each_backend(config, |db| {
         let branch = db.begin().unwrap();
-        db.create(branch, create(KEY, Budget::Limited(278)))
+        db.create(branch, create(KEY, Budget::Limited(330)))
             .result
             .unwrap();
         let before = record(&db, branch, KEY);
         let call = db.delete(branch, RecordOp::delete(KEY, Budget::Unlimited));
-        refused(&call, 11, None);
+        // Fails pricing the first cell delete, after reading #meta, #key, #live and `age`.
+        refused(&call, 13, None);
         assert_eq!(record(&db, branch, KEY), before);
     });
 }
@@ -320,15 +328,16 @@ fn term_creation_uses_committed_origin_across_repeated_joins_and_recreation() {
         for key in [KEY, OTHER] {
             let call = db.create(branch, create(key, Budget::Unlimited));
             call.result.unwrap();
-            accounting(&db, &call.receipt, 278, CommitId::GENESIS);
-            assert_eq!(call.receipt.ledger.count("write.index_term_create"), 1);
+            accounting(&db, &call.receipt, 330, CommitId::GENESIS);
+            // `color` and `#live`, both new at the origin.
+            assert_eq!(call.receipt.ledger.count("write.index_term_create"), 2);
         }
         db.delete(branch, RecordOp::delete(KEY, Budget::Unlimited))
             .result
             .unwrap();
         let recreated = db.create(branch, create(KEY, Budget::Unlimited));
         recreated.result.unwrap();
-        accounting(&db, &recreated.receipt, 278, CommitId::GENESIS);
+        accounting(&db, &recreated.receipt, 330, CommitId::GENESIS);
         db.commit(branch).unwrap();
         let head = db.head().unwrap();
         let branch = db.begin().unwrap();
@@ -339,7 +348,8 @@ fn term_creation_uses_committed_origin_across_repeated_joins_and_recreation() {
         }
         let recreated = db.create(branch, create(KEY, Budget::Unlimited));
         recreated.result.unwrap();
-        accounting(&db, &recreated.receipt, 271, head);
+        // Both terms exist at the origin now: 330 less two term creates.
+        accounting(&db, &recreated.receipt, 316, head);
         assert_eq!(recreated.receipt.ledger.count("write.index_term_create"), 0);
     });
 }
