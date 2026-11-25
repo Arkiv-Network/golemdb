@@ -205,13 +205,15 @@ The written order of the tree is the execution order. Cost and stopping point ar
    `Bounds` or `ExistsType` is built, before any query exists. Bounds that admit no value
    (inverted, or equal with a side excluded) are valid and match nothing.
 2. **Evaluate depth-first, children left to right.**
-3. **`And`:** the running set starts with the first positive child; each further positive child
-   intersects it, each `Not` child subtracts from it. When the running set becomes empty, the
+3. **`And`:** the running set starts with the first child's match set, whatever the child (a
+   `Not` first is standalone, rule 5); each further positive child intersects it, each further
+   `Not` child subtracts from it. When the running set becomes empty, the
    remaining children are skipped and not charged.
 4. **`Or`:** every child is evaluated in order and unioned; no early exit.
-5. **`Not`** needs a set to subtract from: inside an `And`, after a positive child, the running
-   set. A standalone `Not`, or one inside an `Or`, needs the set of all live records (product
-   decision P08): `NotImplemented` until then, or `InvalidQuery` if P08 says no.
+5. **`Not`** needs a set to subtract from: inside an `And`, after its first child, the running
+   set. A standalone `Not`, anywhere else, subtracts from the set of all live records, the
+   index's `#live` term ([design](golemdb-design.md#record-shape-the-live-cell)). That set is
+   read first; when it is empty, the `Not`'s child is skipped and not charged.
 6. **Set combination.** Every `And`, `Or` and `Not` is charged for combining its children's sets,
    per bitmap container processed, so the budget also bounds set work that nesting would
    otherwise multiply.
@@ -343,7 +345,7 @@ Gaps against this proposal:
 | Step | Contents | Status |
 | --- | --- | --- |
 | Tree | `Filter`, `QueryOp`, `CountOp`, admission validation, caps | done except caps and the tree nodes |
-| Boolean | `And`, `Or`, `Not` inside `And`, `In` | done; standalone `Not` waits for P08 |
+| Boolean | `And`, `Or`, `Not`, `In` | done; standalone `Not` over the `#live` term |
 | Scans | `Range`, `Prefix`, `Exists` over a typed run | `Range` done |
 | API | `query`, `count`, snapshot selection, record IDs → records, projection | done for the head |
 | Sort | multi-key, typed, absent below every value, record ID tie-break | done (fetch-and-sort); index walk open |
@@ -352,13 +354,13 @@ Gaps against this proposal:
 | Tests | property tests against a naive reference evaluator | per leaf; tree-level open |
 
 A first cut (MVP): `Eq`, `In`, `Range`, `And`, materialization, `limit` / `offset`, `count`, and
-`NotImplemented` for the rest. Still missing from it: `And`, `limit` and `offset`. Standalone `Not` waits for P08, the cursor for D11.
+`NotImplemented` for the rest. Still missing from it: `And`, `limit` and `offset`. The cursor waits for D11.
 
 ## Decisions needed
 
 1. **The tree replaces the ordered DNF** assumed by the API spec and D01 (which recommends "flat
    DNF only"), for the reasons in [Why a tree](#why-a-tree).
-2. **Standalone `Not`:** wait for P08, or decide now.
+2. **Standalone `Not`:** implemented over the `#live` term; P08 to record that the capability is kept.
 3. **The cap values,** and the code ceilings ([Caps](#caps)).
 4. **The cursor contract** (D11), before paging by cursor.
 

@@ -1,5 +1,5 @@
 use golemdb_cells::{
-    CellNameRef, CellType, CellValueParseError, CellValueRef, FloatWidth, reserved,
+    CellNameRef, CellType, CellValue, CellValueParseError, CellValueRef, FloatWidth, reserved,
 };
 use golemdb_merkle::{Hash, HashProvider};
 use std::{error::Error, fmt};
@@ -86,6 +86,14 @@ impl IndexTerm {
         value: CellValueRef<'_>,
     ) -> Result<Self, TermError> {
         Self::from_str_name(name_str(name)?, value)
+    }
+
+    /// The term every live user record is indexed under: `#live = true`,
+    /// its [`reserved::LIVE`] cell. Its postings are the set of all live
+    /// user records.
+    pub fn live() -> Self {
+        Self::from_cell_name(reserved::LIVE, CellValue::live().as_view())
+            .expect("`#live` is an indexed engine name, and a bool has a term")
     }
 
     /// Check a stored cell name as [`Self::from_cell_name`] does, for a leaf
@@ -270,7 +278,7 @@ impl Error for TermError {
 
 #[cfg(test)]
 mod tests {
-    use golemdb_cells::{CellKind, CellValue, reserved};
+    use golemdb_cells::CellKind;
 
     use super::*;
 
@@ -402,6 +410,7 @@ mod tests {
         let live = CellValue::live();
         let term = IndexTerm::from_cell_name(reserved::LIVE, live.as_view()).expect("indexed");
         assert_eq!(term.as_bytes(), b"#live\0\x81\x01");
+        assert_eq!(IndexTerm::live(), term);
         assert_eq!(IndexTerm::decode(term.as_bytes()), Ok(term));
         // Every other engine name is a field's, never a term's.
         for name in reserved::ALL

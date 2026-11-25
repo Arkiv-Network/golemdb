@@ -129,9 +129,8 @@ fn allocated<S: Store>(
 }
 /// The record IDs the index lists as live: the postings of `#live = true`.
 fn live_ids(tx: &impl golemdb_storage::ReadTransaction) -> Vec<u64> {
-    let term = IndexTerm::from_cell_name(reserved::LIVE, CellValue::live().as_view()).unwrap();
     Index::new(&Keccak256Hasher)
-        .bitmap(tx, &term)
+        .bitmap(tx, &IndexTerm::live())
         .unwrap()
         .map(|bitmap| bitmap.treemap().iter().collect())
         .unwrap_or_default()

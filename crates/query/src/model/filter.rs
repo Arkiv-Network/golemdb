@@ -56,10 +56,12 @@ pub enum Filter {
     Or(Vec<Filter>),
     /// The child does not match. A record with no cell of the leaf's name,
     /// or one of another type, matches a `Not` of that leaf: `Not` of
-    /// `color = "red"` keeps the records with no `color` attribute. For now
-    /// a `Not` is a child of an `And`, after a positive child: it subtracts
-    /// its child's match set from the running set. Anywhere else, standalone
-    /// it needs the set of all live records, and fails as `NotImplemented`
-    /// at admission.
+    /// `color = "red"` keeps the records with no `color` attribute. A `Not`
+    /// after an `And`'s first child subtracts its child's match set from
+    /// the running set. Anywhere else, standalone, it subtracts it from the
+    /// set of all live records, read first from the index's `#live` term: an
+    /// extra read whose size grows with the number of live records, one
+    /// container per 65 536 of them. So place a `Not` after a selective
+    /// positive child of an `And` where the query allows it.
     Not(Box<Filter>),
 }

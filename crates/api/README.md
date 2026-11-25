@@ -479,7 +479,7 @@ underflow, returns `Internal` without repair.
 
 Each user record also stores `#live`: the `bool` `true` as an attribute, the one indexed
 engine cell. Its single index term, `#live = true`, lists every live user record, the set a
-standalone `Not` will subtract from. `create` writes it and `delete` removes it; both pay for
+standalone `Not` subtracts from. `create` writes it and `delete` removes it; both pay for
 the cell and for joining or leaving its term, like any attribute. Filters and sort keys cannot
 name it. Full `get` and delete require it, and a missing or different `#live` returns
 `Internal`.
@@ -634,8 +634,9 @@ immutable data are implemented behind a cloneable `Database` with shared state.
 Queries support `Eq`, `In`, `Range`, `Prefix` and `Exists` filters, combined by `And`, `Or` and
 `Not` trees, with full or projected records, and `count`. A `Not` child of an `And`, after its
 first child, removes its own child's matches from the `And`'s; a record whose cell is absent, or
-of another type, matches it. A standalone `Not`, anywhere else, needs the set of all live records
-and returns `ApiError::NotImplemented`. A filter nests at most 64 `And` / `Or` / `Not` levels, a
+of another type, matches it. A `Not` anywhere else, standalone, removes its child's matches from
+every live record: it reads the index's `#live` term first, and when that is empty, skips its
+child. A filter nests at most 64 `And` / `Or` / `Not` levels, a
 hardcoded cap until it is read from genesis; a deeper one returns `ApiError::LimitExceeded`. A query returns at most 100 records, the first matches in record ID
 order, a hardcoded page size until it is read from genesis; `total_matched` and `count` still
 count every match. `limit(n)` returns at most `n` records: a `limit` of 0 returns

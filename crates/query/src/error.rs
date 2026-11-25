@@ -30,8 +30,7 @@ pub enum QueryError {
     /// or record reads.
     #[error("limit exceeded: {limit} is capped at {max}")]
     LimitExceeded { limit: &'static str, max: u32 },
-    /// A part of the query API that is specified but not built yet: a
-    /// standalone `Not` in a filter (``"query: standalone `Not`"``), found at
+    /// A part of the query API that is specified but not built yet, found at
     /// admission, before index or record reads.
     #[error("operation {operation} is not implemented")]
     NotImplemented { operation: &'static str },

@@ -3,7 +3,7 @@
 
 use std::iter;
 
-use golemdb_index::Bitmap;
+use golemdb_index::{Bitmap, IndexTerm};
 
 use crate::{
     QueryError, Result,
@@ -25,7 +25,20 @@ pub(crate) fn match_set(source: &impl PostingSource, plan: Plan) -> Result<Bitma
                 .chain(rest)
                 .map(|child| match_set(source, child)),
         ),
+        Plan::Not(child) => not(source, *child),
     }
+}
+
+/// The match set of a standalone `Not`: every live user record, the
+/// postings of [`IndexTerm::live`], less `child`'s match set. The live set
+/// is read first; when it is empty, `child` is not evaluated, as an `And`
+/// stops once its running set is empty.
+fn not(source: &impl PostingSource, child: Plan) -> Result<Bitmap> {
+    let mut live = source.postings(&IndexTerm::live())?;
+    if !live.treemap().is_empty() {
+        live -= match_set(source, child)?;
+    }
+    Ok(live)
 }
 
 /// The match set of an `And`: the running set starts as `first`'s, then
@@ -930,23 +943,85 @@ mod tests {
         assert_eq!(*source.reads.borrow(), [term_of("a", 1), term_of("c", 9)]);
     }
 
-    #[test]
-    fn a_standalone_not_is_not_implemented_before_reading() {
-        // FailingSource would surface as QueryError::Internal if it were consulted.
-        for filter in [
-            not(is("a", 1)),
-            or([is("a", 1), not(is("b", 1))]),
-            and([not(is("a", 1)), is("b", 1)]),
-            and([is("a", 1), not(not(is("b", 1)))]),
-        ] {
-            assert!(
-                matches!(
-                    evaluate(&FailingSource, &filter),
-                    Err(QueryError::NotImplemented { .. })
-                ),
-                "{filter:?}"
-            );
+    /// [`source_of`], with `live` as the live user records.
+    fn live_source_of<'a>(
+        live: &[u64],
+        fields: impl IntoIterator<Item = (&'a str, &'a [u64])>,
+    ) -> RecordingSource {
+        let RecordingSource { inner, reads } = source_of(fields);
+        RecordingSource {
+            inner: inner.with_live(live.iter().copied()),
+            reads,
         }
+    }
+
+    #[test]
+    fn a_standalone_not_keeps_the_live_records_its_child_does_not_match() {
+        let source = live_source_of(
+            &[1, 2, 3, 4, 1 << 40],
+            [("a", &[1, 2, 1 << 40][..]), ("b", &[2, 3])],
+        );
+        assert_eq!(matches(&source, &not(is("a", 1))), [3, 4]);
+        // Under an `Or`, as an `And`'s first child, and under another `Not`.
+        assert_eq!(
+            matches(&source, &or([is("b", 1), not(is("a", 1))])),
+            [2, 3, 4]
+        );
+        assert_eq!(matches(&source, &and([not(is("a", 1)), is("b", 1)])), [3]);
+        assert_eq!(
+            matches(&source, &and([is("a", 1), not(not(is("b", 1)))])),
+            [2]
+        );
+        assert_eq!(matches(&source, &not(not(is("a", 1)))), [1, 2, 1 << 40]);
+        // Over any child: ¬(a ∨ b), ¬(a ∧ b).
+        assert_eq!(matches(&source, &not(or([is("a", 1), is("b", 1)]))), [4]);
+        assert_eq!(
+            matches(&source, &not(and([is("a", 1), is("b", 1)]))),
+            [1, 3, 4, 1 << 40]
+        );
+        // The `Not` of a child that matches nothing is every live record.
+        assert_eq!(matches(&source, &not(is("c", 1))), [1, 2, 3, 4, 1 << 40]);
+    }
+
+    #[test]
+    fn a_standalone_not_matches_absent_and_other_typed_cells() {
+        // Record 4 has no `b`; records 2 and 3 have one of another type.
+        let source = FakeSource::default()
+            .with_live([1, 2, 3, 4])
+            .with("b", CellValue::from_u32(1), [1])
+            .with("b", CellValue::from_i32(1), [2])
+            .with("b", str("1"), [3]);
+        assert_eq!(ids(&source, not(is("b", 1))), [2, 3, 4]);
+    }
+
+    #[test]
+    fn a_standalone_not_reads_the_live_set_then_its_child() {
+        let source = live_source_of(&[1, 2], [("a", &[1][..]), ("b", &[2])]);
+        assert_eq!(matches(&source, &not(is("a", 1))), [2]);
+        assert_eq!(*source.reads.borrow(), [IndexTerm::live(), term_of("a", 1)]);
+        // In its turn among its siblings.
+        source.reads.borrow_mut().clear();
+        assert_eq!(matches(&source, &or([is("a", 1), not(is("b", 1))])), [1]);
+        assert_eq!(
+            *source.reads.borrow(),
+            [term_of("a", 1), IndexTerm::live(), term_of("b", 1)]
+        );
+        // A `Not` after an `And`'s first child subtracts from the running
+        // set: the live set is not read.
+        source.reads.borrow_mut().clear();
+        assert_eq!(matches(&source, &and([is("a", 1), not(is("b", 1))])), [1]);
+        assert_eq!(*source.reads.borrow(), [term_of("a", 1), term_of("b", 1)]);
+    }
+
+    #[test]
+    fn with_no_live_record_a_standalone_not_reads_nothing_more() {
+        let source = live_source_of(&[], [("a", &[1][..]), ("b", &[1])]);
+        assert!(matches(&source, &not(is("a", 1))).is_empty());
+        assert_eq!(*source.reads.borrow(), [IndexTerm::live()]);
+        // As an `And`'s first child, it leaves no running set for the rest.
+        source.reads.borrow_mut().clear();
+        assert!(matches(&source, &and([not(is("a", 1)), is("b", 1)])).is_empty());
+        assert_eq!(*source.reads.borrow(), [IndexTerm::live()]);
     }
 
     #[test]
@@ -956,6 +1031,7 @@ mod tests {
             and([]),
             or([]),
             and([is("a", 1), or([is("b", 1), and([])])]),
+            not(and([])),
         ] {
             assert!(
                 matches!(
@@ -976,21 +1052,26 @@ mod tests {
     fn a_failing_child_fails_the_node() {
         // The first child reads; the second, a scan, fails at its first term.
         let source = FailingMidScan {
-            inner: FakeSource::default().with("a", CellValue::from_u32(1), [1]),
+            inner: FakeSource::default()
+                .with("a", CellValue::from_u32(1), [1])
+                .with_live([1]),
             good: 0,
         };
         let scan = i32s(Bound::Unbounded, Bound::Included(i32::MAX));
         for filter in [
             and([is("a", 1), scan.clone()]),
             and([is("a", 1), not(scan.clone())]),
+            not(scan.clone()),
             or([is("a", 1), scan]),
         ] {
             let result = evaluate(&source, &filter);
             assert!(is_injected_failure(&result), "{filter:?}: {result:?}");
         }
+        // The live set's read fails as any other.
         for filter in [
             and([is("a", 1)]),
             and([is("a", 1), not(is("b", 1))]),
+            not(is("b", 1)),
             or([is("a", 1)]),
         ] {
             let result = evaluate(&FailingSource, &filter);

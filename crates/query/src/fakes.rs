@@ -33,6 +33,13 @@ impl FakeSource {
         self
     }
 
+    /// Index `ids` as the live user records, under [`IndexTerm::live`], as
+    /// seal does for every record's `#live` cell.
+    pub(crate) fn with_live(mut self, ids: impl IntoIterator<Item = u64>) -> Self {
+        self.0.insert(IndexTerm::live(), bitmap(ids));
+        self
+    }
+
     /// The entries in `range`, in key order, as a storage scan yields them.
     pub(crate) fn run(&self, range: TermRange) -> impl Iterator<Item = (&IndexTerm, &Bitmap)> {
         self.0

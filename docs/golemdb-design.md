@@ -702,11 +702,11 @@ Cell:  recordID ‖ "#live"                          →   typeTag(attribute, bo
 Term:  "#live" ‖ 0x00 ‖ typeTag(attribute, bool) ‖ 0x01   →   every live user record's ID
 ```
 
-A negation needs a set to subtract from. Inside an `And` the running set serves; a standalone
-`Not`, or one under an `Or`, needs every live record (product decision P08). Without this term,
-that set is either the allocated ID range, which still holds deleted records, or a scan of every
-record. With it, the set is one term's containers: one read per 65 536 live IDs, never one per
-record.
+A negation needs a set to subtract from. Inside an `And`, after its first child, the running set
+serves; a standalone `Not`, anywhere else, subtracts from this term's postings: every live record
+(product decision P08). Without the term, that set would be either the allocated ID range, which
+still holds deleted records, or a scan of every record. With it, the set is one term's
+containers: one read per 65 536 live IDs, never one per record.
 
 - **User records only.** System and admin records carry no `#live`, as they carry no `#meta`.
 - **Engine-maintained.** `create` writes it, `delete` removes it with the record, and seal

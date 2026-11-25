@@ -996,9 +996,13 @@ right, so a condition shared by several branches is written, and read, once.
 
 - **`And`:** children intersect in written order, carrying a running set; the node stops early
   when that set is empty, and its remaining children are not read. This is the caller's main
-  optimization lever. A `Not` child subtracts from the running set; a standalone `Not`, or one
-  under an `Or`, needs the set of all live records and waits on product decision
-  [P08](CHANGES.md).
+  optimization lever. A `Not` child after the first subtracts from the running set.
+- **A standalone `Not`**, one with no running set (the whole filter, under an `Or` or another
+  `Not`, or an `And`'s first child), subtracts its child's matches from every live record. It
+  reads the set of live records first, from the index's `#live` term
+  ([design](golemdb-design.md#record-shape-the-live-cell)), and skips its child when that set is
+  empty. That read grows with the database, one container per 65 536 live records, so a `Not`
+  after a selective positive child of an `And` is cheaper.
 - **`Or`:** children evaluate in written order and union, with no early exit. The order is pinned
   so that the abort point, and so `OutOfBudget`, is deterministic.
 - **Early exit applies to unsorted queries only.** A sorted query costs O(N) whatever page was

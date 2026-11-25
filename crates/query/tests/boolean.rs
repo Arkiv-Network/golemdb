@@ -4,7 +4,7 @@
 
 mod support;
 
-use std::{collections::BTreeMap, iter, ops::Bound};
+use std::{collections::BTreeMap, ops::Bound};
 
 use golemdb_api::{ApiError, CellType, Filter, RecordKey};
 use golemdb_cells::CellValue;
@@ -134,30 +134,27 @@ fn not_keeps_the_records_its_child_does_not_match() {
 }
 
 #[test]
-fn a_standalone_not_is_not_implemented() {
+fn a_standalone_not_keeps_the_live_records_its_child_does_not_match() {
     let test = people();
-    for filter in [
-        not(eq("color", str("blue"))),
-        Filter::Or(vec![eq("age", u32(30)), not(eq("color", str("blue")))]),
-        Filter::And(vec![not(eq("color", str("blue"))), eq("age", u32(30))]),
-    ] {
-        let not_implemented = |result| {
-            matches!(
-                result,
-                Err(ApiError::NotImplemented {
-                    operation: "query: standalone `Not`"
-                })
-            )
-        };
-        assert!(
-            not_implemented(test.keys(filter.clone()).map(drop)),
-            "{filter:?}"
-        );
-        assert!(
-            not_implemented(test.count(filter.clone()).map(drop)),
-            "{filter:?}"
-        );
-    }
+    // Everyone but the blue ones, including the one with no color.
+    let filter = not(eq("color", str("blue")));
+    assert_eq!(test.keys(filter.clone()).unwrap(), [key(1), key(4)]);
+    assert_eq!(test.count(filter).unwrap(), 2);
+    // Under an `Or`, and as an `And`'s first child.
+    let filter = Filter::Or(vec![eq("age", u32(17)), not(exists("color", None))]);
+    assert_eq!(test.keys(filter).unwrap(), [key(2), key(4)]);
+    let filter = Filter::And(vec![not(eq("color", str("red"))), eq("age", u32(30))]);
+    assert_eq!(test.keys(filter).unwrap(), [key(4)]);
+    // A deleted record is not live: no `Not` keeps it.
+    test.delete([key(4)]);
+    let filter = not(eq("color", str("blue")));
+    assert_eq!(test.keys(filter.clone()).unwrap(), [key(1)]);
+    assert_eq!(test.count(filter).unwrap(), 1);
+    // With no live record left, a `Not` matches nothing.
+    test.delete([key(1), key(2), key(3)]);
+    let filter = not(eq("color", str("blue")));
+    assert!(test.keys(filter.clone()).unwrap().is_empty());
+    assert_eq!(test.count(filter).unwrap(), 0);
 }
 
 #[test]
@@ -317,22 +314,16 @@ fn leaf() -> impl Strategy<Value = Tree> {
     ]
 }
 
-/// Trees up to three levels of `And` / `Or` deep, each node with one to
-/// three children. Each child of an `And` after its first may be under a
-/// `Not`, the one place a `Not` is admitted.
+/// Trees up to three levels of `And` / `Or` / `Not` deep, each `And` and
+/// `Or` with one to three children. A `Not` may stand anywhere: after an
+/// `And`'s first child it subtracts from the running set, elsewhere from
+/// the live set.
 fn tree() -> impl Strategy<Value = Tree> {
     leaf().prop_recursive(3, 24, 3, |inner| {
-        let further = (inner.clone(), any::<bool>()).prop_map(|(child, negated)| {
-            if negated {
-                Tree::Not(Box::new(child))
-            } else {
-                child
-            }
-        });
         prop_oneof![
-            (inner.clone(), prop::collection::vec(further, 0..3))
-                .prop_map(|(first, rest)| Tree::And(iter::once(first).chain(rest).collect())),
-            prop::collection::vec(inner, 1..4).prop_map(Tree::Or),
+            prop::collection::vec(inner.clone(), 1..4).prop_map(Tree::And),
+            prop::collection::vec(inner.clone(), 1..4).prop_map(Tree::Or),
+            inner.prop_map(|child| Tree::Not(Box::new(child))),
         ]
     })
 }
@@ -344,23 +335,27 @@ proptest! {
     #[test]
     fn trees_match_a_model(
         records in prop::collection::vec(
-            prop::collection::btree_map(field(), small_value(), 0..4),
+            (prop::collection::btree_map(field(), small_value(), 0..4), any::<bool>()),
             0..24,
         ),
         trees in prop::collection::vec(tree(), 1..8),
     ) {
         let test = TestDb::default();
-        test.create(records.iter().enumerate().map(|(n, cells)| {
+        test.create(records.iter().enumerate().map(|(n, (cells, _))| {
             let cells: Vec<_> = cells.iter().map(|(field, value)| (*field, value.clone())).collect();
             record(key(n as u64), &cells)
         }));
+        // Some records are deleted again: no filter matches them, not even
+        // a `Not`, which only keeps live records.
+        let deleted = |n: usize| records[n].1;
+        test.delete((0..records.len()).filter(|&n| deleted(n)).map(|n| key(n as u64)));
         for tree in trees {
             // Records are created in order, so record IDs, and with them the
             // query order, follow `n`.
             let expected: Vec<_> = records
                 .iter()
                 .enumerate()
-                .filter(|(_, cells)| tree.matches(cells))
+                .filter(|&(n, (cells, _))| !deleted(n) && tree.matches(cells))
                 .map(|(n, _)| key(n as u64))
                 .collect();
             let filter = tree.filter();

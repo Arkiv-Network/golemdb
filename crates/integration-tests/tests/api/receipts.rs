@@ -454,12 +454,13 @@ fn boolean_admission_failures_retain_the_selected_head() {
         let head = db.commit(db.begin().unwrap()).unwrap();
         // Database currently caps And/Or nesting at 64 levels.
         let too_deep = (0..65).fold(filter("color"), |child, _| Filter::And(vec![child]));
-        let standalone_not = Filter::Not(Box::new(filter("color")));
+        // A standalone `Not` is admitted; an invalid tree under one is not.
+        let invalid_under_not = Filter::Not(Box::new(Filter::Or(vec![])));
         for filter in [
             Filter::And(vec![]),
             Filter::Or(vec![]),
             too_deep,
-            standalone_not,
+            invalid_under_not,
         ] {
             let query = db.query(None, QueryOp::from_filter(filter.clone(), BUDGET));
             let count = db.count(None, CountOp::filter(filter, BUDGET));
@@ -472,9 +473,6 @@ fn boolean_admission_failures_retain_the_selected_head() {
                         | ApiError::LimitExceeded {
                             limit: "filter depth",
                             max: 64
-                        }
-                        | ApiError::NotImplemented {
-                            operation: "query: standalone `Not`"
                         }
                 ));
             }

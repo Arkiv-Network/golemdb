@@ -660,14 +660,17 @@ reference execution: the execution rules of the
   work of every roaring implementation (R4). The inputs' containers were already loaded and
   charged, so a combination costs at most about as much again. Record IDs are dense, so the
   number of distinct containers is bounded by the size of the database.
-- **`And` runs in the written order.** The running set starts with the first positive child; each
-  further child is evaluated and charged only when its turn comes, a positive child intersected,
-  a `Not` child subtracted. As soon as the running set is empty, the remaining children are
+- **`And` runs in the written order.** The running set starts with the first child's match set,
+  whatever the child; each further child is evaluated and charged only when its turn comes, a
+  positive child intersected, a `Not` child subtracted. As soon as the running set is empty, the remaining children are
   neither evaluated nor charged. An implementation must not reorder the children, for example by
   size, nor load them in advance.
 - **`Or`** evaluates every child, in the written order, with no early exit, and unions them.
-- **`Not`** is allowed only inside an `And`, after a positive child. A standalone `Not` needs the
-  set of all live records (P08) and returns `NotImplemented` until then.
+- **`Not`** after an `And`'s first child is subtracted from the running set, as above. A
+  standalone `Not` first reads the set of all live records, the `#live` term
+  ([design §3](golemdb-design.md#record-shape-the-live-cell)), as an equality leaf reads its term;
+  then, unless that set is empty, its child, and one difference per container of both sets. With
+  no live record, the child is neither evaluated nor charged.
 - **No early exit on the match set.** Every query builds its whole match set, sorted or not, so
   `total_matched` is always free and the charge does not depend on where a page falls.
 - **`count`** runs admission, the call base, the leaves and the combinations only: it materializes
@@ -1002,7 +1005,7 @@ F1: once every item is settled, the rules above carry its content and the list i
 | 9 | all | Admission for reads | proposed | [read call frame](#the-read-call-frame): D2's three-part shape, own weights starting at D2's values; one entry per filter node, operand value, projected name and sort key; operands valid by construction |
 | 11 | query | Purge read: equality, record-ID order, empty projection, limit | decided shape | charges follow from items 5 and 8 |
 | 12 | query | `And` | decided | written order; early exit when the running set is empty, remaining children not charged; intersection and difference per container of both sets |
-| 13 | query | `Or`, `Not` inside `And` | decided | `Or` evaluates every child, one union charged per container of every input; standalone `Not` waits for P08 |
+| 13 | query | `Or`, `Not` | decided; standalone `Not` proposed | `Or` evaluates every child, one union charged per container of every input; a standalone `Not` reads the `#live` term like an equality leaf, then its child unless no record is live, one difference per container of both sets |
 | 14 | query | `count` | decided | admission, call base, leaves and combinations only; no materialization |
 | 27 | query | No early exit on the match set | proposed | every query builds its whole match set; `total_matched` free |
 | 15 | query | `limit`, `offset`, `max_bytes` | proposed | no charge of their own; page ends at `limit` or `max_bytes`, at least one record; caps as defaults |

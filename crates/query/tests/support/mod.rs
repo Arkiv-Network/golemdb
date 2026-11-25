@@ -53,6 +53,21 @@ impl TestDb {
         self.db.commit(branch).expect("commit");
     }
 
+    /// Delete the records of `keys` in one branch and commit it.
+    pub fn delete(&self, keys: impl IntoIterator<Item = RecordKey>) {
+        let branch = self.db.begin().expect("branch");
+        for key in keys {
+            self.db
+                .delete(
+                    branch,
+                    RecordOp::delete(key, golemdb_api::Budget::Limited(u64::MAX)),
+                )
+                .into_result()
+                .expect("delete");
+        }
+        self.db.commit(branch).expect("commit");
+    }
+
     /// Keys of the records matching `filter` at the head, in query order.
     pub fn keys(&self, filter: Filter) -> Result<Vec<RecordKey>, ApiError> {
         let page = self
