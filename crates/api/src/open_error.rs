@@ -1,3 +1,5 @@
+use crate::genesis::FORMAT;
+
 /// Opening errors are separate from operation failures: callers can distinguish
 /// configuration mismatch, unsupported formats, and incomplete stored state.
 #[derive(Debug, thiserror::Error)]
@@ -18,7 +20,7 @@ pub enum OpenError {
     #[error("incomplete or corrupt database: {0}")]
     CorruptState(&'static str),
     #[error(
-        "unsupported database format {0}; this build requires format 2, create a new compatible database (no migration is available)"
+        "unsupported database format {0}; this build requires format {FORMAT}, create a new compatible database (no migration is available)"
     )]
     UnsupportedFormat(u32),
     #[error("unsupported hash function ID {0}")]
