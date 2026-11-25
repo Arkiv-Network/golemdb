@@ -59,7 +59,7 @@ jobs:
         run: echo "::warning::No baseline found, so nothing is compared."
 
       # Shared runners vary, so only a clear slowdown is reported.
-      - uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+      - uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Times
           tool: cargo
@@ -72,7 +72,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # Storage work is the same on every machine, so any increase is reported.
-      - uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+      - uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Storage
           tool: customSmallerIsBetter
@@ -85,7 +85,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # The same numbers, reported on any decrease, which can be a bug too.
-      - uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+      - uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Storage decrease
           tool: customBiggerIsBetter
