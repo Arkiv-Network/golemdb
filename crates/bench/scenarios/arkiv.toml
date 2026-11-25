@@ -1,4 +1,4 @@
-# The standard benchmark: Arkiv-like blocks under a memory cap (bench/suites.toml), so the database
+# The standard benchmark: Arkiv-like blocks under a memory cap (crates/bench/suites.toml), so the database
 # outgrows memory within minutes. Queries run where each phase ends.
 name = "arkiv"
 description = "Arkiv-like ~128 KiB blocks with pruning, under a memory cap: fill past memory, then updates and deletes"

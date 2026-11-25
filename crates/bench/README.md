@@ -10,7 +10,7 @@ just bench smoke                        # seconds; results in target/bench-out/s
 just bench arkiv /data/out /data/db     # where the results and the database go
 ```
 
-`<scenario>` is a name under `bench/scenarios` or a path to a `.toml` file; relative paths are taken
+`<scenario>` is a name under `crates/bench/scenarios` or a path to a `.toml` file; relative paths are taken
 from the repository root. The database directory is deleted and recreated first. Needs `just` and clang (MDBX's bindings are generated at build time).
 
 ## Results
@@ -48,7 +48,7 @@ query's times. `started_unix_ms` is when the workload started, the zero of `elap
 
 ## Suites
 
-`bench/suites.toml` names groups of scenarios for a benchmark runner, with the memory cap and time limit
+`crates/bench/suites.toml` names groups of scenarios for a benchmark runner, with the memory cap and time limit
 each runs under: `standard` is the default, `large` takes hours. A runner needs only that file,
 `just bench_build`, `just bench <scenario> <out> <db_dir>`, and the result files above.
 

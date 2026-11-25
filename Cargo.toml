@@ -14,7 +14,7 @@ members = [
     "crates/api",
     "crates/query",
     "crates/integration-tests",
-    "bench",
+    "crates/bench",
 ]
 
 [workspace.package]
