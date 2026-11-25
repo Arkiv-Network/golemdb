@@ -17,9 +17,7 @@ fn timeline(db: &impl Store) {
         (40, None, Some(&b"C"[..])),
     ] {
         let mut tx = db.begin_write().unwrap();
-        HISTORY
-            .record(&mut tx, b"item", commit, before.unwrap_or_default())
-            .unwrap();
+        HISTORY.record(&mut tx, b"item", commit, before).unwrap();
         match after {
             Some(bytes) => tx.put(LIVE, b"item", bytes).unwrap(),
             None => {
@@ -55,7 +53,7 @@ fn timeline(db: &impl Store) {
     );
     assert_eq!(
         HISTORY.resolve(&tx, b"item", 0).unwrap(),
-        ValueSource::Preimage(vec![])
+        ValueSource::Preimage(None)
     );
     assert_eq!(
         HISTORY.resolve(&tx, b"never", 0).unwrap(),
@@ -66,7 +64,7 @@ fn timeline(db: &impl Store) {
 fn value_at(tx: &impl ReadTransaction, item: &[u8], target: u64) -> Option<Vec<u8>> {
     match HISTORY.resolve(tx, item, target).unwrap() {
         ValueSource::Live => tx.get(LIVE, item).unwrap(),
-        ValueSource::Preimage(bytes) => (!bytes.is_empty()).then_some(bytes),
+        ValueSource::Preimage(bytes) => bytes,
     }
 }
 
@@ -93,13 +91,15 @@ fn rejected_writes(db: &impl Store) {
     let mut tx = db.begin_write().unwrap();
     // Prefixes/binary bytes remain opaque, and different items share a commit.
     for item in [b"a".as_slice(), b"a\0", b"a\0\xff"] {
-        HISTORY.record(&mut tx, item, 20, item).unwrap();
+        HISTORY.record(&mut tx, item, 20, Some(item)).unwrap();
     }
     tx.commit().unwrap();
     for commit in [20, 19, 0] {
         let mut tx = db.begin_write().unwrap();
-        assert!(matches!(HISTORY.record(&mut tx, b"a", commit, b"wrong"),
-            Err(HistoryError::NonIncreasingCommit { previous: 20, commit: c, .. }) if c == commit));
+        assert!(
+            matches!(HISTORY.record(&mut tx, b"a", commit, Some(b"wrong")),
+            Err(HistoryError::NonIncreasingCommit { previous: 20, commit: c, .. }) if c == commit)
+        );
         assert_eq!(
             tx.get(HISTORY.changeset, &changeset_key(20, b"a")).unwrap(),
             Some(b"a".to_vec())
@@ -113,7 +113,7 @@ fn rejected_writes(db: &impl Store) {
     tx.commit().unwrap();
     let mut tx = db.begin_write().unwrap();
     assert!(matches!(
-        HISTORY.record(&mut tx, b"orphan", 30, b"wrong"),
+        HISTORY.record(&mut tx, b"orphan", 30, Some(b"wrong")),
         Err(HistoryError::ExistingPreimage { commit: 30, .. })
     ));
     assert_eq!(tx.get(HISTORY.history, b"orphan").unwrap(), None);
@@ -132,6 +132,28 @@ fn writes_never_replace_existing_preimages() {
     rejected_writes(&MdbxStore::open(dir.path()).unwrap());
 }
 
+#[test]
+fn empty_present_preimages_are_rejected_before_writing() {
+    fn check(db: &impl Store) {
+        let mut tx = db.begin_write().unwrap();
+        assert!(matches!(
+            HISTORY.record(&mut tx, b"item", 10, Some(b"")),
+            Err(HistoryError::EmptyPreimage)
+        ));
+        assert_eq!(tx.get(HISTORY.history, b"item").unwrap(), None);
+        assert_eq!(
+            tx.get(HISTORY.changeset, &changeset_key(10, b"item"))
+                .unwrap(),
+            None
+        );
+        tx.abort();
+    }
+
+    check(&MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    check(&MdbxStore::open(dir.path()).unwrap());
+}
+
 fn large_commits(db: &impl Store) {
     let mut tx = db.begin_write().unwrap();
     for (commit, before) in [
@@ -139,7 +161,9 @@ fn large_commits(db: &impl Store) {
         (1 << 32, b"b"),
         (u64::MAX, b"c"),
     ] {
-        HISTORY.record(&mut tx, b"large", commit, before).unwrap();
+        HISTORY
+            .record(&mut tx, b"large", commit, Some(before))
+            .unwrap();
     }
     tx.commit().unwrap();
     let tx = db.begin_read().unwrap();
@@ -151,7 +175,7 @@ fn large_commits(db: &impl Store) {
     ] {
         assert_eq!(
             HISTORY.resolve(&tx, b"large", target).unwrap(),
-            ValueSource::Preimage(before.to_vec())
+            ValueSource::Preimage(Some(before.to_vec()))
         );
     }
     assert_eq!(
@@ -171,7 +195,7 @@ fn persisted_commits_use_the_full_u64_range() {
 fn missing_preimage_and_malformed_history_do_not_invoke_the_reader() {
     let db = MemoryStore::new();
     let mut tx = db.begin_write().unwrap();
-    HISTORY.record(&mut tx, b"item", 10, b"").unwrap();
+    HISTORY.record(&mut tx, b"item", 10, None).unwrap();
     tx.delete(HISTORY.changeset, &changeset_key(10, b"item"))
         .unwrap();
     let result = HISTORY.with_resolved(&tx, b"item", 0, |_| panic!("missing is not absent"));
@@ -184,7 +208,7 @@ fn missing_preimage_and_malformed_history_do_not_invoke_the_reader() {
         let result = HISTORY.with_resolved(&tx, b"bad", 0, |_| panic!("corruption is not current"));
         assert!(matches!(result, Err(HistoryError::InvalidCommits { .. })));
         assert!(matches!(
-            HISTORY.record(&mut tx, b"bad", 20, b"value"),
+            HISTORY.record(&mut tx, b"bad", 20, Some(b"value")),
             Err(HistoryError::InvalidCommits { .. })
         ));
         assert_eq!(
@@ -193,18 +217,6 @@ fn missing_preimage_and_malformed_history_do_not_invoke_the_reader() {
             None
         );
     }
-}
-
-#[test]
-fn table_aliases_are_rejected_before_writing() {
-    let db = MemoryStore::new();
-    let mut tx = db.begin_write().unwrap();
-    let invalid = HistoryTables::new(LIVE, LIVE);
-    assert!(matches!(
-        invalid.record(&mut tx, b"x", 1, b"x"),
-        Err(HistoryError::AliasedTables(LIVE))
-    ));
-    assert!(tx.is_empty().unwrap());
 }
 
 struct BorrowOnly<R> {
@@ -242,7 +254,10 @@ impl<R: ReadTransaction> ReadTransaction for BorrowOnly<R> {
 fn borrowed_reads_and_scan_reuse_do_not_fetch_extra_rows() {
     let db = MemoryStore::new();
     let mut tx = db.begin_write().unwrap();
-    HISTORY.record(&mut tx, b"item", 10, &[7; 100_000]).unwrap();
+    HISTORY
+        .record(&mut tx, b"item", 10, Some(&[7; 100_000]))
+        .unwrap();
+    HISTORY.record(&mut tx, b"created", 10, None).unwrap();
     tx.commit().unwrap();
     let mut tx = BorrowOnly {
         inner: db.begin_read().unwrap(),
@@ -251,8 +266,8 @@ fn borrowed_reads_and_scan_reuse_do_not_fetch_extra_rows() {
     };
     let length = HISTORY
         .with_resolved(&tx, b"item", 9, |value| match value {
-            ValueSource::Preimage(bytes) => bytes.len(),
-            ValueSource::Live => panic!("expected pre-image"),
+            ValueSource::Preimage(Some(bytes)) => bytes.len(),
+            _ => panic!("expected present pre-image"),
         })
         .unwrap();
     assert_eq!(length, 100_000);
@@ -268,10 +283,22 @@ fn borrowed_reads_and_scan_reuse_do_not_fetch_extra_rows() {
     let commit = commits.first_after(0).unwrap();
     assert_eq!(
         HISTORY
-            .with_preimage(&tx, b"item", commit, <[u8]>::len)
+            .with_preimage(&tx, b"item", commit, |bytes| bytes.map(<[u8]>::len))
             .unwrap(),
-        100_000
+        Some(100_000)
     );
+    assert_eq!(*tx.reads.borrow(), [HISTORY.changeset]);
+    tx.reads.borrow_mut().clear();
+    HISTORY
+        .with_resolved(&tx, b"created", 1, |value| {
+            assert_eq!(value, ValueSource::Preimage(None));
+        })
+        .unwrap();
+    assert_eq!(*tx.reads.borrow(), [HISTORY.history, HISTORY.changeset]);
+    tx.reads.borrow_mut().clear();
+    HISTORY
+        .with_preimage(&tx, b"created", 10, |bytes| assert_eq!(bytes, None))
+        .unwrap();
     assert_eq!(*tx.reads.borrow(), [HISTORY.changeset]);
     for table in [HISTORY.history, HISTORY.changeset] {
         tx.fail = Some(table);
@@ -339,7 +366,9 @@ impl<W: WriteTransaction> WriteTransaction for FailWrite<W> {
 
 fn aborts(db: &impl Store) {
     let mut tx = db.begin_write().unwrap();
-    HISTORY.record(&mut tx, b"item", 10, b"origin").unwrap();
+    HISTORY
+        .record(&mut tx, b"item", 10, Some(b"origin"))
+        .unwrap();
     tx.commit().unwrap();
     let old = db.begin_read().unwrap();
     for fail_at in [1, 2] {
@@ -349,7 +378,7 @@ fn aborts(db: &impl Store) {
             fail_at,
         };
         assert!(matches!(
-            HISTORY.record(&mut tx, b"item", 20, b"before20"),
+            HISTORY.record(&mut tx, b"item", 20, Some(b"before20")),
             Err(HistoryError::Storage(StorageError::Full))
         ));
         tx.abort();
@@ -365,12 +394,14 @@ fn aborts(db: &impl Store) {
         );
         assert_eq!(
             HISTORY.resolve(&tx, b"item", 0).unwrap(),
-            ValueSource::Preimage(b"origin".to_vec())
+            ValueSource::Preimage(Some(b"origin".to_vec()))
         );
     }
     {
         let mut tx = db.begin_write().unwrap();
-        HISTORY.record(&mut tx, b"item", 20, b"before20").unwrap();
+        HISTORY
+            .record(&mut tx, b"item", 20, Some(b"before20"))
+            .unwrap();
         // Dropping the writer aborts both successful writes too.
     }
     let tx = db.begin_read().unwrap();
@@ -413,7 +444,8 @@ proptest! {
             let before = state[item as usize];
             let mut tx = db.begin_write().unwrap();
             if before != after {
-                HISTORY.record(&mut tx, &[item], commit, &before.into_iter().collect::<Vec<_>>()).unwrap();
+                let preimage = before.map(|value| vec![value]);
+                HISTORY.record(&mut tx, &[item], commit, preimage.as_deref()).unwrap();
                 match after {
                     Some(value) => tx.put(LIVE, &[item], &[value]).unwrap(),
                     None => { tx.delete(LIVE, &[item]).unwrap(); }

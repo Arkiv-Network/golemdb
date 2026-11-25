@@ -8,8 +8,8 @@ pub type Result<T> = std::result::Result<T, HistoryError>;
 pub enum HistoryError {
     #[error(transparent)]
     Storage(#[from] StorageError),
-    #[error("history and changeset tables must differ: {0:?}")]
-    AliasedTables(Table),
+    #[error("a present pre-image must be nonempty; use None for absence")]
+    EmptyPreimage,
     #[error("invalid commit set in {table:?} for {key:?}: {source}")]
     InvalidCommits {
         table: Table,

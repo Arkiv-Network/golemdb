@@ -4,10 +4,10 @@ use roaring::RoaringTreemap;
 ///
 /// An empty in-memory set represents a missing history row. Persisted rows must
 /// be nonempty. The wire format is the pinned RoaringTreemap format: a little-
-/// endian u64 partition count, then ascending u32 high parts and portable
-/// Roaring bitmaps. Each bitmap removes run compression, then optimizes before
-/// serialization. No empty partitions, alternate encodings or trailing bytes
-/// are accepted. This is a history codec, not an index container codec.
+/// endian u64 partition count, then u32 high parts and portable Roaring bitmaps.
+/// Writers emit ascending, nonempty partitions and normalize each bitmap's run
+/// compression. Reads use Roaring's checked decoder and reject trailing bytes
+/// and empty sets without re-encoding. This is separate from index container codecs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommitSet(RoaringTreemap);
 
@@ -17,8 +17,8 @@ pub enum CommitSetError {
     Decode(#[from] std::io::Error),
     #[error("an empty commit set must have no history row")]
     Empty,
-    #[error("noncanonical commit set encoding")]
-    NonCanonical,
+    #[error("trailing bytes after commit set")]
+    TrailingBytes,
 }
 
 impl CommitSet {
@@ -26,8 +26,11 @@ impl CommitSet {
     pub fn decode(bytes: &[u8]) -> Result<Self, CommitSetError> {
         let mut input = bytes;
         let set = Self(RoaringTreemap::deserialize_from(&mut input)?);
-        if !input.is_empty() || set.encode()? != bytes {
-            return Err(CommitSetError::NonCanonical);
+        if !input.is_empty() {
+            return Err(CommitSetError::TrailingBytes);
+        }
+        if set.0.is_empty() {
+            return Err(CommitSetError::Empty);
         }
         Ok(set)
     }
@@ -37,9 +40,7 @@ impl CommitSet {
         if self.0.is_empty() {
             return Err(CommitSetError::Empty);
         }
-        // Normalizing each partition also removes any empty partition. Comparing
-        // these bytes on decode catches duplicate/unordered high parts, which
-        // RoaringTreemap's decoder otherwise inserts into a sorted map.
+        // Normalize nonempty partitions for deterministic writes.
         let mut out = Vec::new();
         let count = self.0.bitmaps().filter(|(_, b)| !b.is_empty()).count() as u64;
         out.extend_from_slice(&count.to_le_bytes());
@@ -133,6 +134,14 @@ mod tests {
             CommitSet::decode(&[0; 8]),
             Err(CommitSetError::Empty)
         ));
+        // A serialized partition can itself hold an empty bitmap.
+        let empty_bitmap = [0x3a, 0x30, 0, 0, 0, 0, 0, 0];
+        let empty_partition =
+            [&1u64.to_le_bytes()[..], &0u32.to_le_bytes(), &empty_bitmap].concat();
+        assert!(matches!(
+            CommitSet::decode(&empty_partition),
+            Err(CommitSetError::Empty)
+        ));
         let set: CommitSet = [42].into_iter().collect();
         let bytes = set.encode().unwrap();
         for end in 0..bytes.len() {
@@ -145,7 +154,7 @@ mod tests {
         trailing.push(0);
         assert!(matches!(
             CommitSet::decode(&trailing),
-            Err(CommitSetError::NonCanonical)
+            Err(CommitSetError::TrailingBytes)
         ));
         let mut bad = bytes;
         bad[12] = 0xff; // Portable bitmap cookie.
@@ -156,36 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_unordered_and_empty_partitions() {
-        let a = [1].into_iter().collect::<CommitSet>().encode().unwrap();
-        let b = [(1 << 32) + 2]
-            .into_iter()
-            .collect::<CommitSet>()
-            .encode()
-            .unwrap();
-        for (left, right) in [(&a[8..], &a[8..]), (&b[8..], &a[8..])] {
-            let bytes = [&2u64.to_le_bytes()[..], left, right].concat();
-            assert!(matches!(
-                CommitSet::decode(&bytes),
-                Err(CommitSetError::NonCanonical)
-            ));
-        }
-        let empty_bitmap = [0x3a, 0x30, 0, 0, 0, 0, 0, 0];
-        let with_empty = [
-            &2u64.to_le_bytes()[..],
-            &a[8..],
-            &1u32.to_le_bytes(),
-            &empty_bitmap,
-        ]
-        .concat();
-        assert!(matches!(
-            CommitSet::decode(&with_empty),
-            Err(CommitSetError::NonCanonical)
-        ));
-    }
-
-    #[test]
-    fn canonicalizes_runs_and_rejects_alternate_valid_encodings() {
+    fn writes_canonical_runs_and_reads_alternate_valid_encodings() {
         let raw: RoaringTreemap = (1..1000).collect();
         let mut noncanonical = Vec::new();
         raw.serialize_into(&mut noncanonical).unwrap();
@@ -193,10 +173,7 @@ mod tests {
         let canonical = set.encode().unwrap();
         assert!(canonical.len() < noncanonical.len());
         assert_eq!(CommitSet::decode(&canonical).unwrap(), set);
-        assert!(matches!(
-            CommitSet::decode(&noncanonical),
-            Err(CommitSetError::NonCanonical)
-        ));
+        assert_eq!(CommitSet::decode(&noncanonical).unwrap(), set);
     }
 
     #[test]

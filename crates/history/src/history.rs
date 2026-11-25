@@ -6,11 +6,13 @@ use crate::{CommitSet, HistoryError, Result};
 /// `B` is `Vec<u8>` for owned reads and `&[u8]` inside borrowed callbacks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueSource<B = Vec<u8>> {
+    /// No later change exists; read the live value in the same transaction.
     Live,
-    Preimage(B),
+    /// The selected change records a value (`Some`) or prior absence (`None`).
+    Preimage(Option<B>),
 }
 
-/// The two distinct tables owned and named by a domain crate.
+/// Tables owned and named by a domain crate. The owner must supply distinct tables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistoryTables {
     pub history: Table,
@@ -27,19 +29,9 @@ impl HistoryTables {
         Self { history, changeset }
     }
 
-    fn validate(&self) -> Result<()> {
-        self.history.validate()?;
-        self.changeset.validate()?;
-        if self.history == self.changeset {
-            return Err(HistoryError::AliasedTables(self.history));
-        }
-        Ok(())
-    }
-
     /// Read/decode the commit set without copying the stored history bytes.
     /// Missing history is an empty set; malformed stored history is an error.
     pub fn read_commits(&self, tx: &impl ReadTransaction, item: &[u8]) -> Result<CommitSet> {
-        self.validate()?;
         tx.with_value(self.history, item, |bytes| match bytes {
             None => Ok(CommitSet::default()),
             Some(bytes) => {
@@ -62,7 +54,7 @@ impl HistoryTables {
     ) -> Result<ValueSource> {
         self.with_resolved(tx, item, target, |resolved| match resolved {
             ValueSource::Live => ValueSource::Live,
-            ValueSource::Preimage(bytes) => ValueSource::Preimage(bytes.to_vec()),
+            ValueSource::Preimage(bytes) => ValueSource::Preimage(bytes.map(<[u8]>::to_vec)),
         })
     }
 
@@ -85,18 +77,18 @@ impl HistoryTables {
 
     /// Inspect a selected pre-image without rereading history. A scan can decode
     /// its row with `CommitSet::decode`, select `first_after`, then call here.
-    /// Empty bytes are passed through; a missing row is never treated as absence.
+    /// A stored empty row yields `None`; a missing row is an error and does not
+    /// invoke the callback.
     pub fn with_preimage<T>(
         &self,
         tx: &impl ReadTransaction,
         item: &[u8],
         commit: u64,
-        inspect: impl FnOnce(&[u8]) -> T,
+        inspect: impl FnOnce(Option<&[u8]>) -> T,
     ) -> Result<T> {
-        self.validate()?;
         tx.with_value(self.changeset, &changeset_key(commit, item), |bytes| {
             bytes
-                .map(inspect)
+                .map(|bytes| inspect((!bytes.is_empty()).then_some(bytes)))
                 .ok_or_else(|| HistoryError::MissingPreimage {
                     table: self.changeset,
                     key: item.to_vec(),
@@ -109,14 +101,18 @@ impl HistoryTables {
     /// Commits must increase for this item. The owner enforces global commit
     /// ordering and coverage, including after pruning has emptied a history.
     /// Duplicate pre-images are never overwritten, even if history is missing.
+    /// `None` records prior absence as an empty row. `Some` must be nonempty.
     /// Abort the enclosing transaction after any error: this is two writes.
     pub fn record(
         &self,
         tx: &mut impl WriteTransaction,
         item: &[u8],
         commit: u64,
-        preimage: &[u8],
+        preimage: Option<&[u8]>,
     ) -> Result<()> {
+        if preimage.is_some_and(<[u8]>::is_empty) {
+            return Err(HistoryError::EmptyPreimage);
+        }
         let mut commits = self.read_commits(tx, item)?;
         if let Some(previous) = commits.latest()
             && commit <= previous
@@ -136,15 +132,19 @@ impl HistoryTables {
                 key: item.to_vec(),
                 source,
             })?;
-        tx.insert(self.changeset, &changeset_key(commit, item), preimage)
-            .map_err(|error| match error {
-                StorageError::AlreadyExists => HistoryError::ExistingPreimage {
-                    table: self.changeset,
-                    key: item.to_vec(),
-                    commit,
-                },
-                error => HistoryError::Storage(error),
-            })?;
+        tx.insert(
+            self.changeset,
+            &changeset_key(commit, item),
+            preimage.unwrap_or_default(),
+        )
+        .map_err(|error| match error {
+            StorageError::AlreadyExists => HistoryError::ExistingPreimage {
+                table: self.changeset,
+                key: item.to_vec(),
+                commit,
+            },
+            error => HistoryError::Storage(error),
+        })?;
         tx.put(self.history, item, &bytes)?;
         Ok(())
     }
