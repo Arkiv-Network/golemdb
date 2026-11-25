@@ -10,7 +10,7 @@ use golemdb_storage::{ReadCursor, ReadTransaction, Table, WriteTransaction};
 use crate::{Genesis, OpenConfig, OpenError, OpenInfo, OpenMode, OpenResult};
 
 const SUPERBLOCK: Table = Table("Superblock");
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 const ROARING: u16 = 1;
 
 fn hash_id(algorithm: HashAlgorithm) -> u16 {

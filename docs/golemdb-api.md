@@ -282,7 +282,7 @@ every record and reserved-record check.
 
 Initialization writes, in one store transaction:
 
-1. **Superblock rows:** `format` = 2 (`u32` BE), `hash_fn` (`u16` BE: 1 Keccak-256,
+1. **Superblock rows:** `format` = 3 (`u32` BE; 3 adds every user record's `#live` cell), `hash_fn` (`u16` BE: 1 Keccak-256,
    2 Blake3), `roaring` = 1 (`u16` BE), `genesis_id` (32 bytes), and `head`.
 2. **Genesis cells,** all of kind `field`:
    - for each reserved record (see [Reserved records](#reserved-records)): its `#key` cell
