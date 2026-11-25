@@ -158,6 +158,10 @@ pub use scan::CellScan;
 pub use types::{CellKind, CellType, FloatWidth, Width};
 pub use value::{CellValue, CellValueRef};
 
+/// Inclusive name bound for scanning a user record's cells. `$` sorts after
+/// `#key` and `#meta` and before every valid user name, including `$owner`.
+pub const USER_CELL_SCAN_START: &[u8] = b"$";
+
 /// Cell trie paths are the record ID (eight bytes BE) followed by the full hash
 /// digest of the encoded cell key, so each record's cells share one subtree.
 pub const CELL_TRIE_PATH_BYTES: usize = size_of::<u64>() + size_of::<golemdb_merkle::Hash>();

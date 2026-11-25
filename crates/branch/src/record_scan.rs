@@ -4,7 +4,7 @@
 //! live-key set skips overlay-only tombstones in O(log n).
 
 use crate::{BranchError, Result, overlay::Entries};
-use golemdb_cells::{CellKey, CellNameRef, CellValue, tables};
+use golemdb_cells::{CellKey, CellNameRef, CellValue, USER_CELL_SCAN_START, tables};
 use golemdb_storage::{Entry, ReadCursor, ReadTransaction};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -166,9 +166,7 @@ impl<'a, R: ReadTransaction> RecordScan<'a, R> {
         index: &'a ScanIndex,
         record: u64,
     ) -> Result<Self> {
-        // All admitted user names begin with '$' or an ASCII letter. Engine
-        // cells #key/#meta are point-read separately and never rescanned here.
-        let start = CellKey::new(record, CellNameRef::raw(b"$"));
+        let start = CellKey::new(record, CellNameRef::raw(USER_CELL_SCAN_START));
         let end = record
             .checked_add(1)
             .map(|id| Bound::Excluded(CellKey::new(id, CellNameRef::raw(b""))))

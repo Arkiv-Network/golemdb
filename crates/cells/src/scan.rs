@@ -105,8 +105,11 @@ impl<'tx, R: ReadTransaction> CellScan<'tx, R> {
                     })
                     .map_err(CellError::from)?;
             };
-            let Some(Candidate { encoded, commits }) =
-                history.next_candidate(&mut self.live, &self.prefix)?
+            let Some(Candidate {
+                encoded,
+                commits,
+                has_live_row,
+            }) = history.next_candidate(&mut self.live, &self.prefix)?
             else {
                 return Ok(None);
             };
@@ -128,13 +131,10 @@ impl<'tx, R: ReadTransaction> CellScan<'tx, R> {
             let value = match successor {
                 Some(commit) => tables::HISTORY
                     .with_preimage(self.tx, &encoded, commit, |bytes| {
-                        if bytes.is_empty() {
-                            Ok(None)
-                        } else {
-                            inspect(context, key, bytes).map(Some)
-                        }
+                        bytes.map(|bytes| inspect(context, key, bytes)).transpose()
                     })
                     .map_err(CellError::from)??,
+                None if !has_live_row => continue,
                 None => self
                     .tx
                     .with_value(tables::CELL, &encoded, |bytes| {
@@ -176,6 +176,7 @@ struct HistoricalScan<C> {
 struct Candidate {
     encoded: Vec<u8>,
     commits: Option<Vec<u8>>,
+    has_live_row: bool,
 }
 
 impl<C: ReadCursor> HistoricalScan<C> {
@@ -200,17 +201,20 @@ impl<C: ReadCursor> HistoricalScan<C> {
             .is_some_and(|(key, _)| self.live_key.as_ref().is_none_or(|live| key <= live))
         {
             let (key, commits) = self.history_row.take().expect("pending history row");
-            if self.live_key.as_ref() == Some(&key) {
+            let has_live_row = self.live_key.as_ref() == Some(&key);
+            if has_live_row {
                 self.live_key = None;
             }
             Ok(Some(Candidate {
                 encoded: key,
                 commits: Some(commits),
+                has_live_row,
             }))
         } else {
             Ok(self.live_key.take().map(|key| Candidate {
                 encoded: key,
                 commits: None,
+                has_live_row: true,
             }))
         }
     }

@@ -323,6 +323,40 @@ fn observed<R>(inner: R, fail: Option<Fail>) -> Observed<R> {
 }
 
 #[test]
+fn deleted_cells_are_scanned_without_live_point_lookups() {
+    let store = MemoryStore::new();
+    let mut tx = store.begin_write().unwrap();
+    let before = CellValue::from_u64(1);
+    // The live cursor is ahead of "age" and exhausted when we reach "zip".
+    let deleted = [key(64, b"age"), key(64, b"zip")];
+    for key in &deleted {
+        tables::HISTORY
+            .record(&mut tx, &key.encode(), 8, Some(before.encoded_bytes()))
+            .unwrap();
+    }
+    let color = key(64, b"color").encode();
+    tx.put(
+        tables::CELL,
+        &color,
+        CellValue::from_str("blue").encoded_bytes(),
+    )
+    .unwrap();
+    tables::HISTORY.record(&mut tx, &color, 9, None).unwrap();
+    tx.commit().unwrap();
+
+    let tx = observed(store.begin_read().unwrap(), Some(Fail::Value(tables::CELL)));
+    let scan_at = |target| {
+        CellReader::at(&tx, target)
+            .scan_record(64)
+            .unwrap()
+            .collect::<golemdb_cells::Result<Vec<_>>>()
+            .unwrap()
+    };
+    assert_eq!(scan_at(7), deleted.map(|key| (key, before.clone())));
+    assert!(scan_at(8).is_empty());
+}
+
+#[test]
 fn absent_candidates_are_lazy_budgetable_and_do_not_copy_live_payloads() {
     let store = MemoryStore::new();
     let mut tx = store.begin_write().unwrap();
@@ -334,7 +368,7 @@ fn absent_candidates_are_lazy_budgetable_and_do_not_copy_live_payloads() {
             CellValue::from_str("created later").encoded_bytes(),
         )
         .unwrap();
-        tables::HISTORY.record(&mut tx, &key, 1, b"").unwrap();
+        tables::HISTORY.record(&mut tx, &key, 1, None).unwrap();
     }
     tx.commit().unwrap();
     let tx = observed(store.begin_read().unwrap(), None);
@@ -397,7 +431,7 @@ fn hooks_can_refuse_before_any_row_or_before_copying_a_selected_payload() {
     let value = CellValue::from_bytes(&[9; 100_000]);
     tx.put(tables::CELL, &k, value.encoded_bytes()).unwrap();
     tables::HISTORY
-        .record(&mut tx, &k, 1, value.encoded_bytes())
+        .record(&mut tx, &k, 1, Some(value.encoded_bytes()))
         .unwrap();
     tx.commit().unwrap();
     for target in [None, Some(0), Some(1)] {
@@ -496,7 +530,7 @@ fn storage_errors_from_either_cursor_or_selected_value_are_terminal() {
     tx.put(tables::CELL, &k, CellValue::from_u64(2).encoded_bytes())
         .unwrap();
     tables::HISTORY
-        .record(&mut tx, &k, 1, CellValue::from_u64(1).encoded_bytes())
+        .record(&mut tx, &k, 1, Some(CellValue::from_u64(1).encoded_bytes()))
         .unwrap();
     tx.commit().unwrap();
     for (target, fail) in [
@@ -535,7 +569,7 @@ fn selected_corruption_fails_lazily_and_shadowed_live_bytes_are_not_decoded() {
     .unwrap();
     tx.put(tables::CELL, &k, b"broken live").unwrap();
     tables::HISTORY
-        .record(&mut tx, &k, 1, CellValue::from_u64(2).encoded_bytes())
+        .record(&mut tx, &k, 1, Some(CellValue::from_u64(2).encoded_bytes()))
         .unwrap();
     tx.put(
         tables::CELL,

@@ -2,8 +2,8 @@ use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
 use crate::{
-    CELL_TRIE_PATH_BYTES, CellKey, CellScan, CellValue, CellValueRef, Result, cell_trie::CellTrie,
-    history, tables,
+    CELL_TRIE_PATH_BYTES, CellKey, CellScan, CellValue, CellValueRef, Result, USER_CELL_SCAN_START,
+    cell_trie::CellTrie, history, tables,
 };
 
 /// Cell storage and commitment over caller-owned transactions.
@@ -198,7 +198,7 @@ impl<'tx, R: ReadTransaction> CellReader<'tx, R> {
     /// This assumes an admitted user record; it does not validate name grammar.
     /// Use `scan_record` for unrestricted reserved/binary names.
     pub fn scan_user_cells(&self, record_id: u64) -> Result<CellScan<'tx, R>> {
-        CellScan::new(self.tx, record_id, self.target, b"$")
+        CellScan::new(self.tx, record_id, self.target, USER_CELL_SCAN_START)
     }
 }
 
