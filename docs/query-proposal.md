@@ -215,11 +215,11 @@ The written order of the tree is the execution order. Cost and stopping point ar
 6. **Set combination.** Every `And`, `Or` and `Not` is charged for combining its children's sets,
    per bitmap container processed, so the budget also bounds set work that nesting would
    otherwise multiply.
-7. **Leaves.** `Eq`: one term read. `In`: values given in strictly ascending order, in the
-   type's order as for `Range`, which is also term order; one term read each. Admission checks
-   the order in one pass, so its cost is linear in the number of values. `Range`, `Prefix`, `Exists`: step through the run's terms in ascending key order from the
-   lower bound, charging every term stepped; an `Exists` with no type steps through every run of
-   the field, in type tag order.
+7. **Leaves.** `Eq`: one term read. `In`: values in any order; `InValues`
+   sorts them in the type's order as for `Range`, which is also term order, and drops
+   duplicates; one term read per distinct value. `Range`, `Prefix`, `Exists`: step through the
+   run's terms in ascending key order from the lower bound, charging every term stepped; an
+   `Exists` with no type steps through every run of the field, in type tag order.
 8. **Order.** With `sort`: fetch every matched record's first sort value; then, level by level,
    the next value of the records still tied in a group of ≥ 2 that holds a position of the page
    (design §12); each level in ascending record ID order. Charge `⌈N log₂ N⌉ × S` comparisons
@@ -334,8 +334,6 @@ Gaps against this proposal:
 - The budget is an optional step, neither required nor enforced; it becomes a constructor
   argument. No receipt, no caps.
 - `QueryOp::from_filter` is to be renamed to `QueryOp::filter`.
-- `In` accepts values in any order and deduplicates them; it is to require strictly ascending
-  values.
 - `max_bytes` and `#maxQueryBytes` do not exist yet.
 
 **Steps:**

@@ -529,8 +529,8 @@ frame, D2's admission and record base, and charges none of this.
 | a projected name, a sort key | 1 each | the name |
 | the record key of a `get` | none: fixed size, covered by the base | – |
 
-Operands arrive valid: an `In`'s values are distinct and ascending, and every operand has one
-indexable type, when the operand is built
+Operands arrive valid: every operand has one indexable type, and an `In`'s values are sorted and
+deduplicated, when the operand is built
 ([query proposal](query-proposal.md#ast-query-format)), so admission inspects them once each and
 stays linear.
 
@@ -616,8 +616,8 @@ reference execution: the execution rules of the
 | Set combination | per bitmap container processed by a union, intersection or difference | `read.set_container` |
 | Sort comparison | modeled, from the match count and the number of sort terms | `read.sort_compare` (deferred) |
 
-- **Leaves.** An `Eq` is one `read.term`, present or absent. An `In` is one `read.term` per value,
-  in the values' order. Every term found then pays for its posting list, one `read.container` per
+- **Leaves.** An `Eq` is one `read.term`, present or absent. An `In` is one `read.term` per distinct
+  value, in term order. Every term found then pays for its posting list, one `read.container` per
   bitmap container loaded.
 - **Scans.** `Range`, `Prefix` and `Exists` step through one `(name, type)` run in ascending key
   order:
@@ -993,7 +993,7 @@ F1: once every item is settled, the rules above carry its content and the list i
 | 4 | query | Unit for combining sets | decided | per bitmap container, a logical unit (D1) |
 | 25 | query | Container count of a computed set | proposed | distinct upper 48-bit values among its members |
 | 5 | query | Equality lookup, including an absent term | proposed | one `read.term`, present or absent, plus the containers of a term found |
-| 6 | query | `In` | decided | one term read per value; values distinct and ascending by construction |
+| 6 | query | `In` | decided | one term read per distinct value; values in any order, sorted and deduplicated by construction |
 | 7 | query | Scans: `Range`, `Prefix`, `Exists` | proposed | `read.term` plus one `read.term_step` per further entry read, including the one ending the scan; two unbounded sides and `Exists` scan the whole run |
 | 26 | query | Union of fewer than two inputs | proposed | not charged |
 | 9 | all | Admission for reads | proposed | [read call frame](#the-read-call-frame): D2's three-part shape, own weights starting at D2's values; one entry per filter node, operand value, projected name and sort key; operands valid by construction |
