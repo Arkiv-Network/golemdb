@@ -505,7 +505,7 @@ fn absent_candidates_can_be_stopped_before_more_work() {
             .unwrap();
         tx.put(tables::INDEX, &key.encode(), &bytes).unwrap();
         tables::HISTORY
-            .record(&mut tx, &key.encode(), 1, b"")
+            .record(&mut tx, &key.encode(), 1, None)
             .unwrap();
     }
     tx.commit().unwrap();
@@ -556,7 +556,7 @@ fn hooks_can_refuse_before_cursor_work_or_selected_payload_decoding() {
     // Invalid bytes make any accidental eager decoding observable.
     tx.put(tables::INDEX, &k, b"malformed").unwrap();
     tables::HISTORY
-        .record(&mut tx, &k, 1, b"malformed")
+        .record(&mut tx, &k, 1, Some(b"malformed"))
         .unwrap();
     tx.commit().unwrap();
     for target in [None, Some(0), Some(1)] {
@@ -620,7 +620,7 @@ fn scans_use_one_pass_and_live_reads_need_no_history_or_point_lookups() {
                 .unwrap();
             tx.put(tables::INDEX, &k.encode(), &bytes).unwrap();
             tables::HISTORY
-                .record(&mut tx, &k.encode(), 1, &bytes)
+                .record(&mut tx, &k.encode(), 1, Some(&bytes))
                 .unwrap();
         }
     }
@@ -680,7 +680,12 @@ fn returning_one_term_does_not_resolve_all_absent_later_terms() {
             .unwrap();
         tx.put(tables::INDEX, &k.encode(), &bytes).unwrap();
         tables::HISTORY
-            .record(&mut tx, &k.encode(), 1, if n == 0 { &bytes } else { b"" })
+            .record(
+                &mut tx,
+                &k.encode(),
+                1,
+                (n == 0).then_some(bytes.as_slice()),
+            )
             .unwrap();
     }
     tx.commit().unwrap();
@@ -713,7 +718,7 @@ fn storage_errors_are_terminal_for_container_and_term_scans() {
     let mut tx = store.begin_write().unwrap();
     tx.put(tables::INDEX, &k.encode(), &bytes).unwrap();
     tables::HISTORY
-        .record(&mut tx, &k.encode(), 1, &bytes)
+        .record(&mut tx, &k.encode(), 1, Some(&bytes))
         .unwrap();
     tx.commit().unwrap();
     for (target, fail) in [
@@ -754,7 +759,7 @@ fn malformed_later_containers_never_emit_partial_terms() {
         match defect {
             0 => {
                 tables::HISTORY
-                    .record(&mut tx, &encoded, 1, &bytes)
+                    .record(&mut tx, &encoded, 1, Some(&bytes))
                     .unwrap();
                 tx.delete(tables::INDEX_CHANGE_SET, &changeset_key(1, &encoded))
                     .unwrap();
@@ -765,7 +770,7 @@ fn malformed_later_containers_never_emit_partial_terms() {
             }
             2 => {
                 tables::HISTORY
-                    .record(&mut tx, &encoded, 1, b"bad container")
+                    .record(&mut tx, &encoded, 1, Some(b"bad container"))
                     .unwrap();
             }
             3 => {
@@ -823,17 +828,17 @@ fn preimages_override_corrupt_live_payloads_and_absence_is_not_term_presence() {
     let mut tx = store.begin_write().unwrap();
     tx.put(tables::INDEX, &k.encode(), b"corrupt live").unwrap();
     tables::HISTORY
-        .record(&mut tx, &k.encode(), 1, &bytes)
+        .record(&mut tx, &k.encode(), 1, Some(&bytes))
         .unwrap();
     let future = string("red");
     let future_key = key(&future, 0).encode();
     tx.put(tables::INDEX, &future_key, b"corrupt live").unwrap();
     tables::HISTORY
-        .record(&mut tx, &future_key, 1, b"")
+        .record(&mut tx, &future_key, 1, None)
         .unwrap();
     // A history-only row with no successor must fall back to current absence.
     tables::HISTORY
-        .record(&mut tx, &key(&string("old"), 0).encode(), 0, &bytes)
+        .record(&mut tx, &key(&string("old"), 0).encode(), 0, Some(&bytes))
         .unwrap();
     tx.commit().unwrap();
     let tx = observed(store.begin_read().unwrap(), None);

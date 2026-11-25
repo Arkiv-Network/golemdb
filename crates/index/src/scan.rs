@@ -151,7 +151,7 @@ impl<'tx, R: ReadTransaction> ContainerScan<'tx, R> {
         let value = match successor {
             Some(commit) => tables::HISTORY
                 .with_preimage(self.tx, &encoded, commit, |bytes| {
-                    inspect(context, key, (!bytes.is_empty()).then_some(bytes))
+                    inspect(context, key, bytes)
                 })
                 .map_err(IndexError::from)??,
             None => self

@@ -1,5 +1,5 @@
 use golemdb_merkle::{HashProvider, RootRef};
-use golemdb_storage::{ReadTransaction, scan_prefix};
+use golemdb_storage::{ReadCursor, ReadTransaction};
 
 use super::Index;
 use crate::{
