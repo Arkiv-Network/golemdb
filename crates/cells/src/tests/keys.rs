@@ -146,6 +146,11 @@ fn reserved_names_are_the_spec_s() {
     assert_eq!(reserved::MAX_CELL_NAME_LEN.as_bytes(), b"#maxCellNameLen");
 }
 
+#[test]
+fn indexed_reserved_names() {
+    assert_eq!(reserved::INDEXED, &[reserved::IS_LIVE]);
+}
+
 /// `raw` validates nothing: reserved records (§4) use the cell key as a value
 /// — a commitNr, a recordKey — and no naming rule applies inside them.
 #[test]
