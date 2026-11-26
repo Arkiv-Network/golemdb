@@ -321,10 +321,7 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
                 CellError::History(e) => Some(e),
                 CellError::Storage(e) => Some(e),
                 CellError::Merkle(e) => Some(e),
-                CellError::HistoricalScanUnavailable
-                | CellError::Key(_)
-                | CellError::Value(_)
-                | CellError::RootMismatch => None,
+                CellError::Key(_) | CellError::Value(_) | CellError::RootMismatch => None,
             }
         } else if let Some(error) = error.downcast_ref::<IndexError>() {
             match error {

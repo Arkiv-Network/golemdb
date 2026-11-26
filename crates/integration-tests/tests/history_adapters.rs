@@ -371,7 +371,7 @@ impl<R: ReadTransaction> ReadTransaction for Observed<R> {
     }
 
     fn cursor(&self, _: Table, _: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
-        panic!("point reads and rejected historical scans must not open a cursor")
+        panic!("point reads must not open a cursor")
     }
 }
 
@@ -464,11 +464,6 @@ fn reader_accesses_are_borrowed_and_head_paths_do_not_consult_history() {
             ("borrowed", index_tables::INDEX)
         ]
     );
-    assert!(matches!(
-        CellReader::at(&tx, 20).scan_record(1),
-        Err(CellError::HistoricalScanUnavailable)
-    ));
-    assert!(tx.reads.take().is_empty());
     for (table, target) in [
         (cell_tables::CELL_HISTORY, 10),
         (cell_tables::CELL_CHANGE_SET, 10),

@@ -1,11 +1,9 @@
-use std::iter::FusedIterator;
-
 use golemdb_merkle::{HashProvider, RootRef};
-use golemdb_storage::{ReadCursor, ReadTransaction, Scan, Table, WriteTransaction, scan_prefix};
+use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
 use crate::{
-    CELL_TRIE_PATH_BYTES, CellError, CellKey, CellValue, CellValueRef, Result, cell_trie::CellTrie,
-    history, tables,
+    CELL_TRIE_PATH_BYTES, CellKey, CellScan, CellValue, CellValueRef, Result, USER_CELL_SCAN_START,
+    cell_trie::CellTrie, history, tables,
 };
 
 /// Cell storage and commitment over caller-owned transactions.
@@ -63,7 +61,7 @@ impl<'h, H: HashProvider> Cells<'h, H> {
         &self,
         tx: &'tx T,
         record_id: u64,
-    ) -> Result<CellScan<T::Cursor<'tx>>> {
+    ) -> Result<CellScan<'tx, T>> {
         CellReader::new(tx).scan_record(record_id)
     }
 
@@ -189,16 +187,18 @@ impl<'tx, R: ReadTransaction> CellReader<'tx, R> {
 
     /// Scan one record in name-byte order. Rows are owned; the iterator borrows
     /// the snapshot and preserves raw reserved-record names.
-    /// Historical readers return `HistoricalScanUnavailable` until historical
-    /// enumeration is implemented; they never silently scan live state.
-    pub fn scan_record(&self, record_id: u64) -> Result<CellScan<R::Cursor<'tx>>> {
-        if self.target.is_some() {
-            return Err(CellError::HistoricalScanUnavailable);
-        }
-        Ok(CellScan {
-            scan: scan_prefix(self.tx, tables::CELL, record_id.to_be_bytes().to_vec())?,
-            done: false,
-        })
+    /// At a historical target, merge live and historical names and emit only
+    /// cells present at that target. The caller validates target availability.
+    pub fn scan_record(&self, record_id: u64) -> Result<CellScan<'tx, R>> {
+        CellScan::new(self.tx, record_id, self.target, b"")
+    }
+
+    /// Scan the same name range as branch user-cell scans: names at or after
+    /// `$`, excluding `#key` and `#meta`, which callers can point-read separately.
+    /// This assumes an admitted user record; it does not validate name grammar.
+    /// Use `scan_record` for unrestricted reserved/binary names.
+    pub fn scan_user_cells(&self, record_id: u64) -> Result<CellScan<'tx, R>> {
+        CellScan::new(self.tx, record_id, self.target, USER_CELL_SCAN_START)
     }
 }
 
@@ -222,31 +222,3 @@ fn write_values(tx: &mut impl WriteTransaction, changes: &[CellValueChange]) -> 
     }
     Ok(())
 }
-
-/// Lazy record scan. Storage or decoding errors are returned once and terminate
-/// iteration. Missing records produce an empty iterator.
-pub struct CellScan<C> {
-    scan: Scan<C>,
-    done: bool,
-}
-
-impl<C: ReadCursor> Iterator for CellScan<C> {
-    type Item = Result<(CellKey, CellValue)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-        let result = self
-            .scan
-            .next()?
-            .map_err(Into::into)
-            .and_then(|(key, value)| Ok((CellKey::decode(&key)?, CellValue::parse(value)?)));
-        if result.is_err() {
-            self.done = true;
-        }
-        Some(result)
-    }
-}
-
-impl<C: ReadCursor> FusedIterator for CellScan<C> {}
