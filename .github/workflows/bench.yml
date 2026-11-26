@@ -1,0 +1,103 @@
+name: Benchmarks
+
+# Runs the write and query benchmarks. Pushes to main save their results as
+# the baseline; pull requests compare against the latest one and comment when
+# a case gets worse.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  MAIN: ${{ github.event_name == 'push' }}
+  # A fork's token can't comment.
+  COMMENT: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - run: rustup show
+      - uses: extractions/setup-just@v3
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run benchmarks
+        # Adds pipefail, so a failing benchmark run fails the step despite `tee`.
+        shell: bash
+        env:
+          BENCH_STORAGE_JSON: ${{ github.workspace }}/storage.json
+          # Outside `target`, which the Rust cache keeps only in part: Criterion
+          # would compare against a half-restored run and break its output.
+          CRITERION_HOME: ${{ runner.temp }}/criterion
+        run: |
+          just bench --args="-- --output-format bencher" | tee times.txt
+
+      # The latest baseline main saved. Cache keys are immutable, so each run
+      # attempt saves under its own key.
+      - id: baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: baseline
+          key: bench-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: bench-
+
+      - if: steps.baseline.outputs.cache-matched-key == ''
+        run: echo "::warning::No baseline found, so nothing is compared."
+
+      # Shared runners vary, so only a clear slowdown is reported.
+      - uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Times
+          tool: cargo
+          output-file-path: times.txt
+          external-data-json-path: baseline/times.json
+          save-data-file: ${{ env.MAIN }}
+          alert-threshold: 125%
+          comment-on-alert: ${{ env.COMMENT }}
+          summary-always: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Storage work is the same on every machine, so any increase is reported.
+      - uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Storage
+          tool: customSmallerIsBetter
+          output-file-path: storage.json
+          external-data-json-path: baseline/storage.json
+          save-data-file: ${{ env.MAIN }}
+          alert-threshold: 100%
+          comment-on-alert: ${{ env.COMMENT }}
+          summary-always: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same numbers, reported on any decrease, which can be a bug too.
+      - uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Storage decrease
+          tool: customBiggerIsBetter
+          output-file-path: storage.json
+          external-data-json-path: baseline/storage.json
+          save-data-file: ${{ env.MAIN }}
+          alert-threshold: 100%
+          comment-on-alert: ${{ env.COMMENT }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - if: env.MAIN == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: baseline
+          key: bench-${{ github.run_id }}-${{ github.run_attempt }}

@@ -258,7 +258,7 @@ impl<'h, H: HashProvider, const N: usize> Trie<'h, H, N> {
     /// same traversal that applies the edits. A mismatch is
     /// [`MerkleError::LeafMismatch`]; abort the transaction then, as rows may
     /// already be written.
-    pub fn apply_checked(
+    pub fn apply_with_check(
         &self,
         tx: &mut impl WriteTransaction,
         commit: u64,
@@ -720,7 +720,7 @@ enum Edited<const N: usize> {
     New(Vec<u8>, Box<[RootRef<N>; BRANCH_SLOTS]>),
 }
 
-/// An edit for [`Trie::apply_checked`]: the leaf hash expected at `path`
+/// An edit for [`Trie::apply_with_check`]: the leaf hash expected at `path`
 /// before the batch and the one to set after it, `None` for absent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CheckedEdit<const N: usize> {
