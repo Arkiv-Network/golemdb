@@ -8,6 +8,8 @@ pub type Result<T> = std::result::Result<T, IndexError>;
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
     #[error(transparent)]
+    History(#[from] golemdb_history::HistoryError),
+    #[error(transparent)]
     Storage(#[from] golemdb_storage::StorageError),
     #[error(transparent)]
     Merkle(#[from] golemdb_merkle::MerkleError),
