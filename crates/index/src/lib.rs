@@ -38,6 +38,7 @@ pub mod history;
 mod index;
 mod index_trie;
 mod key;
+mod scan;
 pub mod tables;
 mod term;
 mod term_range;
@@ -47,9 +48,10 @@ pub use container::BitmapContainer;
 pub use container_id::ContainerId;
 pub use error::{BitmapError, IndexError, Result};
 pub use index::{
-    ContainerValueChange, Index, IndexReader, IndexUpdate, PostingChange, TermScan, term_exists,
+    ContainerValueChange, Index, IndexReader, IndexUpdate, PostingChange, term_exists,
 };
 pub use key::IndexKey;
+pub use scan::{ContainerScan, TermScan};
 pub use term::{IndexTerm, TermError};
 pub use term_range::{RangeError, TermRange};
 
