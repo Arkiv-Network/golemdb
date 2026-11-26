@@ -381,7 +381,7 @@ In D2, these modeled path rewrites are the depth terms of every cell and index o
 
 **Global counters.** This model requires GolemDB to track two database-wide counters, the cells `#liveCells` and `#indexTerms` of [`#alloc`](golemdb-design.md#alloc-recordid-1):
 
-- **Live cells:** the number of `CellTrie` leaves, across all record classes: user cells, `#key` and `#meta` cells, bindings, root history, weights, and the counters themselves.
+- **Live cells:** the number of `CellTrie` leaves, across all record classes: user cells, `#key`, `#meta` and `#is_live` cells, bindings, root history, weights, and the counters themselves.
 - **Distinct index terms:** the number of `IndexTrie` leaves.
 
 Their only purpose is to determine the modeled trie depth. They differ from the per-record counts in [`#meta`](#the-meta-cell), which cover one record's user cells and serve caps, deletion bounds and the host. The counters are committed state, so every node derives the same depth, also after a restart. GolemDB updates them once per commit from the branch's net changes, as host-funded commit overhead (D8).
@@ -559,8 +559,8 @@ with them, and a query materializes its records with them.
   the cell's bytes are then charged as a step of their own, before the value is decoded and copied
   into the result. Only `str` and `bytes` vary; every other type has a fixed width.
 - **The byte basis is D4's:** a returned cell counts `(8 + |name|) + (1 + |value|)`, the same
-  basis as `#meta`'s `cell_bytes` and as `max_bytes` paging (D6.2). The two system cells a read
-  returns have fixed sizes: `#key` 45 bytes, `#meta` 46 bytes.
+  basis as `#meta`'s `cell_bytes` and as `max_bytes` paging (D6.2). The three system cells a read
+  returns have fixed sizes: `#key` 45 bytes, `#meta` 46 bytes, `#is_live` 18 bytes.
 - **Absent costs the lookup, not the bytes.** A key resolution, cell read or term lookup that finds
   nothing still pays its lookup; it returns no bytes.
 - **Cell reads need a metering-aware method.** Reading a cell must expose its length before
@@ -577,7 +577,7 @@ query's materialization (D6.2):
 | --- | --- | --- |
 | projection `.only(names)` | one `read.cell` per distinct name, present or absent | the D4 size of each cell found |
 | existence check `.only([])` | none beyond resolving the record | none |
-| full record | one `read.cell` each of `#key` and `#meta`, which gives the record's exact counts; then one `read.cell_scan` per user cell | `cell_bytes` from `#meta`, plus 45 for `#key` and 46 for `#meta` |
+| full record | one `read.cell` each of `#key`, `#meta` and `#is_live`, `#meta` giving the record's exact counts; then one `read.cell_scan` per user cell | `cell_bytes` from `#meta`, plus 45 for `#key`, 46 for `#meta` and 18 for `#is_live` |
 
 A full record's charge is known from `#meta` before its user cells are scanned, so the scan is
 charged as one step. A projection may name reserved cells, such as `#meta` alone
@@ -784,13 +784,14 @@ The formulas below are the same rule written out per call: each term is a count 
 
 #### Read formulas
 
-Notation: `A(n, b)` is admission over `n` entries and `b` bytes inspected; `KEY` and `META` are
-the D4 sizes of the two system cells a read returns (D6.1),
+Notation: `A(n, b)` is admission over `n` entries and `b` bytes inspected; `KEY`, `META` and
+`LIVE` are the D4 sizes of the three system cells a read returns (D6.1),
 
 ```
 A(n, b) = read.admission.base + n × read.admission.entry + b × read.admission.byte
 KEY     = (8 + |"#key"|)  + (1 + 32) = 45                             record ID and name; tag and record key
 META    = (8 + |"#meta"|) + (1 + 32) = 46                             record ID and name; tag and four u64 counts
+LIVE    = (8 + |"#is_live"|) + (1 + 1) = 18                           record ID and name; tag and bool
 ```
 
 **`get`**:
@@ -800,8 +801,8 @@ cost_get    = A(names, name bytes) + read.base + read.key + cost_record
 cost_record = 0                                                       record not found
             | 0                                                       existence check
             | Σ over cell names n:  read.cell + size(n) × read.byte    projection; size 0 if absent
-            | 2 × read.cell + cells × read.cell_scan
-              + (cell_bytes + KEY + META) × read.byte                  full record: #key, #meta, then the scan
+            | 3 × read.cell + cells × read.cell_scan
+              + (cell_bytes + KEY + META + LIVE) × read.byte           full record: #key, #meta, #is_live, then the scan
 ```
 
 **`count`** and **`query`**:
@@ -891,7 +892,7 @@ Rules for using it:
    | `read.container` | once per container, before it is loaded |
    | `read.set_container` | once per combination, for all its input containers, before it runs |
    | `read.byte` | once per cell of a projection, for its D4 size, after the read and before the copy |
-   | full-record scan | once per record, after the `#key` and `#meta` point reads and before the scan: all scan steps and the bytes of the whole record, `#key` and `#meta` included, from `#meta`'s counts |
+   | full-record scan | once per record, after the `#key`, `#meta` and `#is_live` point reads and before the scan: all scan steps and the bytes of the whole record, `#key`, `#meta` and `#is_live` included, from `#meta`'s counts |
    | `read.sort_compare` | once per sort, before it runs |
 
    A batch whose charge does not fit stops before any of its units.
@@ -1023,7 +1024,7 @@ F1: once every item is settled, the rules above carry its content and the list i
 | 23 | all | Charge unit per step | proposed | [D6.3](#compiling-the-cost-while-executing) rule 2 |
 | 24 | core | Core reads shared with write planning | decided (2026-10-20) | D2 charges `read.key`, `read.cell`, `read.term` for its planning reads; no `read.byte` |
 | 10 | core | `get` | proposed | admission, call base, key resolution, then the record's shape |
-| 8 | core | Record shapes and byte basis | proposed | projection, existence check, full record from `#meta`; D4 basis, `#key` 45 and `#meta` 46 bytes |
+| 8 | core | Record shapes and byte basis | proposed | projection, existence check, full record from `#meta`; D4 basis, `#key` 45, `#meta` 46 and `#is_live` 18 bytes |
 | 16 | core | Branch reads | proposed | the same steps and weights as a committed read, calibrated for an overlay miss (R4, R5) |
 | 20 | core | Historical reads | deferred | flat surcharge per item |
 | 4 | query | Unit for combining sets | decided | per bitmap container, a logical unit (D1) |

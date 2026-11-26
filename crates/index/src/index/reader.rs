@@ -363,7 +363,7 @@ mod tests {
 
     use super::*;
     use crate::{ContainerId, PostingChange};
-    use golemdb_cells::CellType;
+    use golemdb_cells::{CellNameRef, CellType, CellValue};
     use golemdb_merkle::Keccak256Hasher;
     use golemdb_storage::{MemoryStore, Store, Table, WriteTransaction};
 
@@ -371,13 +371,45 @@ mod tests {
         IndexTerm::new("tag", CellType::Str, &[b'a' + value]).unwrap()
     }
 
+    /// A term of `tagz`, a name whose terms all sort past every term of
+    /// [`tag`]: a range over `tag` ends at one of its rows, not at the
+    /// table's end.
+    fn neighbour(value: u8) -> IndexTerm {
+        IndexTerm::new("tagz", CellType::Str, &[b'a' + value]).unwrap()
+    }
+
+    /// The `str` terms of [`tag`] between the values `lower` and `upper`,
+    /// `None` when the bounds admit none.
+    fn tag_range(lower: Bound<u8>, upper: Bound<u8>) -> Option<TermRange> {
+        let value = |n: u8| CellValue::from_str(&char::from(b'a' + n).to_string());
+        let (lower, upper) = (lower.map(value), upper.map(value));
+        TermRange::between(
+            CellNameRef::raw(b"tag"),
+            CellType::Str,
+            lower.as_ref().map(CellValue::as_view),
+            upper.as_ref().map(CellValue::as_view),
+        )
+        .unwrap()
+    }
+
     /// A store whose index holds `postings`, per [`tag`] value.
     fn store_of(postings: &[(u8, Vec<u64>)]) -> MemoryStore {
+        store_of_terms(
+            postings
+                .iter()
+                .map(|(value, ids)| (tag(*value), ids.as_slice())),
+        )
+    }
+
+    /// A store whose index holds `postings`, per term.
+    fn store_of_terms<'a>(
+        postings: impl IntoIterator<Item = (IndexTerm, &'a [u64])>,
+    ) -> MemoryStore {
         let store = MemoryStore::new();
         let mut tx = store.begin_write().unwrap();
-        let changes = postings.iter().flat_map(|(value, ids)| {
-            ids.iter().map(|&record_id| PostingChange::Add {
-                term: tag(*value),
+        let changes = postings.into_iter().flat_map(|(term, ids)| {
+            ids.iter().map(move |&record_id| PostingChange::Add {
+                term: term.clone(),
                 record_id,
             })
         });
@@ -549,6 +581,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_confined_scan_ends_at_the_first_row_past_its_range() {
+        // Terms `a`, `b` and `c`, each with one container in each of 150
+        // regions. The range holds `a` and `b`, so `c`'s rows lie past it.
+        let regions: Vec<u64> = (0..150).map(|region| region << 16).collect();
+        let dense: Vec<_> = (0..3).map(|value| (value, regions.clone())).collect();
+        let store = store_of(&dense);
+        let read = store.begin_read().unwrap();
+        let index = Index::new(&Keccak256Hasher);
+        for range in [
+            tag_range(Bound::Included(0), Bound::Included(1)),
+            tag_range(Bound::Unbounded, Bound::Excluded(2)),
+        ] {
+            let range = range.expect("the bounds admit `a` and `b`");
+            for (wanted, seeks, rows) in [
+                // Past `b`'s one wanted row, the seek past the term lands on
+                // `c`'s first row, which ends the scan.
+                (vec![0], 1 + 2, 2 * 2 + 1),
+                // The seek to a region `b` lacks lands on `c`'s first row
+                // likewise.
+                (vec![0, 200 << 16], 1 + 2, 2 * 2 + 1),
+                // `b`'s last row is wanted: the row after it, `c`'s first,
+                // ends the scan without a seek.
+                (vec![149 << 16], 1 + 2, 2 * 3 + 1),
+            ] {
+                let regions = regions_of(wanted.iter().copied());
+                let counted_rows = Cell::new(0);
+                let counted = Counted {
+                    tx: &read,
+                    seeks: Cell::new(0),
+                    rows: &counted_rows,
+                };
+                let confined: Vec<_> = index
+                    .terms_within(&counted, range.clone(), &regions)
+                    .unwrap()
+                    .collect::<Result<_>>()
+                    .unwrap();
+                let found: Vec<_> = confined
+                    .iter()
+                    .map(|(term, bitmap)| (term.clone(), bitmap.treemap().iter().collect()))
+                    .collect();
+                // The wanted IDs the terms hold: every term holds each region's first.
+                let held: Vec<u64> = wanted
+                    .iter()
+                    .copied()
+                    .filter(|&id| id < 150 << 16)
+                    .collect();
+                assert_eq!(
+                    found,
+                    [(tag(0), held.clone()), (tag(1), held)],
+                    "{range:?}, {wanted:?}"
+                );
+                assert_eq!(counted.seeks.get(), seeks, "{range:?}, {wanted:?}: seeks");
+                assert_eq!(counted_rows.get(), rows, "{range:?}, {wanted:?}: rows");
+            }
+        }
+    }
+
     /// Postings of up to four terms, over IDs in a few regions and a few far
     /// ones, so terms and regions overlap often.
     fn postings() -> impl Strategy<Value = Vec<(u8, Vec<u64>)>> {
@@ -563,13 +653,31 @@ mod tests {
         )
     }
 
+    /// A bound on the values of [`tag`], all of them and one past.
+    fn bound() -> impl Strategy<Value = Bound<u8>> {
+        prop_oneof![
+            Just(Bound::Unbounded),
+            (0..5u8).prop_map(Bound::Included),
+            (0..5u8).prop_map(Bound::Excluded),
+        ]
+    }
+
     proptest! {
         #[test]
         fn confined_reads_are_full_reads_within_the_regions(
             postings in postings(),
+            neighbours in postings(),
             wanted in prop::collection::vec(prop_oneof![0..8u64 << 16, any::<u64>()], 0..12),
+            lower in bound(),
+            upper in bound(),
+            prefix in prop_oneof![Just(String::new()), (0..5u8).prop_map(|n| char::from(b'a' + n).to_string())],
         ) {
-            let store = store_of(&postings);
+            let store = store_of_terms(
+                postings
+                    .iter()
+                    .map(|(value, ids)| (tag(*value), ids.as_slice()))
+                    .chain(neighbours.iter().map(|(value, ids)| (neighbour(*value), ids.as_slice()))),
+            );
             let read = store.begin_read().unwrap();
             let index = Index::new(&Keccak256Hasher);
             let regions = regions_of(wanted);
@@ -579,18 +687,26 @@ mod tests {
                     index.postings(&read, &tag(value)).unwrap().within(&regions)
                 );
             }
-            let full: Vec<_> = index
-                .terms(&read, TermRange::all())
-                .unwrap()
-                .map(|entry| entry.map(|(term, bitmap)| (term, bitmap.within(&regions))))
-                .collect::<Result<_>>()
-                .unwrap();
-            let confined: Vec<_> = index
-                .terms_within(&read, TermRange::all(), &regions)
-                .unwrap()
-                .collect::<Result<_>>()
-                .unwrap();
-            prop_assert_eq!(confined, full);
+            let ranges = [
+                Some(TermRange::all()),
+                tag_range(lower, upper),
+                Some(TermRange::with_prefix(CellNameRef::raw(b"tag"), &prefix).unwrap()),
+                Some(TermRange::of_name(CellNameRef::raw(b"tag"), None).unwrap()),
+            ];
+            for range in ranges.into_iter().flatten() {
+                let full: Vec<_> = index
+                    .terms(&read, range.clone())
+                    .unwrap()
+                    .map(|entry| entry.map(|(term, bitmap)| (term, bitmap.within(&regions))))
+                    .collect::<Result<_>>()
+                    .unwrap();
+                let confined: Vec<_> = index
+                    .terms_within(&read, range.clone(), &regions)
+                    .unwrap()
+                    .collect::<Result<_>>()
+                    .unwrap();
+                prop_assert_eq!(confined, full, "{:?}", range);
+            }
         }
     }
 

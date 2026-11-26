@@ -460,14 +460,19 @@ fn run_scans_stay_in_their_run_and_load_each_bitmap() {
 fn confined_reads_hold_the_containers_of_the_given_regions() {
     let (_dir, db) = fixture::db();
     let index = Index::new(&HASH);
-    // Three terms, each in regions 0 to 7 and in one far region.
+    // Three terms of `tag`, each in regions 0 to 7 and in one far region,
+    // and one of `tagz`, whose terms sort past all of `tag`'s: a range over
+    // `tag` ends at one of its rows.
     let ids = |value: u8| {
         (0..8)
             .map(move |region| record_id(region, u16::from(value) + 1))
             .chain([record_id(1 << 30, 7)])
     };
+    let neighbour = IndexTerm::new("tagz", CellType::Str, b"a").unwrap();
     let mut tx = db.begin_write().unwrap();
-    let changes = (0..3).flat_map(|value| ids(value).map(move |id| add(&term(value), id)));
+    let changes = (0..3)
+        .flat_map(|value| ids(value).map(move |id| add(&term(value), id)))
+        .chain(ids(0).map(|id| add(&neighbour, id)));
     index.apply(&mut tx, 0, RootRef::Empty, changes).unwrap();
     tx.commit().unwrap();
     let read = db.begin_read().unwrap();
@@ -497,20 +502,50 @@ fn confined_reads_hold_the_containers_of_the_given_regions() {
                 "{wanted:?}, {value}"
             );
         }
-        let confined = index
-            .terms_within(&read, TermRange::all(), &regions)
-            .unwrap()
-            .collect::<golemdb_index::Result<Vec<_>>>()
-            .unwrap();
-        let full = index
-            .terms(&read, TermRange::all())
-            .unwrap()
-            .map(|entry| entry.map(|(term, bitmap)| (term, bitmap.within(&regions))))
-            .collect::<golemdb_index::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(confined, full, "{wanted:?}");
-        // Every term is still stepped, with its containers in the regions.
-        assert_eq!(confined.len(), 3);
+        // Every term in the range is still stepped, with its containers in
+        // the regions, and none past it.
+        for (range, terms) in [
+            (
+                Some(TermRange::all()),
+                vec![term(0), term(1), term(2), neighbour.clone()],
+            ),
+            (
+                TermRange::of_name(CellNameRef::raw(b"tag"), None).ok(),
+                vec![term(0), term(1), term(2)],
+            ),
+            (
+                tag_range(Bound::Included(1), Bound::Unbounded),
+                vec![term(1), term(2)],
+            ),
+            (
+                tag_range(Bound::Unbounded, Bound::Excluded(2)),
+                vec![term(0), term(1)],
+            ),
+            (
+                tag_range(Bound::Excluded(0), Bound::Included(1)),
+                vec![term(1)],
+            ),
+            (
+                TermRange::with_prefix(CellNameRef::raw(b"tag"), "c").ok(),
+                vec![term(2)],
+            ),
+        ] {
+            let range = range.expect("the bounds admit a term");
+            let confined = index
+                .terms_within(&read, range.clone(), &regions)
+                .unwrap()
+                .collect::<golemdb_index::Result<Vec<_>>>()
+                .unwrap();
+            let full = index
+                .terms(&read, range.clone())
+                .unwrap()
+                .map(|entry| entry.map(|(term, bitmap)| (term, bitmap.within(&regions))))
+                .collect::<golemdb_index::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(confined, full, "{wanted:?}, {range:?}");
+            let stepped: Vec<_> = confined.into_iter().map(|(term, _)| term).collect();
+            assert_eq!(stepped, terms, "{wanted:?}, {range:?}");
+        }
     }
 }
 

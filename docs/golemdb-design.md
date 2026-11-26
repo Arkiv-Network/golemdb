@@ -714,7 +714,9 @@ serves; a standalone `Not`, anywhere else, subtracts from this term's postings: 
 - **Engine-maintained.** `create` writes it, `delete` removes it with the record, and seal
   derives its postings from the cell diff as for any attribute. The name starts with `#`, so no user
   cell can take it and the data plane cannot write it. A filter or sort key cannot name it either:
-  the engine reads the term itself.
+  the engine reads the term itself. Seal rejects any other `#is_live` write as a broken invariant:
+  a value other than the attribute `true`, a field `true` included, or a marker on a system or
+  admin record.
 - **The only indexed engine name.** An index term's name is a user name or `#is_live`. Any other
   engine cell is a `field`, and an indexed one is rejected at seal as a broken invariant.
 - **Charged as a system cell**, together with its term's join on `create` and leave on `delete`
@@ -1120,7 +1122,7 @@ single-winner commit — no bespoke allocator rules.
 
 `#liveCells` and `#indexTerms` are the **global counters** from which metering derives the modeled
 trie depth ([metering D3](golemdb-metering.md#d3-write-metering-and-modeled-trie-depth)). They
-count every leaf of each trie, across all record classes — user cells, `#key` and `#meta` cells,
+count every leaf of each trie, across all record classes — user cells, `#key`, `#meta` and `#is_live` cells,
 bindings, root history, weights, and these counters themselves — because the depth they model is
 the depth of the whole trie. They are not per-record counts; those are in
 [`#meta`](#record-shape-the-meta-cell). The engine updates them once per commit, from the net diff

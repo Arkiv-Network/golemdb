@@ -697,7 +697,7 @@ Looking up the origin for a receipt never invalidates a branch, and an origin ne
 so receipts cannot race with commits.
 
 **`details`** are the call's effects on the record's user cells, counted as in metering D4.
-System cells (`#key`, `#meta`, the binding) are not counted:
+System cells (`#key`, `#meta`, `#is_live`, the binding) are not counted:
 
 | Effect | Counts |
 | --- | --- |

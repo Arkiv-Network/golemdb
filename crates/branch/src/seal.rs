@@ -1,6 +1,6 @@
 use golemdb_cells::{
     CellChange, CellKey, CellNameRef, CellType, CellValue, CellValueRef, Cells, CellsUpdate,
-    system, tables,
+    reserved, system, tables,
 };
 use golemdb_index::{Index, IndexTerm, IndexUpdate, PostingChange};
 use golemdb_merkle::{Hash, HashProvider};
@@ -71,12 +71,23 @@ pub(crate) fn compute(
     let cells_update = cells.apply(&mut tx, commit, roots.state, changes)?;
     let mut postings = Vec::new();
     for change in &cells_update.changed_cells {
+        let record_id = change.key.record_id();
+        // `#is_live` is engine-maintained: the attribute `true`, on user records only
+        // (design §3). Any other value, a field `true` included, would silently move the
+        // record in or out of the index's live set, so it is refused as a broken
+        // invariant. Removing the cell is the record's delete, and always allowed.
+        if change.key.name() == reserved::IS_LIVE
+            && change.after.as_ref().is_some_and(|after| {
+                *after != CellValue::live() || record_id < system::FIRST_USER_RECORD_ID
+            })
+        {
+            return Err(BranchError::InvalidLiveCell { record_id });
+        }
         let before = term(&change.key, change.before.as_ref())?;
         let after = term(&change.key, change.after.as_ref())?;
         if before == after {
             continue;
         }
-        let record_id = change.key.record_id();
         if let Some(term) = before {
             postings.push(PostingChange::Remove { term, record_id });
         }
@@ -104,4 +115,160 @@ fn term(key: &CellKey, value: Option<&CellValue>) -> Result<Option<IndexTerm>> {
         key.name(),
         value.as_view(),
     )?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Branches, publication_tests::seed};
+    use golemdb_cells::{CellKind, system::FIRST_USER_RECORD_ID};
+    use golemdb_merkle::Keccak256Hasher;
+    use golemdb_storage::MemoryStore;
+    use std::sync::Arc;
+
+    fn live_key(record_id: u64) -> CellKey {
+        CellKey::new(record_id, reserved::IS_LIVE)
+    }
+
+    fn attribute(value: CellValue) -> CellValue {
+        value
+            .with_kind(CellKind::Attribute)
+            .expect("bool and str values can be attributes")
+    }
+
+    fn branches() -> Branches<MemoryStore, Keccak256Hasher> {
+        let db = MemoryStore::new();
+        seed(&db, &Keccak256Hasher, 0, &[]);
+        Branches::new(db, Keccak256Hasher, None, None).expect("the head is seeded")
+    }
+
+    /// Seal a branch over the head that applies `edit`, the branch still open.
+    fn seal_after(
+        branches: &Branches<MemoryStore, Keccak256Hasher>,
+        edit: impl FnOnce(&mut crate::CellWrite<'_, <MemoryStore as golemdb_storage::Store>::Read<'_>>),
+    ) -> (crate::BranchId, Result<Arc<SealedCommit>>) {
+        let branch = branches.begin().expect("the head is readable");
+        branches
+            .write(branch, |cells| {
+                edit(cells);
+                Ok::<_, ()>(())
+            })
+            .expect("the branch is open");
+        (branch, branches.seal(branch))
+    }
+
+    #[test]
+    fn the_live_marker_on_a_user_record_joins_the_live_term() {
+        let branches = branches();
+        let (_, sealed) = seal_after(&branches, |cells| {
+            cells.put(live_key(FIRST_USER_RECORD_ID), CellValue::live());
+        });
+        let sealed = sealed.expect("a valid #is_live seals");
+        assert_eq!(sealed.index.changed_terms, [IndexTerm::live()]);
+    }
+
+    #[test]
+    fn any_other_live_value_is_refused_at_seal() {
+        for bad in [
+            // The right value as a field would silently leave the live set.
+            CellValue::from_bool(true),
+            attribute(CellValue::from_bool(false)),
+            CellValue::from_bool(false),
+            attribute(CellValue::from_str("true")),
+        ] {
+            let branches = branches();
+            let (branch, sealed) = seal_after(&branches, |cells| {
+                cells.put(live_key(FIRST_USER_RECORD_ID), bad.clone());
+            });
+            assert!(
+                matches!(
+                    sealed,
+                    Err(BranchError::InvalidLiveCell {
+                        record_id: FIRST_USER_RECORD_ID
+                    })
+                ),
+                "{bad:?}: {sealed:?}"
+            );
+            // Refusal is a failed seal like any other: the branch stays open.
+            assert!(!branches.branch_info(branch).expect("open").sealed);
+        }
+    }
+
+    #[test]
+    fn the_live_marker_on_an_engine_record_is_refused_at_seal() {
+        for record_id in [
+            system::PARAMS.id,
+            system::FIRST_ADMIN_RECORD_ID,
+            FIRST_USER_RECORD_ID - 1,
+        ] {
+            let branches = branches();
+            let (_, sealed) = seal_after(&branches, |cells| {
+                cells.put(live_key(record_id), CellValue::live());
+            });
+            assert!(
+                matches!(
+                    sealed,
+                    Err(BranchError::InvalidLiveCell { record_id: refused }) if refused == record_id
+                ),
+                "record {record_id}: {sealed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn overwriting_a_live_marker_is_refused_and_removing_it_leaves_the_live_term() {
+        let branches = branches();
+        let (created, sealed) = seal_after(&branches, |cells| {
+            cells.put(live_key(FIRST_USER_RECORD_ID), CellValue::live());
+        });
+        sealed.expect("a valid #is_live seals");
+        branches.commit(created).expect("the head has not moved");
+
+        let (_, sealed) = seal_after(&branches, |cells| {
+            cells.put(live_key(FIRST_USER_RECORD_ID), CellValue::from_bool(true));
+        });
+        assert!(matches!(
+            sealed,
+            Err(BranchError::InvalidLiveCell {
+                record_id: FIRST_USER_RECORD_ID
+            })
+        ));
+
+        let (_, sealed) = seal_after(&branches, |cells| {
+            cells.delete(live_key(FIRST_USER_RECORD_ID));
+        });
+        let sealed = sealed.expect("removing #is_live is a record's delete");
+        assert_eq!(sealed.index.changed_terms, [IndexTerm::live()]);
+    }
+
+    /// A refused `#is_live` is discarded with its frame, like any write that
+    /// fails at seal; the rest of the branch then seals.
+    #[test]
+    fn a_refused_live_marker_rolls_back_with_its_frame() {
+        let branches = branches();
+        let branch = branches.begin().expect("the head is readable");
+        branches
+            .write(branch, |cells| {
+                cells.put(live_key(FIRST_USER_RECORD_ID), CellValue::live());
+                Ok::<_, ()>(())
+            })
+            .expect("the branch is open");
+        branches.checkpoint(branch).expect("the branch is open");
+        branches
+            .write(branch, |cells| {
+                cells.put(
+                    live_key(FIRST_USER_RECORD_ID + 1),
+                    CellValue::from_bool(true),
+                );
+                Ok::<_, ()>(())
+            })
+            .expect("the branch is open");
+        assert!(matches!(
+            branches.seal(branch),
+            Err(BranchError::InvalidLiveCell { record_id }) if record_id == FIRST_USER_RECORD_ID + 1
+        ));
+        branches.rollback(branch).expect("a frame remains");
+        let sealed = branches.seal(branch).expect("the valid frame seals");
+        assert_eq!(sealed.index.changed_terms, [IndexTerm::live()]);
+    }
 }
