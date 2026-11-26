@@ -43,9 +43,9 @@ pub struct Queries<S, H, O = FetchAndSort> {
 }
 
 impl<S: Store, H: HashProvider, O: SortingStrategy> Queries<S, H, O> {
-    /// `max_query_depth` caps how many `And` / `Or` levels a filter nests (a
-    /// leaf adds none): a deeper one fails as [`QueryError::LimitExceeded`]
-    /// at admission. Admission and evaluation recurse once per level, so with
+    /// `max_query_depth` caps how many `And` / `Or` / `Not` levels a filter
+    /// nests (a leaf adds none): a deeper one fails as
+    /// [`QueryError::LimitExceeded`] at admission. Admission and evaluation recurse once per level, so with
     /// no cap a deep enough filter overflows the stack, aborting the process.
     ///
     /// `max_query_limit` caps how many records a query returns, and so its

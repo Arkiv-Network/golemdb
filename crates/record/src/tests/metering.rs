@@ -106,13 +106,18 @@ fn real_create_matches_the_worked_example_and_keeps_system_charges_out_of_effect
     let schedule = &snapshot.model.schedule;
     let records = Records::new(branches.clone(), pricing());
     let branch = branches.begin().unwrap();
-    let result = records.create(branch, KEY, entries(), Budget::Limited(266));
+    let result = records.create(branch, KEY, entries(), Budget::Limited(320));
     assert_eq!(result.result.unwrap(), KEY);
-    assert_eq!(result.accounting.cost, 266);
-    assert_eq!(schedule.price(&result.accounting.ledger).unwrap(), 266);
-    assert_eq!(result.accounting.ledger.count("write.cell.create"), 5);
-    assert_eq!(result.accounting.ledger.count("write.cell_byte"), 173);
+    assert_eq!(result.accounting.cost, 320);
+    assert_eq!(schedule.price(&result.accounting.ledger).unwrap(), 320);
+    // The user cells, then #meta, #key, #is_live and the binding.
+    assert_eq!(result.accounting.ledger.count("write.cell.create"), 6);
+    assert_eq!(result.accounting.ledger.count("write.cell_byte"), 191);
     assert_eq!(result.accounting.ledger.count("read.cell"), 0);
+    // `color`, then `#is_live`: its term, new in an empty index.
+    assert_eq!(result.accounting.ledger.count("read.term"), 2);
+    assert_eq!(result.accounting.ledger.count("write.index.join"), 2);
+    assert_eq!(result.accounting.ledger.count("write.index_term_create"), 2);
     assert_eq!(result.effects.cells_created, 2);
     assert_eq!(result.effects.cell_bytes_written, 33);
     assert_eq!(result.effects.index_joins, 1);
@@ -139,8 +144,11 @@ fn every_create_checkpoint_rejects_without_writes_or_id_consumption() {
         (21, 19, None),
         (22, 22, None),
         (23, 22, None),
-        (24, 24, Some(266)),
-        (265, 24, Some(266)),
+        // The `#is_live` term read.
+        (24, 24, None),
+        (25, 24, None),
+        (26, 26, Some(320)),
+        (319, 26, Some(320)),
     ] {
         let (_, branches, _) = crud_tests::setup();
         let records = Records::new(branches.clone(), pricing());
@@ -331,9 +339,10 @@ fn term_creation_uses_the_origin_even_after_an_earlier_branch_join() {
     for key in [KEY, OTHER] {
         let outcome = records.create(branch, key, entries(), Budget::Unlimited);
         outcome.result.unwrap();
+        // `color` and `#is_live`, both new at the origin.
         assert_eq!(
             outcome.accounting.ledger.count("write.index_term_create"),
-            1
+            2
         );
     }
     branches.commit(branch).unwrap();
@@ -344,7 +353,7 @@ fn term_creation_uses_the_origin_even_after_an_earlier_branch_join() {
         outcome.accounting.ledger.count("write.index_term_create"),
         0
     );
-    assert_eq!(outcome.accounting.cost, 259);
+    assert_eq!(outcome.accounting.cost, 306);
 }
 
 #[test]
@@ -455,7 +464,7 @@ impl<C: ReadCursor> ReadCursor for ObservedCursor<C> {
 
 #[test]
 fn admission_and_unfunded_reads_do_not_access_record_or_index_state() {
-    for budget in [0, 19, 21, 22, 23, 24, 265, 266] {
+    for budget in [0, 19, 21, 22, 23, 24, 25, 26, 319, 320] {
         let (store, _, _) = crud_tests::setup();
         let accesses = Arc::new(Mutex::new(Vec::new()));
         let branches = Branches::new(
@@ -472,7 +481,7 @@ fn admission_and_unfunded_reads_do_not_access_record_or_index_state() {
         let branch = branches.begin().unwrap();
         accesses.lock().unwrap().clear();
         let result = records.create(branch, KEY, entries(), Budget::Limited(budget));
-        assert_eq!(result.result.is_ok(), budget == 266);
+        assert_eq!(result.result.is_ok(), budget == 320);
         let calls = accesses.lock().unwrap();
         let cell_gets: Vec<_> = calls
             .iter()
@@ -496,7 +505,9 @@ fn admission_and_unfunded_reads_do_not_access_record_or_index_state() {
             .iter()
             .filter(|call| matches!(call, Access::Cursor(Table("Index"), _)))
             .count();
-        assert_eq!(index_seeks, usize::from(budget >= 24), "budget {budget}");
+        // `color`'s term, then `#is_live`'s.
+        let expected = usize::from(budget >= 24) + usize::from(budget >= 26);
+        assert_eq!(index_seeks, expected, "budget {budget}");
         assert!(
             !calls
                 .iter()
@@ -583,9 +594,11 @@ fn delete_counts_each_live_cell_once_and_charges_no_deleted_bytes() {
             (10, 9, None),
             (12, 11, None),
             (14, 13, None),
-            (15, 15, Some(61)),
-            (60, 15, Some(61)),
-            (61, 61, None),
+            (16, 15, None),
+            (18, 17, None),
+            (19, 19, Some(79)),
+            (78, 19, Some(79)),
+            (79, 79, None),
         ] {
             let (_, branches, _) = crud_tests::setup();
             let records = Records::new(branches.clone(), pricing());
@@ -605,11 +618,12 @@ fn delete_counts_each_live_cell_once_and_charges_no_deleted_bytes() {
             assert_eq!(outcome.accounting.cost, spent, "{committed}, {budget}");
             assert_eq!(outcome.accounting.ledger.count("write.cell_byte"), 0);
             assert_eq!(outcome.accounting.ledger.count("write.index_byte"), 0);
-            if budget == 61 {
+            if budget == 79 {
                 outcome.result.unwrap();
-                assert_eq!(outcome.accounting.ledger.count("read.cell"), 4); // #meta, #key, two user cells
-                assert_eq!(outcome.accounting.ledger.count("read.term"), 1);
-                assert_eq!(outcome.accounting.ledger.count("write.cell.delete"), 5);
+                assert_eq!(outcome.accounting.ledger.count("read.cell"), 5); // #meta, #key, #is_live, two user cells
+                assert_eq!(outcome.accounting.ledger.count("read.term"), 2); // `color`, `#is_live`
+                assert_eq!(outcome.accounting.ledger.count("write.index.leave"), 2);
+                assert_eq!(outcome.accounting.ledger.count("write.cell.delete"), 6);
                 assert_eq!(outcome.effects.cells_deleted, 2);
                 assert!(matches!(
                     records
@@ -621,7 +635,7 @@ fn delete_counts_each_live_cell_once_and_charges_no_deleted_bytes() {
                 assert_eq!(snapshot(&branches, branch), before);
                 // The restored scan index must support another priced delete.
                 records
-                    .delete(branch, KEY, Budget::Limited(61))
+                    .delete(branch, KEY, Budget::Limited(79))
                     .result
                     .unwrap();
                 branches.commit(branch).unwrap();
@@ -641,7 +655,7 @@ fn delete_counts_each_live_cell_once_and_charges_no_deleted_bytes() {
 
 #[test]
 fn deletion_skips_a_long_tombstone_run_without_extra_charges_or_unfunded_steps() {
-    for budget in [10, 11, 43] {
+    for budget in [12, 13, 61] {
         let (store, base_branches, base_records) = crud_tests::setup();
         let base = base_branches.begin().unwrap();
         let many = (0..100)
@@ -680,24 +694,27 @@ fn deletion_skips_a_long_tombstone_run_without_extra_charges_or_unfunded_steps()
             .unwrap();
         accesses.lock().unwrap().clear();
         let result = records.delete(branch, KEY, Budget::Limited(budget));
+        // User-cell scan steps; the `#is_live` term lookup steps the Index.
         let steps = accesses
             .lock()
             .unwrap()
             .iter()
-            .filter(|call| matches!(call, Access::Next(_)))
+            .filter(
+                |call| matches!(call, Access::Next(table) if *table == golemdb_cells::tables::CELL),
+            )
             .count();
-        if budget == 10 {
+        if budget == 12 {
             assert_eq!(steps, 0); // no user-cell checkpoint was funded
-            assert_eq!(result.accounting.cost, 9);
+            assert_eq!(result.accounting.cost, 11);
         } else {
             assert!(
                 steps <= 5,
                 "{steps} physical steps for one remaining user cell"
             );
-            assert_eq!(result.accounting.ledger.count("read.cell"), 3);
-            assert_eq!(result.accounting.cost, if budget == 43 { 43 } else { 11 });
+            assert_eq!(result.accounting.ledger.count("read.cell"), 4);
+            assert_eq!(result.accounting.cost, if budget == 61 { 61 } else { 13 });
         }
-        assert_eq!(result.result.is_ok(), budget == 43);
+        assert_eq!(result.result.is_ok(), budget == 61);
     }
 }
 
@@ -711,13 +728,15 @@ fn empty_records_missing_records_and_zero_weights_have_defined_charges() {
     assert_eq!(missing.accounting.cost, 5);
     let empty = records.create(branch, KEY, vec![], Budget::Unlimited);
     empty.result.unwrap();
-    assert_eq!(empty.accounting.cost, 172); // 5 + 3*9 + 140 system bytes
+    // 5 + 4*9 + 158 system bytes, and `#is_live`'s term: read 2, join 3 + 4 + 11 bytes + created 7.
+    assert_eq!(empty.accounting.cost, 226);
     let duplicate = records.create(branch, KEY, vec![], Budget::Unlimited);
     assert!(matches!(duplicate.result, Err(RecordError::AlreadyExists)));
     assert_eq!(duplicate.accounting.cost, 5);
-    let deleted = records.delete(branch, KEY, Budget::Limited(33));
+    // 5 + 3 system cell reads + `#is_live`'s term read 2 + 4*8 deletes + `#is_live`'s leave 2 + 4.
+    let deleted = records.delete(branch, KEY, Budget::Limited(51));
     deleted.result.unwrap();
-    assert_eq!(deleted.accounting.cost, 33);
+    assert_eq!(deleted.accounting.cost, 51);
     assert_eq!(deleted.effects, Effects::default());
 
     let mut p = pricing();
@@ -726,7 +745,7 @@ fn empty_records_missing_records_and_zero_weights_have_defined_charges() {
     let created = records.create(branch, KEY, entries(), Budget::Limited(0));
     created.result.unwrap();
     assert_eq!(created.accounting.cost, 0);
-    assert_eq!(created.accounting.ledger.count("write.cell.create"), 5);
+    assert_eq!(created.accounting.ledger.count("write.cell.create"), 6);
     records
         .delete(branch, KEY, Budget::Limited(0))
         .result
@@ -830,7 +849,9 @@ fn get_stops_before_unpaid_storage_work_and_skips_user_tombstone_runs() {
     );
     accesses.lock().unwrap().clear();
     let full = records.get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited);
-    assert_eq!(full.result.unwrap().cells.len(), 3);
+    // x39, #key, #meta and #is_live.
+    assert_eq!(full.result.unwrap().cells.len(), 4);
+    assert_eq!(full.accounting.ledger.count("read.cell"), 3);
     assert_eq!(full.accounting.ledger.count("read.cell_scan"), 1);
     assert!(
         accesses

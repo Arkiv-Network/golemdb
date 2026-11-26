@@ -139,10 +139,16 @@ fn engine_names_take_a_sigil_then_the_grammar() {
 #[test]
 fn reserved_names_are_the_spec_s() {
     assert_eq!(reserved::KEY.as_bytes(), b"#key");
+    assert_eq!(reserved::IS_LIVE.as_bytes(), b"#is_live");
     assert_eq!(reserved::NEXT_RECORD_ID.as_bytes(), b"#nextRecordID");
     assert_eq!(reserved::MAX_STR_LEN.as_bytes(), b"#maxStrLen");
     assert_eq!(reserved::MAX_BYTES_LEN.as_bytes(), b"#maxBytesLen");
     assert_eq!(reserved::MAX_CELL_NAME_LEN.as_bytes(), b"#maxCellNameLen");
+}
+
+#[test]
+fn indexed_reserved_names() {
+    assert_eq!(reserved::INDEXED, &[reserved::IS_LIVE]);
 }
 
 /// `raw` validates nothing: reserved records (§4) use the cell key as a value

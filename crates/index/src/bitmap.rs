@@ -1,14 +1,14 @@
-use std::ops::{BitAndAssign, BitOrAssign};
+use std::ops::{BitAndAssign, BitOrAssign, SubAssign};
 
 use roaring::RoaringTreemap;
 
-use crate::{BitmapContainer, BitmapError};
+use crate::{BitmapContainer, BitmapError, Regions};
 
 /// A materialized query bitmap assembled from stored containers.
 ///
 /// Owns the container-to-record-ID conversion, not storage or Merkle hashing.
 /// Set operations are operators on `Bitmap` (`|=` is union, `&=` is
-/// intersection), so callers need not name Roaring; [`Self::treemap`] reads
+/// intersection, `-=` is difference), so callers need not name Roaring; [`Self::treemap`] reads
 /// the record IDs, and [`Self::iter_skipping`] reads them past a rank. The
 /// default is the empty bitmap.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -55,6 +55,17 @@ impl Bitmap {
         self.values
     }
 
+    /// The record IDs of `self` that lie in `regions`: what a read confined
+    /// to them returns.
+    pub fn within(&self, regions: &Regions) -> Self {
+        let mut values = RoaringTreemap::new();
+        for region in regions.as_slice() {
+            values.insert_range(region.record_id(0)..=region.record_id(u16::MAX));
+        }
+        values &= &self.values;
+        Self { values }
+    }
+
     /// The record IDs in ascending order past the first `n`, as
     /// `treemap().iter().skip(n)` yields them. The first one is found by its
     /// rank, so the skipped IDs are not walked one by one. Empty when the
@@ -82,6 +93,13 @@ impl BitAndAssign for Bitmap {
     }
 }
 
+/// Difference: `self` loses every record ID `other` holds.
+impl SubAssign for Bitmap {
+    fn sub_assign(&mut self, other: Self) {
+        self.values -= other.values;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -95,6 +113,17 @@ mod tests {
         Bitmap {
             values: ids.into_iter().collect(),
         }
+    }
+
+    #[test]
+    fn within_keeps_the_ids_of_the_given_regions() {
+        let bitmap = bitmap_of([1, u16::MAX.into(), 1 << 16, 2 << 16, 1 << 40, u64::MAX]);
+        let regions = Regions::of(&bitmap_of([7, 2 << 16, u64::MAX]));
+        assert_eq!(
+            bitmap.within(&regions),
+            bitmap_of([1, u16::MAX.into(), 2 << 16, u64::MAX])
+        );
+        assert_eq!(bitmap.within(&Regions::default()), Bitmap::default());
     }
 
     #[test]
@@ -128,12 +157,36 @@ mod tests {
         prop::collection::btree_set(id, 0..100)
     }
 
+    #[test]
+    fn difference_drops_the_common_ids_across_containers() {
+        let mut difference = bitmap_of([1, 2, 1 << 40, u64::MAX]);
+        difference -= bitmap_of([2, 3, 1 << 40]);
+        assert_eq!(difference, bitmap_of([1, u64::MAX]));
+    }
+
+    #[test]
+    fn difference_with_the_empty_bitmap_keeps_or_stays_empty() {
+        let mut left = bitmap_of([7, 1 << 32]);
+        left -= Bitmap::default();
+        assert_eq!(left, bitmap_of([7, 1 << 32]));
+        let mut right = Bitmap::default();
+        right -= bitmap_of([7, 1 << 32]);
+        assert_eq!(right, Bitmap::default());
+    }
+
     proptest! {
         #[test]
         fn intersection_is_set_intersection(a in ids(), b in ids()) {
             let mut intersection = bitmap_of(a.iter().copied());
             intersection &= bitmap_of(b.iter().copied());
             prop_assert_eq!(intersection, bitmap_of(a.intersection(&b).copied()));
+        }
+
+        #[test]
+        fn difference_is_set_difference(a in ids(), b in ids()) {
+            let mut difference = bitmap_of(a.iter().copied());
+            difference -= bitmap_of(b.iter().copied());
+            prop_assert_eq!(difference, bitmap_of(a.difference(&b).copied()));
         }
     }
 

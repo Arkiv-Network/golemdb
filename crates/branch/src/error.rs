@@ -14,6 +14,8 @@ pub enum BranchError {
     CommitNumberExhausted,
     #[error("the previous commit's #roots cell already exists")]
     RootsCellExists,
+    #[error("record {record_id}: #is_live must be the attribute `true` on a user record")]
+    InvalidLiveCell { record_id: u64 },
     #[error(transparent)]
     Cells(#[from] golemdb_cells::CellError),
     #[error(transparent)]

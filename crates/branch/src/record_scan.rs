@@ -167,7 +167,8 @@ impl<'a, R: ReadTransaction> RecordScan<'a, R> {
         record: u64,
     ) -> Result<Self> {
         // All admitted user names begin with '$' or an ASCII letter. Engine
-        // cells #key/#meta are point-read separately and never rescanned here.
+        // cells #key/#meta/#is_live sort before '$', are point-read separately and
+        // never rescanned here.
         let start = CellKey::new(record, CellNameRef::raw(b"$"));
         let end = record
             .checked_add(1)

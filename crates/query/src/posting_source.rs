@@ -2,7 +2,7 @@
 //! read of the index goes through [`PostingSource`], so query logic is
 //! testable without a database.
 
-use golemdb_index::{Bitmap, Index, IndexTerm, TermRange};
+use golemdb_index::{Bitmap, Index, IndexTerm, Regions, TermRange};
 use golemdb_merkle::HashProvider;
 use golemdb_storage::ReadTransaction;
 
@@ -19,6 +19,21 @@ pub trait PostingSource {
     fn scan(
         &self,
         range: TermRange,
+    ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>>;
+
+    /// [`Self::postings`] confined to `regions`: the term's record IDs in
+    /// them. Only the term's containers in those regions are read.
+    fn postings_within(&self, term: &IndexTerm, regions: &Regions)
+    -> golemdb_index::Result<Bitmap>;
+
+    /// [`Self::scan`] with each term's postings confined to `regions`: one
+    /// bitmap per term in `range`, in ascending key order, of its record IDs
+    /// in them. Every term is still stepped; only its containers in those
+    /// regions are read.
+    fn scan_within(
+        &self,
+        range: TermRange,
+        regions: &Regions,
     ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>>;
 }
 
@@ -45,6 +60,23 @@ impl<H: HashProvider, T: ReadTransaction> PostingSource for IndexSource<'_, '_, 
         range: TermRange,
     ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
         let terms = self.index.terms(self.tx, range)?;
+        Ok(terms.map(|entry| entry.map(|(_, bitmap)| bitmap)))
+    }
+
+    fn postings_within(
+        &self,
+        term: &IndexTerm,
+        regions: &Regions,
+    ) -> golemdb_index::Result<Bitmap> {
+        self.index.postings_within(self.tx, term, regions)
+    }
+
+    fn scan_within(
+        &self,
+        range: TermRange,
+        regions: &Regions,
+    ) -> golemdb_index::Result<impl Iterator<Item = golemdb_index::Result<Bitmap>>> {
+        let terms = self.index.terms_within(self.tx, range, regions)?;
         Ok(terms.map(|entry| entry.map(|(_, bitmap)| bitmap)))
     }
 }

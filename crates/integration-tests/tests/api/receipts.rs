@@ -50,9 +50,11 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
         assert_eq!(created.receipt.cost, 0);
         assert_eq!(created.receipt.ledger.count("write.admission.entry"), 2);
         assert_eq!(created.receipt.ledger.count("write.admission.byte"), 15);
-        assert_eq!(created.receipt.ledger.count("write.cell.create"), 5);
-        assert_eq!(created.receipt.ledger.count("write.cell_trie_update"), 30);
-        assert_eq!(created.receipt.ledger.count("read.term"), 1);
+        // Two user cells, then #meta, #key, #is_live and the binding.
+        assert_eq!(created.receipt.ledger.count("write.cell.create"), 6);
+        assert_eq!(created.receipt.ledger.count("write.cell_trie_update"), 36);
+        // `price`, then `#is_live`.
+        assert_eq!(created.receipt.ledger.count("read.term"), 2);
         assert_eq!(details.cells_created, 2);
         assert_eq!(details.cell_bytes_written, 33);
         assert_eq!(details.index_joins, 1);
@@ -155,8 +157,9 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
         let deleted = db.delete(branch, RecordOp::delete(KEY, BUDGET));
         deleted.result.unwrap();
         assert_eq!(deleted.receipt.cost, 0);
-        assert_eq!(deleted.receipt.ledger.count("read.cell"), 4);
-        assert_eq!(deleted.receipt.ledger.count("write.cell.delete"), 5);
+        // #meta, #key, #is_live and the two user cells.
+        assert_eq!(deleted.receipt.ledger.count("read.cell"), 5);
+        assert_eq!(deleted.receipt.ledger.count("write.cell.delete"), 6);
         let d = deleted.receipt.details;
         assert_eq!(
             (d.cells_deleted, d.cell_bytes_deleted, d.index_leaves),
@@ -449,9 +452,16 @@ fn query_count_and_unavailable_history_report_the_selected_head() {
 fn boolean_admission_failures_retain_the_selected_head() {
     each_backend(|db| {
         let head = db.commit(db.begin().unwrap()).unwrap();
-        // Database currently caps And/Or nesting at 64 levels.
+        // Database currently caps And/Or/Not nesting at 64 levels.
         let too_deep = (0..65).fold(filter("color"), |child, _| Filter::And(vec![child]));
-        for filter in [Filter::And(vec![]), Filter::Or(vec![]), too_deep] {
+        // A standalone `Not` is admitted; an invalid tree under one is not.
+        let invalid_under_not = Filter::Not(Box::new(Filter::Or(vec![])));
+        for filter in [
+            Filter::And(vec![]),
+            Filter::Or(vec![]),
+            too_deep,
+            invalid_under_not,
+        ] {
             let query = db.query(None, QueryOp::from_filter(filter.clone(), BUDGET));
             let count = db.count(None, CountOp::filter(filter, BUDGET));
             unchanged(&query, Some(head));

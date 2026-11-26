@@ -37,6 +37,7 @@ pub mod error;
 mod index;
 mod index_trie;
 mod key;
+mod regions;
 pub mod tables;
 mod term;
 mod term_range;
@@ -45,8 +46,9 @@ pub use bitmap::Bitmap;
 pub use container::BitmapContainer;
 pub use container_id::ContainerId;
 pub use error::{BitmapError, IndexError, Result};
-pub use index::{Index, IndexUpdate, PostingChange, TermScan, term_exists};
+pub use index::{Index, IndexUpdate, PostingChange, TermScan, TermsWithin, term_exists};
 pub use key::IndexKey;
+pub use regions::Regions;
 pub use term::{IndexTerm, TermError};
 pub use term_range::{RangeError, TermRange};
 

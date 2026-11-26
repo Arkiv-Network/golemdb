@@ -189,6 +189,9 @@ pub(crate) fn create<R: ReadTransaction>(
         None,
         meter,
     )?;
+    let live = CellValue::live();
+    indexes(reader, &reserved::IS_LIVE.into(), None, Some(&live), meter)?;
+    plan.cell(state::live_key(id), None, Some(live), None, meter)?;
     plan.cell(
         state::binding(key),
         None,
@@ -271,6 +274,8 @@ pub(crate) fn delete<R: ReadTransaction>(
     let meta_value = read(reader, &meta_key, meter)?;
     let meta = meta::required(meta_value.as_ref())?;
     let identity_value = identity(reader, id, key, meter)?;
+    let live = read(reader, &state::live_key(id), meter)?;
+    state::check_live(live.as_ref())?;
     let mut plan = WritePlan::default();
     let mut cells = reader.scan_user_cells(id)?;
     for _ in 0..meta.cells {
@@ -303,6 +308,14 @@ pub(crate) fn delete<R: ReadTransaction>(
         None,
         meter,
     )?;
+    indexes(
+        reader,
+        &reserved::IS_LIVE.into(),
+        live.as_ref(),
+        None,
+        meter,
+    )?;
+    plan.cell(state::live_key(id), live, None, None, meter)?;
     plan.cell(
         state::binding(key),
         Some(CellValue::from_u64(id)),

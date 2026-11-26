@@ -398,6 +398,17 @@ fn unsupported_format_ids_and_missing_trie_roots_are_rejected() {
                 | OpenError::UnsupportedRoaring(99))
         ));
     }
+    // Format 2 predates `#is_live`: its user records would be missing from the
+    // live set a standalone `Not` subtracts from.
+    let db = MemoryStore::new();
+    Database::from_store(db.clone(), &config()).unwrap();
+    let mut tx = db.begin_write().unwrap();
+    tx.put(SUPERBLOCK, b"format", &2u32.to_be_bytes()).unwrap();
+    tx.commit().unwrap();
+    assert!(matches!(
+        Database::from_store(db, &config()),
+        Err(OpenError::UnsupportedFormat(2))
+    ));
     let db = MemoryStore::new();
     Database::from_store(db.clone(), &config()).unwrap();
     // The genesis state root is a branch stored at commit 0, at the empty route.

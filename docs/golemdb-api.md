@@ -282,7 +282,7 @@ every record and reserved-record check.
 
 Initialization writes, in one store transaction:
 
-1. **Superblock rows:** `format` = 2 (`u32` BE), `hash_fn` (`u16` BE: 1 Keccak-256,
+1. **Superblock rows:** `format` = 3 (`u32` BE; 3 adds every user record's `#is_live` cell), `hash_fn` (`u16` BE: 1 Keccak-256,
    2 Blake3), `roaring` = 1 (`u16` BE), `genesis_id` (32 bytes), and `head`.
 2. **Genesis cells,** all of kind `field`:
    - for each reserved record (see [Reserved records](#reserved-records)): its `#key` cell
@@ -347,16 +347,17 @@ Failures are `CorruptState`. This is startup validation, not an audit of every u
 
 ### Records
 
-A record is its key, zero or more user cells, and two cells the database maintains:
+A record is its key, zero or more user cells, and three cells the database maintains:
 
 | Cell | Written by | Content |
 | --- | --- | --- |
 | user cells | the caller, through `create` and `patch` | typed values |
 | `#key` | the database | the record key, `bytes32` field |
 | `#meta` | the database | four counts over the user cells ([`#meta`](#meta)) |
+| `#is_live` | the database | `true`, a `bool` attribute: its one index term lists every live record |
 | binding in `#recordKeys` | the database | record key → record ID, `u64` field |
 
-So `create` writes n + 3 cells and `delete` removes n + 3. **Empty records are legal:** a
+So `create` writes n + 4 cells and `delete` removes n + 4. **Empty records are legal:** a
 create may name no cells and a patch may remove the last one. Only `delete` removes a record.
 
 Records are addressed internally by a dense `u64` ID, allocated from `#nextRecordID` and never
@@ -586,7 +587,7 @@ is written:
    2. key already bound → `AlreadyExists` in caller-assigned mode; corrupt state in generated
       mode.
 
-On success it writes the user cells, `#key`, `#meta`, the binding and the advanced allocator
+On success it writes the user cells, `#key`, `#meta`, `#is_live`, the binding and the advanced allocator
 as one atomic branch operation, and returns the key.
 
 ### `get`
@@ -607,7 +608,7 @@ pub enum ReadTarget { Head, Branch(BranchId), Commit(CommitId) }
 Order of checks: the target first, at no cost (an invalid branch handle → `HandleInvalid`; an
 unavailable commit → `CommitUnavailable`); then the binding (`NotFound`); then the cells.
 
-A full read returns every cell, `#key` and `#meta` included. With `.only(names)`, missing
+A full read returns every cell, `#key`, `#meta` and `#is_live` included. With `.only(names)`, missing
 cells are omitted, and an empty list returns no cells but still checks that the record exists.
 A missing record is `NotFound`. For committed reads, the binding and `#key` must agree, or the
 read reports corrupt state.
@@ -646,7 +647,7 @@ operation.
 
 Order of checks: handle → `HandleInvalid` / `Sealed`; reserved key → `Reserved`; key not bound
 → `NotFound`.
-It then removes every live cell of the record, `#key` and `#meta` included, and the binding.
+It then removes every live cell of the record, `#key`, `#meta` and `#is_live` included, and the binding.
 The allocator does not move back; re-creating the key gives a new ID.
 
 ---
@@ -696,7 +697,7 @@ Looking up the origin for a receipt never invalidates a branch, and an origin ne
 so receipts cannot race with commits.
 
 **`details`** are the call's effects on the record's user cells, counted as in metering D4.
-System cells (`#key`, `#meta`, the binding) are not counted:
+System cells (`#key`, `#meta`, `#is_live`, the binding) are not counted:
 
 | Effect | Counts |
 | --- | --- |
@@ -995,9 +996,16 @@ right, so a condition shared by several branches is written, and read, once.
 
 - **`And`:** children intersect in written order, carrying a running set; the node stops early
   when that set is empty, and its remaining children are not read. This is the caller's main
-  optimization lever. A `Not` child subtracts from the running set; a standalone `Not`, or one
-  under an `Or`, needs the set of all live records and waits on product decision
-  [P08](CHANGES.md).
+  optimization lever. A `Not` child after the first subtracts from the running set. Every further
+  child, and everything under it, reads only the index containers in the regions (blocks of
+  65 536 record IDs) the running set occupies, so a selective first child makes every later one
+  cheaper, not only an empty one; records created around the same time share regions.
+- **A standalone `Not`**, one with no running set (the whole filter, under an `Or` or another
+  `Not`, or an `And`'s first child), subtracts its child's matches from every live record. It
+  reads the set of live records first, from the index's `#is_live` term
+  ([design](golemdb-design.md#record-shape-the-is_live-cell)), and skips its child when that set is
+  empty. That read grows with the database, one container per 65 536 live records, so a `Not`
+  after a selective positive child of an `And` is cheaper.
 - **`Or`:** children evaluate in written order and union, with no early exit. The order is pinned
   so that the abort point, and so `OutOfBudget`, is deterministic.
 - **Early exit applies to unsorted queries only.** A sorted query costs O(N) whatever page was
@@ -1005,6 +1013,8 @@ right, so a condition shared by several branches is written, and read, once.
   `total_matched` is required.
 - A record matching several children of an `Or` is returned **once**.
 - **Predicates are typed:** a cell of another type under the same name is treated as absent.
+- **Predicates see attributes only:** fields are never indexed, so a leaf never matches a field,
+  and a `Not` of it matches a record holding the same name and value as a field.
 - `LimitExceeded` caps the nesting depth.
 
 **The database performs no statistics-based planning**: work is a pure function of

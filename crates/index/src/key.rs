@@ -53,30 +53,29 @@ pub(crate) fn encode(term: &IndexTerm, container_id: ContainerId) -> Vec<u8> {
 }
 
 /// Bounds on `Index` keys holding exactly the containers of the terms within
-/// `terms` ([`crate::TermRange::bounds`]). Every key of a term starts with
-/// it, so an included lower or excluded upper term bounds the keys as is; an
-/// excluded lower term starts past all its keys, and an included upper one
-/// ends past them.
-pub(crate) fn bounds(
-    (lower, upper): (Bound<&[u8]>, Bound<&[u8]>),
-) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
-    let lower = match lower {
-        Bound::Included(term) => Bound::Included(term.to_vec()),
+/// `terms` ([`crate::TermRange::bounds`]): the first key, included (empty
+/// when the range is unbounded below), and the upper bound. Every key of a
+/// term starts with it, so an included lower or excluded upper term bounds
+/// the keys as is; an excluded lower term starts past all its keys, and an
+/// included upper one ends past them.
+pub(crate) fn bounds((lower, upper): (Bound<&[u8]>, Bound<&[u8]>)) -> (Vec<u8>, Bound<Vec<u8>>) {
+    let start = match lower {
+        Bound::Included(term) => term.to_vec(),
         Bound::Excluded(term) => after(term),
-        Bound::Unbounded => Bound::Unbounded,
+        Bound::Unbounded => Vec::new(),
     };
     let upper = match upper {
         Bound::Included(term) => past(term.to_vec()),
         Bound::Excluded(term) => Bound::Excluded(term.to_vec()),
         Bound::Unbounded => Bound::Unbounded,
     };
-    (lower, upper)
+    (start, upper)
 }
 
-/// The lower bound just past every key that starts with `term`.
-fn after(term: &[u8]) -> Bound<Vec<u8>> {
+/// The first key past every key that starts with `term`.
+pub(crate) fn after(term: &[u8]) -> Vec<u8> {
     match past(term.to_vec()) {
-        Bound::Excluded(next) => Bound::Included(next),
+        Bound::Excluded(next) => next,
         // Only an all-0xff prefix has no key after it, and every term
         // holds the 0x00 after its name.
         _ => unreachable!("a term holds a 0x00 byte"),

@@ -213,6 +213,19 @@ impl CellValue {
         Self::field_from_typed(CellType::Bool, &[u8::from(value)])
     }
 
+    /// The value of every live user record's
+    /// [`reserved::IS_LIVE`](crate::reserved::IS_LIVE) cell: the bool `true`, as an
+    /// attribute. All live user records share it, so its one index term lists
+    /// them all.
+    pub fn live() -> Self {
+        CellValueRef {
+            ty: CellType::Bool,
+            value: &[1],
+            indexable: true,
+        }
+        .into()
+    }
+
     /// Copy valid UTF-8 as a field. Deployment length limits are checked later.
     // This explicitly constructs the str cell type; it does not parse textual
     // representations of arbitrary cells as a FromStr implementation would imply.

@@ -126,21 +126,23 @@ A record is implemented as a flat list of cells. Each cell is a key-value pair:
 - **Key:** the record's ID prefix (`u64`, 8 bytes) followed by the cell name.
 - **Value:** a type tag (1 byte) followed by the encoded value.
 
-Every user record has two system cells:
+Every user record has three system cells:
 
 - `#key`: maps the record to its record key.
 - `#meta`: four counters describing the record's user cells ([below](#the-meta-cell)).
+- `#is_live`: the bool attribute `true`. Its one index term lists every live user record
+  ([design §3](golemdb-design.md#record-shape-the-is_live-cell)).
 
-Both have fixed-length encodings. Empty user records are legal: `create` may supply
+All three have fixed-length encodings. Empty user records are legal: `create` may supply
 zero user-defined cells, and `patch` may remove the last one without deleting the
-record. Such a record still has `#key` and `#meta`, with all four user counts in `#meta`
+record. Such a record still has `#key`, `#meta` and `#is_live`, with all four user counts in `#meta`
 equal to zero, plus its binding in `#recordKeys`. `get` succeeds for the existing record;
 only `delete` removes it and its binding from live state.
 
-Empty records are not free: creating one pays admission, record-base and the three
-system-cell creates (binding, `#key`, `#meta`), with no user-cell or index operations.
-Deleting an empty record pays the corresponding admission, record-base and system-cell
-deletion costs. A host may impose stricter content requirements without GolemDB doing so.
+Empty records are not free: creating one pays admission, record-base, the four
+system-cell creates (binding, `#key`, `#meta`, `#is_live`) and the index join of `#is_live`,
+with no user-cell operations. Deleting an empty record pays the corresponding admission,
+record-base and system-cell deletion costs, and the index leave of `#is_live`. A host may impose stricter content requirements without GolemDB doing so.
 
 The reverse mapping, record key → record ID, lives in the system record `#recordKeys`: one binding cell per live record, keyed by the 32-byte record key, holding the record ID.
 
@@ -306,11 +308,11 @@ covered by their own weights; including either would charge it twice.
 
 | Record operation | System cell operations |
 | --- | --- |
-| `create` | create binding, create `#key`, create `#meta`; no reads, the record is new and the binding read is in the record base |
+| `create` | create binding, create `#key`, create `#meta`, create `#is_live` and join its term; no cell reads, the record is new and the binding read is in the record base |
 | `patch` | read `#meta` (`read.cell`), even for empty patches; update it only when a count changes |
-| `delete` | delete binding (read in the record base), read and delete `#key`, read and delete `#meta` |
+| `delete` | delete binding (read in the record base), read and delete `#key`, read and delete `#meta`, read and delete `#is_live` and leave its term |
 
-System cells have fixed-length encodings, so their byte terms are constants. They are not included in `#meta`'s counts or the receipt's user-cell counts (D4).
+System cells have fixed-length encodings, so their byte terms are constants. They are not included in `#meta`'s counts or the receipt's user-cell counts (D4). The `#is_live` term is joined and left like a user attribute's: a `read.term`, then a `write.index.join` (with `write.index_term_create` for the first live record) or a `write.index.leave`.
 
 **Cell operations.** On `create`, every user cell is a cell create, without a read: the record is new. On `patch` and `delete`, a read of each touched user cell decides the operation:
 
@@ -379,7 +381,7 @@ In D2, these modeled path rewrites are the depth terms of every cell and index o
 
 **Global counters.** This model requires GolemDB to track two database-wide counters, the cells `#liveCells` and `#indexTerms` of [`#alloc`](golemdb-design.md#alloc-recordid-1):
 
-- **Live cells:** the number of `CellTrie` leaves, across all record classes: user cells, `#key` and `#meta` cells, bindings, root history, weights, and the counters themselves.
+- **Live cells:** the number of `CellTrie` leaves, across all record classes: user cells, `#key`, `#meta` and `#is_live` cells, bindings, root history, weights, and the counters themselves.
 - **Distinct index terms:** the number of `IndexTrie` leaves.
 
 Their only purpose is to determine the modeled trie depth. They differ from the per-record counts in [`#meta`](#the-meta-cell), which cover one record's user cells and serve caps, deletion bounds and the host. The counters are committed state, so every node derives the same depth, also after a restart. GolemDB updates them once per commit from the branch's net changes, as host-funded commit overhead (D8).
@@ -440,7 +442,8 @@ By D2, deleting a record costs:
 
 ```
 delete cost = admission cost + read.key + write.record.delete
-            + system cell deletes                        (binding, #key, #meta; fixed size)
+            + system cell deletes                        (binding, #key, #meta, #is_live; fixed size)
+            + the #is_live leave (read.term + write.index.leave + index_trie_depth × write.index_trie_update)
             + cells         × (read.cell + write.cell.delete + cell_trie_depth  × write.cell_trie_update)
             + indexed cells × (read.term + write.index.leave + index_trie_depth × write.index_trie_update)
 ```
@@ -556,8 +559,8 @@ with them, and a query materializes its records with them.
   the cell's bytes are then charged as a step of their own, before the value is decoded and copied
   into the result. Only `str` and `bytes` vary; every other type has a fixed width.
 - **The byte basis is D4's:** a returned cell counts `(8 + |name|) + (1 + |value|)`, the same
-  basis as `#meta`'s `cell_bytes` and as `max_bytes` paging (D6.2). The two system cells a read
-  returns have fixed sizes: `#key` 45 bytes, `#meta` 46 bytes.
+  basis as `#meta`'s `cell_bytes` and as `max_bytes` paging (D6.2). The three system cells a read
+  returns have fixed sizes: `#key` 45 bytes, `#meta` 46 bytes, `#is_live` 18 bytes.
 - **Absent costs the lookup, not the bytes.** A key resolution, cell read or term lookup that finds
   nothing still pays its lookup; it returns no bytes.
 - **Cell reads need a metering-aware method.** Reading a cell must expose its length before
@@ -574,7 +577,7 @@ query's materialization (D6.2):
 | --- | --- | --- |
 | projection `.only(names)` | one `read.cell` per distinct name, present or absent | the D4 size of each cell found |
 | existence check `.only([])` | none beyond resolving the record | none |
-| full record | one `read.cell` each of `#key` and `#meta`, which gives the record's exact counts; then one `read.cell_scan` per user cell | `cell_bytes` from `#meta`, plus 45 for `#key` and 46 for `#meta` |
+| full record | one `read.cell` each of `#key`, `#meta` and `#is_live`, `#meta` giving the record's exact counts; then one `read.cell_scan` per user cell | `cell_bytes` from `#meta`, plus 45 for `#key`, 46 for `#meta` and 18 for `#is_live` |
 
 A full record's charge is known from `#meta` before its user cells are scanned, so the scan is
 charged as one step. A projection may name reserved cells, such as `#meta` alone
@@ -611,8 +614,8 @@ reference execution: the execution rules of the
 
 | Step | When | Weight |
 | --- | --- | --- |
-| Term stepped | `Range`, `Prefix`, `Exists`: per further index entry read in a scan | `read.term_step` |
-| Bitmap container loaded | per bitmap container of a term's posting list | `read.container` |
+| Term stepped | `Range`, `Prefix`, `Exists`: per further index entry read in a scan; in a confined read, per container passed over | `read.term_step` |
+| Bitmap container loaded | per bitmap container of a term's posting list; in a confined read, in the running set's regions only | `read.container` |
 | Set combination | per bitmap container processed by a union, intersection or difference | `read.set_container` |
 | Sort comparison | modeled, from the match count and the number of sort terms | `read.sort_compare` (deferred) |
 
@@ -657,14 +660,42 @@ reference execution: the execution rules of the
   work of every roaring implementation (R4). The inputs' containers were already loaded and
   charged, so a combination costs at most about as much again. Record IDs are dense, so the
   number of distinct containers is bounded by the size of the database.
-- **`And` runs in the written order.** The running set starts with the first positive child; each
-  further child is evaluated and charged only when its turn comes, a positive child intersected,
-  a `Not` child subtracted. As soon as the running set is empty, the remaining children are
+- **`And` runs in the written order.** The running set starts with the first child's match set,
+  whatever the child; each further child is evaluated and charged only when its turn comes, a
+  positive child intersected, a `Not` child subtracted. As soon as the running set is empty, the remaining children are
   neither evaluated nor charged. An implementation must not reorder the children, for example by
   size, nor load them in advance.
+- **Further children read confined.** A further child of an `And`, positive or `Not`, and
+  everything under it, reads only the bitmap containers in the **regions** of the running set as
+  it stands before that child: the distinct upper 48-bit values of its record IDs, `C(running)` of
+  them. A container in any other region holds none of the running set's records, so it cannot
+  change the intersection or difference that follows: it is neither loaded nor charged, and the
+  result is the same. The regions narrow with the running set: each further child is confined to
+  the regions before it, and the further children of an `And` nested in it to that `And`'s own
+  running set. At the top of a filter, and in an `And`'s first child beyond the `And`'s own
+  confinement, nothing is confined.
+  - A **confined term read** positions at the term's first wanted region: one `read.term`, as an
+    unconfined lookup. Each of the term's entries it then reads is a container either in a wanted
+    region, loaded and charged one `read.container`, or in a region not wanted, passed over
+    unloaded and charged one `read.term_step`. After a container below the next wanted region, the
+    read repositions at that region, so it passes over at most one container per wanted region,
+    however many the term has. The entry past the term's last container ends the read, uncharged,
+    as for an unconfined read.
+  - A **confined scan** positions once, at the start of its range, and steps through its terms,
+    charged as an unconfined scan (`read.term`, then `read.term_step`s); each term's containers are
+    read confined, as above, on from the entry that ended the term before it rather than from a
+    new position. That first entry, loaded or passed over, never repositions the read. Past a
+    term's last wanted region, the read steps on; an entry still of the term is passed over, and
+    the read then repositions past the term. So a scanned term passes over at most one container
+    per wanted region, plus its first and one past its last wanted region.
+  - A **standalone `Not`** under a further child reads the `#is_live` term confined the same way.
+  - Combinations are charged on the container counts of the confined sets they take.
 - **`Or`** evaluates every child, in the written order, with no early exit, and unions them.
-- **`Not`** is allowed only inside an `And`, after a positive child. A standalone `Not` needs the
-  set of all live records (P08) and returns `NotImplemented` until then.
+- **`Not`** after an `And`'s first child is subtracted from the running set, as above. A
+  standalone `Not` first reads the set of all live records, the `#is_live` term
+  ([design §3](golemdb-design.md#record-shape-the-is_live-cell)), as an equality leaf reads its term;
+  then, unless that set is empty, its child, and one difference per container of both sets. With
+  no live record, the child is neither evaluated nor charged.
 - **No early exit on the match set.** Every query builds its whole match set, sorted or not, so
   `total_matched` is always free and the charge does not depend on where a page falls.
 - **`count`** runs admission, the call base, the leaves and the combinations only: it materializes
@@ -709,7 +740,10 @@ reference execution: the execution rules of the
 | difference: running set (1) minus child (1) | 2 `read.set_container` |
 
 Had the intersection left the running set empty, the last two rows would not happen: the `Not`
-child would be neither loaded nor charged.
+child would be neither loaded nor charged. The example also assumes every container of the price
+terms and of `flagged=true` lies in a region the running set occupies when they are read. One
+outside them would not be loaded: it would cost one `read.term_step` if the read passed over it,
+and nothing if a repositioning skipped it.
 
 **Implementation notes** (not normative). Loading a container today recomputes its hash and
 re-encodes it canonically to compare, on every read, and query sets are rebuilt as a
@@ -750,13 +784,14 @@ The formulas below are the same rule written out per call: each term is a count 
 
 #### Read formulas
 
-Notation: `A(n, b)` is admission over `n` entries and `b` bytes inspected; `KEY` and `META` are
-the D4 sizes of the two system cells a read returns (D6.1),
+Notation: `A(n, b)` is admission over `n` entries and `b` bytes inspected; `KEY`, `META` and
+`LIVE` are the D4 sizes of the three system cells a read returns (D6.1),
 
 ```
 A(n, b) = read.admission.base + n × read.admission.entry + b × read.admission.byte
 KEY     = (8 + |"#key"|)  + (1 + 32) = 45                             record ID and name; tag and record key
 META    = (8 + |"#meta"|) + (1 + 32) = 46                             record ID and name; tag and four u64 counts
+LIVE    = (8 + |"#is_live"|) + (1 + 1) = 18                           record ID and name; tag and bool
 ```
 
 **`get`**:
@@ -766,8 +801,8 @@ cost_get    = A(names, name bytes) + read.base + read.key + cost_record
 cost_record = 0                                                       record not found
             | 0                                                       existence check
             | Σ over cell names n:  read.cell + size(n) × read.byte    projection; size 0 if absent
-            | 2 × read.cell + cells × read.cell_scan
-              + (cell_bytes + KEY + META) × read.byte                  full record: #key, #meta, then the scan
+            | 3 × read.cell + cells × read.cell_scan
+              + (cell_bytes + KEY + META + LIVE) × read.byte           full record: #key, #meta, #is_live, then the scan
 ```
 
 **`count`** and **`query`**:
@@ -802,7 +837,9 @@ I(s₁…s_m)                = Σᵢ₌₂…ₘ (C(rᵢ₋₁) + C(sᵢ)) × re
                                                                       the running set and of each further set
 ```
 
-`C(s)` is the container count of a set (D6.2). In an `And`, `r₁ = s₁` and `rᵢ = rᵢ₋₁ ∩ sᵢ` is the
+`C(s)` is the container count of a set (D6.2). Under a further child of an `And`, every term read
+is confined (D6.2): `C(t)` counts the containers loaded, those in the running set's regions, and
+each container passed over adds one `read.term_step`. In an `And`, `r₁ = s₁` and `rᵢ = rᵢ₋₁ ∩ sᵢ` is the
 running set after the `i`-th child; a `Not` child subtracts instead, `rᵢ = rᵢ₋₁ − sᵢ`, and is charged
 the same. `m` is the first `i` whose running set `rᵢ` is empty, or `k` if none is: the children after
 it are neither evaluated nor charged. The page and `sort` follow D6.2.
@@ -855,7 +892,7 @@ Rules for using it:
    | `read.container` | once per container, before it is loaded |
    | `read.set_container` | once per combination, for all its input containers, before it runs |
    | `read.byte` | once per cell of a projection, for its D4 size, after the read and before the copy |
-   | full-record scan | once per record, after the `#key` and `#meta` point reads and before the scan: all scan steps and the bytes of the whole record, `#key` and `#meta` included, from `#meta`'s counts |
+   | full-record scan | once per record, after the `#key`, `#meta` and `#is_live` point reads and before the scan: all scan steps and the bytes of the whole record, `#key`, `#meta` and `#is_live` included, from `#meta`'s counts |
    | `read.sort_compare` | once per sort, before it runs |
 
    A batch whose charge does not fit stops before any of its units.
@@ -987,7 +1024,7 @@ F1: once every item is settled, the rules above carry its content and the list i
 | 23 | all | Charge unit per step | proposed | [D6.3](#compiling-the-cost-while-executing) rule 2 |
 | 24 | core | Core reads shared with write planning | decided (2026-10-20) | D2 charges `read.key`, `read.cell`, `read.term` for its planning reads; no `read.byte` |
 | 10 | core | `get` | proposed | admission, call base, key resolution, then the record's shape |
-| 8 | core | Record shapes and byte basis | proposed | projection, existence check, full record from `#meta`; D4 basis, `#key` 45 and `#meta` 46 bytes |
+| 8 | core | Record shapes and byte basis | proposed | projection, existence check, full record from `#meta`; D4 basis, `#key` 45, `#meta` 46 and `#is_live` 18 bytes |
 | 16 | core | Branch reads | proposed | the same steps and weights as a committed read, calibrated for an overlay miss (R4, R5) |
 | 20 | core | Historical reads | deferred | flat surcharge per item |
 | 4 | query | Unit for combining sets | decided | per bitmap container, a logical unit (D1) |
@@ -998,8 +1035,8 @@ F1: once every item is settled, the rules above carry its content and the list i
 | 26 | query | Union of fewer than two inputs | proposed | not charged |
 | 9 | all | Admission for reads | proposed | [read call frame](#the-read-call-frame): D2's three-part shape, own weights starting at D2's values; one entry per filter node, operand value, projected name and sort key; operands valid by construction |
 | 11 | query | Purge read: equality, record-ID order, empty projection, limit | decided shape | charges follow from items 5 and 8 |
-| 12 | query | `And` | decided | written order; early exit when the running set is empty, remaining children not charged; intersection and difference per container of both sets |
-| 13 | query | `Or`, `Not` inside `And` | decided | `Or` evaluates every child, one union charged per container of every input; standalone `Not` waits for P08 |
+| 12 | query | `And` | decided; confined-read charges proposed | written order; early exit when the running set is empty, remaining children not charged; intersection and difference per container of both sets; further children read only the running set's regions (D01 1.4-B), loaded containers `read.container`, passed-over ones `read.term_step` |
+| 13 | query | `Or`, `Not` | decided; standalone `Not` proposed | `Or` evaluates every child, one union charged per container of every input; a standalone `Not` reads the `#is_live` term like an equality leaf, then its child unless no record is live, one difference per container of both sets |
 | 14 | query | `count` | decided | admission, call base, leaves and combinations only; no materialization |
 | 27 | query | No early exit on the match set | proposed | every query builds its whole match set; `total_matched` free |
 | 15 | query | `limit`, `offset`, `max_bytes` | proposed | no charge of their own; page ends at `limit` or `max_bytes`, at least one record; caps as defaults |
@@ -1283,10 +1320,11 @@ Admission weights and exact reference counts are not assigned numerical values h
 | binding in `#recordKeys` | system | (8 + 32) + (1 + 8) = 49 | – |
 | `#key` | system | (8 + 4) + (1 + 32) = 45 | – |
 | `#meta` (four `u64` counts) | system | (8 + 5) + (1 + 32) = 46 | – |
+| `#is_live` (`bool` attribute) | system | (8 + 8) + (1 + 1) = 18 | 8 + 2 + 1 = 11 |
 
 ### Create
 
-The key has no binding. The term `owner` = 0x71C7… is new; the term `status` = "active" already has other members.
+The key has no binding. The term `owner` = 0x71C7… is new; the term `status` = "active" and the `#is_live` term already have other members.
 
 | Operation | Terms | Cost |
 | --- | --- | --- |
@@ -1294,16 +1332,18 @@ The key has no binding. The term `owner` = 0x71C7… is new; the term `status` =
 | Create binding | 350 + 600 + 49 × 2 | 1,048 |
 | Create `#key` | 350 + 600 + 45 × 2 | 1,040 |
 | Create `#meta` | 350 + 600 + 46 × 2 | 1,042 |
+| Create `#is_live` | 350 + 600 + 18 × 2 | 986 |
 | Create `owner` | 350 + 600 + 34 × 2 | 1,018 |
 | Create `status` | 350 + 600 + 21 × 2 | 992 |
 | Create `payload` | 350 + 600 + 272 × 2 | 1,494 |
 | `owner` joins a new term | 100 + 400 + 650 + 600 + 27 × 2 | 1,804 |
 | `status` joins "active" | 100 + 650 + 600 + 14 × 2 | 1,378 |
-| **Subtotal excluding admission** | | **10,116** |
+| `#is_live` joins its term | 100 + 650 + 600 + 11 × 2 | 1,372 |
+| **Subtotal excluding admission** | | **12,474** |
 
-Full cost: `A_create + 10,116`.
+Full cost: `A_create + 12,474`.
 
-No cell reads: the record is new. Receipt: 3 cells created, 2 index joins, 1 term created, 327 cell bytes and 41 index bytes written. `#meta` afterwards: 3 cells, 327 cell bytes, 2 indexed cells, 41 index bytes.
+No cell reads: the record is new. The receipt reports user cells only (D4): 3 cells created, 2 index joins, 1 term created, 327 cell bytes and 41 index bytes written. `#meta` afterwards: 3 cells, 327 cell bytes, 2 indexed cells, 41 index bytes.
 
 ### Patch
 
@@ -1351,22 +1391,24 @@ the call instead stops before that step with `OutOfBudget` and no `required` tot
 | Delete binding | 350 + 600 (read in the record base) | 950 |
 | Read and delete `#key` | 100 + 350 + 600 | 1,050 |
 | Read and delete `#meta` | 100 + 350 + 600 | 1,050 |
+| Read and delete `#is_live` | 100 + 350 + 600 | 1,050 |
 | Read and delete `owner`, `status`, `payload` | 3 × (100 + 350 + 600) | 3,150 |
 | `owner` leaves; term emptied and removed | 100 + 650 + 600 (removal pre-paid) | 1,350 |
 | `status` leaves "closed" | 100 + 650 + 600 | 1,350 |
-| **Subtotal excluding admission** | | **9,150** |
+| `#is_live` leaves its term | 100 + 650 + 600 | 1,350 |
+| **Subtotal excluding admission** | | **11,550** |
 
-Full cost: `A_delete + 9,150`.
+Full cost: `A_delete + 11,550`.
 
 Receipt: 3 cells deleted, 2 index leaves; 171 cell bytes and 41 index bytes deleted, reported only.
 
 ### What the Example Shows
 
-- **D5 holds.** From `#meta` (3 cells, 2 indexed cells) and the fixed admission cost of a valid delete, D5 gives `A_delete + 250 + 3,050 + 3 × 1,050 + 2 × 1,350 = A_delete + 9,150`. Byte counts are not needed.
-- **Structure dominates the non-admission subtotal.** The payload's write-byte term contributes 544 of the create subtotal's 10,116 (about 5%). Any admission byte processing is charged separately; a host that prices storage over time adds that on top.
-- **Deleting and creating have similar non-admission costs** (9,150 against 10,116): every row, trie path and index entry has to be touched either way. Their full costs also include their respective admission charges.
+- **D5 holds.** From `#meta` (3 cells, 2 indexed cells) and the fixed admission cost of a valid delete, D5 gives `A_delete + 250 + 4,100 + 1,350 + 3 × 1,050 + 2 × 1,350 = A_delete + 11,550`: base, system cells, the `#is_live` leave, user cells, user leaves. Byte counts are not needed.
+- **Structure dominates the non-admission subtotal.** The payload's write-byte term contributes 544 of the create subtotal's 12,474 (about 4%). Any admission byte processing is charged separately; a host that prices storage over time adds that on top.
+- **Deleting and creating have similar non-admission costs** (11,550 against 12,474): every row, trie path and index entry has to be touched either way. Their full costs also include their respective admission charges.
 - **An index value change dominates a small patch's non-admission cell work.** Changing `status` costs 3,820 excluding admission and record-level overhead, of which 2,728 is the index leave and join: two terms, two trie paths.
-- **A record's fixed non-admission cost** is 3,430 on `create` (base plus three system cells) and 3,300 on `delete`, before any user cell. Admission is added separately.
+- **A record's fixed non-admission cost** is 5,788 on `create` (base, four system cells and the `#is_live` join) and 5,700 on `delete`, before any user cell. Admission is added separately.
 
 ## Worked Example: Reads
 
