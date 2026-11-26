@@ -8,8 +8,8 @@ use golemdb_storage::{Entry, ReadCursor, ReadTransaction, Scan, scan, scan_prefi
 
 use super::Index;
 use crate::{
-    Bitmap, BitmapContainer, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Regions, Result,
-    TermRange, key, tables,
+    Bitmap, BitmapContainer, ContainerId, INDEX_TRIE_PATH_BYTES, IndexKey, IndexTerm, Regions,
+    Result, TermRange, key, tables,
 };
 
 /// Whether `term` has postings: one seek to its first container row, decoding
@@ -55,12 +55,18 @@ impl<H: HashProvider> Index<'_, H> {
         tx: &'a T,
         range: TermRange,
     ) -> Result<TermScan<T::Cursor<'a>>> {
-        let (lower, upper) = key::bounds(range.bounds());
-        Ok(TermScan::new(scan(tx, tables::INDEX, lower, upper)?))
+        let (start, upper) = key::bounds(range.bounds());
+        Ok(TermScan::new(scan(
+            tx,
+            tables::INDEX,
+            Bound::Included(start),
+            upper,
+        )?))
     }
 
     /// [`Self::postings`] confined to `regions`: the term's containers in
-    /// them, and no other is read. Equal to `postings(term).within(regions)`.
+    /// them, and no other is decoded. Equal to
+    /// `postings(term).within(regions)`.
     pub fn postings_within(
         &self,
         tx: &impl ReadTransaction,
@@ -73,114 +79,224 @@ impl<H: HashProvider> Index<'_, H> {
     }
 
     /// [`Self::terms`] with each term's postings confined to `regions`: every
-    /// term in `range`, in order, with its containers in them. Each term
-    /// costs one seek to its first row, then [`Self::postings_within`]'s
-    /// reads; its other containers are skipped unread.
+    /// term in `range`, in order, with its containers in them. One cursor
+    /// walks the range, as for [`Self::terms`], and each term is read as
+    /// [`Self::postings_within`] reads it, but on from the row that ended the
+    /// term before it, which, wanted or not, never makes the scan seek. Past
+    /// a term's last wanted region, the scan steps on, and seeks past the
+    /// term only once it passes over another of the term's rows.
     pub fn terms_within<'t, 'r, T: ReadTransaction>(
         &self,
         tx: &'t T,
         range: TermRange,
         regions: &'r Regions,
-    ) -> TermsWithin<'t, 'r, T> {
-        let (next, upper) = key::bounds(range.bounds());
-        TermsWithin {
+    ) -> Result<TermsWithin<'t, 'r, T>> {
+        let (start, upper) = key::bounds(range.bounds());
+        Ok(TermsWithin {
             tx,
-            next,
+            cursor: tx.cursor(tables::INDEX, &start)?,
             upper,
-            regions,
-            done: false,
+            regions: regions.as_slice(),
+            current: None,
+            ended: false,
+        })
+    }
+}
+
+/// A term's read confined to some regions, partway through: the containers
+/// taken so far, and the wanted regions still ahead.
+struct Confined<'r> {
+    /// The wanted regions past the last row read, ascending.
+    rest: &'r [ContainerId],
+    found: Vec<BitmapContainer>,
+    /// Whether the last row read was passed over, so the read seeks to the
+    /// next wanted region before reading on.
+    behind: bool,
+}
+
+impl<'r> Confined<'r> {
+    fn new(regions: &'r [ContainerId]) -> Self {
+        Self {
+            rest: regions,
+            found: Vec::new(),
+            behind: false,
         }
+    }
+
+    /// A scanned term's read, begun at its first row, in `region`, whose
+    /// stored container is `value`. Even passed over, that row does not make
+    /// the read seek: a term of one container ends at the next row, which
+    /// stepping on reaches without one.
+    fn starting_at(regions: &'r [ContainerId], region: ContainerId, value: &[u8]) -> Result<Self> {
+        let mut read = Self::new(regions);
+        read.read(region, value)?;
+        read.behind = false;
+        Ok(read)
+    }
+
+    /// Read the term's row in `region`, whose stored container is `value`:
+    /// decoded when the region is wanted, otherwise passed over unread.
+    fn read(&mut self, region: ContainerId, value: &[u8]) -> Result<()> {
+        let rest: &'r [ContainerId] = self.rest;
+        let (_, rest) = rest.split_at(rest.partition_point(|wanted| *wanted < region));
+        match rest {
+            [wanted, past @ ..] if *wanted == region => {
+                self.found.push(BitmapContainer::decode(region, value)?);
+                self.rest = past;
+                self.behind = false;
+            }
+            _ => {
+                self.rest = rest;
+                self.behind = true;
+            }
+        }
+        Ok(())
     }
 }
 
 /// The containers of `term` in `regions`, ascending: a leapfrog over the
-/// term's rows. A seek to the next wanted region skips the rows below it
-/// unread, and a row of a region not wanted is passed over, not decoded. So
-/// it seeks at most once per wanted region and reads at most one row per
-/// seek or per container taken, however many containers the term has.
+/// term's rows, from its first wanted region. Each row is read in place: a
+/// row of a region not wanted is passed over, its container neither copied
+/// nor decoded, and the read then seeks to the next wanted region, skipping
+/// the rows below it unread. It ends past the last wanted region or the
+/// term's last row. So it seeks at most once per wanted region and passes
+/// over at most one row per wanted region, however many containers the term
+/// has.
 fn containers_within(
     tx: &impl ReadTransaction,
     term: &IndexTerm,
     regions: &Regions,
 ) -> Result<Vec<BitmapContainer>> {
-    let mut found = Vec::new();
-    let [first, ..] = regions.as_slice() else {
-        return Ok(found);
+    let mut read = Confined::new(regions.as_slice());
+    let &[first, ..] = read.rest else {
+        return Ok(read.found);
     };
-    let mut wanted = regions.as_slice().iter().copied().peekable();
-    let mut cursor = tx.cursor(tables::INDEX, &key::encode(term, *first))?;
-    while let Some(&want) = wanted.peek() {
-        let Some((row, value)) = cursor.next()? else {
-            break;
-        };
-        // No term is a prefix of another: a row it does not prefix is past it.
-        let Some(hi48) = row.strip_prefix(term.as_bytes()) else {
-            break;
-        };
-        let region = key::container_id(hi48)?;
-        if region < want {
+    let mut cursor = tx.cursor(tables::INDEX, &key::encode(term, first))?;
+    while let &[want, ..] = read.rest {
+        if read.behind {
             cursor = tx.cursor(tables::INDEX, &key::encode(term, want))?;
-            continue;
+            read.behind = false;
         }
-        while wanted.next_if(|wanted| *wanted < region).is_some() {}
-        if wanted.next_if_eq(&region).is_some() {
-            found.push(BitmapContainer::decode(region, &value)?);
+        let of_term = cursor.with_next(|row| {
+            // No term is a prefix of another: a row it does not prefix is
+            // past it.
+            match row.and_then(|(key, value)| Some((key.strip_prefix(term.as_bytes())?, value))) {
+                Some((hi48, value)) => read.read(key::container_id(hi48)?, value).map(|()| true),
+                None => Ok(false),
+            }
+        })??;
+        if !of_term {
+            break;
         }
     }
-    Ok(found)
+    Ok(read.found)
 }
 
 /// Lazy term scan with each term's postings confined to a set of regions
-/// ([`Index::terms_within`]). Any storage or decoding error ends iteration.
+/// ([`Index::terms_within`]). One cursor walks the range, seeking only to
+/// skip rows; the row that ends a term starts the next. Any storage or
+/// decoding error ends iteration.
 pub struct TermsWithin<'t, 'r, T: ReadTransaction> {
     tx: &'t T,
-    /// The lower bound of the next term's rows.
-    next: Bound<Vec<u8>>,
+    cursor: T::Cursor<'t>,
     upper: Bound<Vec<u8>>,
-    regions: &'r Regions,
-    done: bool,
+    regions: &'r [ContainerId],
+    /// The term being read, from its first row on.
+    current: Option<(IndexTerm, Confined<'r>)>,
+    /// Whether no row is left in the range past `current`'s.
+    ended: bool,
+}
+
+/// What the row a confined scan just read is.
+enum Next<'r> {
+    /// One more of the current term's rows, read into its read.
+    Same,
+    /// The first row of the next term, read into a read of it.
+    Term(IndexTerm, Confined<'r>),
+    /// No row, or one past the range: the scan is over.
+    End,
 }
 
 impl<T: ReadTransaction> TermsWithin<'_, '_, T> {
     fn step(&mut self) -> Result<Option<(IndexTerm, Bitmap)>> {
-        // Key bounds of a term range never cross, and the next term starts
-        // past the last one's rows, so `next` passes `upper` only at the end.
-        let past_the_end = match (&self.next, &self.upper) {
-            (Bound::Included(next), Bound::Excluded(upper)) => next >= upper,
-            (Bound::Included(next), Bound::Included(upper)) => next > upper,
-            _ => false,
-        };
-        if past_the_end {
-            return Ok(None);
+        while !self.ended {
+            if let Some((term, read)) = &mut self.current
+                && read.behind
+            {
+                let target = match read.rest {
+                    &[want, ..] => key::encode(term, want),
+                    [] => key::after(term.as_bytes()),
+                };
+                self.cursor = self.tx.cursor(tables::INDEX, &target)?;
+                read.behind = false;
+            }
+            let (current, upper, regions) = (&mut self.current, &self.upper, self.regions);
+            let next = self
+                .cursor
+                .with_next(|row| next_row(row, current.as_mut(), upper, regions))??;
+            match next {
+                Next::Same => {}
+                Next::Term(term, read) => {
+                    if let Some(done) = self.current.replace((term, read)) {
+                        return finish(done).map(Some);
+                    }
+                }
+                Next::End => self.ended = true,
+            }
         }
-        let first = scan(
-            self.tx,
-            tables::INDEX,
-            self.next.clone(),
-            self.upper.clone(),
-        )?
-        .next()
-        .transpose()?;
-        let Some((row, _)) = first else {
-            return Ok(None);
-        };
-        let IndexKey { term, .. } = IndexKey::decode(&row)?;
-        let containers = containers_within(self.tx, &term, self.regions)?;
-        self.next = key::after(term.as_bytes());
-        Ok(Some((term, Bitmap::from_containers(containers)?)))
+        self.current.take().map(finish).transpose()
     }
+}
+
+/// Classify `row` for a confined scan, and read it into the term it belongs
+/// to: `current`, or the next term, with `regions` wanted, while it is below
+/// `upper`.
+fn next_row<'r>(
+    row: Option<(&[u8], &[u8])>,
+    current: Option<&mut (IndexTerm, Confined<'r>)>,
+    upper: &Bound<Vec<u8>>,
+    regions: &'r [ContainerId],
+) -> Result<Next<'r>> {
+    let Some((key, value)) = row else {
+        return Ok(Next::End);
+    };
+    // No term is a prefix of another: a row the term prefixes is its own.
+    if let Some((term, read)) = current
+        && let Some(hi48) = key.strip_prefix(term.as_bytes())
+    {
+        read.read(key::container_id(hi48)?, value)?;
+        return Ok(Next::Same);
+    }
+    let below_upper = match upper {
+        Bound::Included(end) => key <= end.as_slice(),
+        Bound::Excluded(end) => key < end.as_slice(),
+        Bound::Unbounded => true,
+    };
+    if !below_upper {
+        return Ok(Next::End);
+    }
+    let IndexKey { term, container_id } = IndexKey::decode(key)?;
+    let read = Confined::starting_at(regions, container_id, value)?;
+    Ok(Next::Term(term, read))
+}
+
+/// A term whose confined read is done, with its postings.
+fn finish((term, read): (IndexTerm, Confined<'_>)) -> Result<(IndexTerm, Bitmap)> {
+    Ok((term, Bitmap::from_containers(read.found)?))
 }
 
 impl<T: ReadTransaction> Iterator for TermsWithin<'_, '_, T> {
     type Item = Result<(IndexTerm, Bitmap)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
+        let item = self.step();
+        if item.is_err() {
+            // An error may hide rows of the term being read: end the scan
+            // rather than read on.
+            self.ended = true;
+            self.current = None;
         }
-        let item = self.step().transpose();
-        self.done = !matches!(item, Some(Ok(_)));
-        item
+        item.transpose()
     }
 }
 
@@ -354,21 +470,26 @@ mod tests {
         let store = store_of(&[(0, ids.clone())]);
         let read = store.begin_read().unwrap();
         let index = Index::new(&Keccak256Hasher);
-        for (wanted, max_seeks, max_rows) in [
+        for (wanted, seeks, rows) in [
             // One region: one seek, one row, of 150.
             (vec![77 << 16], 1, 1),
             // Consecutive regions: one seek, then one row each.
             ((10..20).map(|region| region << 16).collect(), 1, 10),
-            // Scattered regions, and one the term has no container in.
-            (vec![0, 50 << 16, 100 << 16, 149 << 16, 500 << 16], 5, 10),
+            // Every other region: a seek to each, after the row passed over
+            // below it.
+            ((0..75).map(|region| region << 17).collect(), 75, 149),
+            // Scattered regions, and one past the term's last container:
+            // after each taken, one row passed over, then a seek to the next;
+            // the term's end ends the read.
+            (vec![0, 50 << 16, 100 << 16, 149 << 16, 500 << 16], 4, 7),
             (vec![], 0, 0),
         ] {
             let regions = regions_of(wanted.iter().copied());
-            let rows = Cell::new(0);
+            let counted_rows = Cell::new(0);
             let counted = Counted {
                 tx: &read,
                 seeks: Cell::new(0),
-                rows: &rows,
+                rows: &counted_rows,
             };
             let postings = index.postings_within(&counted, &tag(0), &regions).unwrap();
             let expected: Vec<u64> = wanted
@@ -377,12 +498,54 @@ mod tests {
                 .filter(|id| ids.contains(id))
                 .collect();
             assert_eq!(postings.treemap().iter().collect::<Vec<_>>(), expected);
-            assert!(
-                counted.seeks.get() <= max_seeks,
-                "{wanted:?}: {} seeks",
-                counted.seeks.get()
-            );
-            assert!(rows.get() <= max_rows, "{wanted:?}: {} rows", rows.get());
+            assert_eq!(counted.seeks.get(), seeks, "{wanted:?}: seeks");
+            assert_eq!(counted_rows.get(), rows, "{wanted:?}: rows");
+        }
+    }
+
+    #[test]
+    fn a_confined_scan_carries_one_cursor_across_its_terms() {
+        let one_each: Vec<_> = (0..20)
+            .map(|value| (value, vec![u64::from(value) << 16]))
+            .collect();
+        let regions: Vec<u64> = (0..150).map(|region| region << 16).collect();
+        let dense: Vec<_> = (0..3).map(|value| (value, regions.clone())).collect();
+        for (postings, wanted, seeks, rows) in [
+            // One container per term: the scan's one seek, then one row per
+            // term, wanted or not; a term's first row never seeks.
+            (&one_each, 5 << 16, 1, 20),
+            // Many containers per term, the first wanted: one row passed over
+            // past it, then a seek past the term.
+            (&dense, 0, 1 + 3, 3 * 2),
+            // Many containers per term, the last wanted: the first row and
+            // one more passed over below it, then a seek to it; its row past
+            // the term starts the next.
+            (&dense, 149 << 16, 1 + 3, 3 * 3),
+        ] {
+            let store = store_of(postings);
+            let read = store.begin_read().unwrap();
+            let index = Index::new(&Keccak256Hasher);
+            let regions = regions_of([wanted]);
+            let counted_rows = Cell::new(0);
+            let counted = Counted {
+                tx: &read,
+                seeks: Cell::new(0),
+                rows: &counted_rows,
+            };
+            let confined: Vec<_> = index
+                .terms_within(&counted, TermRange::all(), &regions)
+                .unwrap()
+                .collect::<Result<_>>()
+                .unwrap();
+            let full: Vec<_> = index
+                .terms(&read, TermRange::all())
+                .unwrap()
+                .map(|entry| entry.map(|(term, bitmap)| (term, bitmap.within(&regions))))
+                .collect::<Result<_>>()
+                .unwrap();
+            assert_eq!(confined, full, "{wanted}");
+            assert_eq!(counted.seeks.get(), seeks, "{wanted}: seeks");
+            assert_eq!(counted_rows.get(), rows, "{wanted}: rows");
         }
     }
 
@@ -424,6 +587,7 @@ mod tests {
                 .unwrap();
             let confined: Vec<_> = index
                 .terms_within(&read, TermRange::all(), &regions)
+                .unwrap()
                 .collect::<Result<_>>()
                 .unwrap();
             prop_assert_eq!(confined, full);

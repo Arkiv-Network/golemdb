@@ -499,6 +499,7 @@ fn confined_reads_hold_the_containers_of_the_given_regions() {
         }
         let confined = index
             .terms_within(&read, TermRange::all(), &regions)
+            .unwrap()
             .collect::<golemdb_index::Result<Vec<_>>>()
             .unwrap();
         let full = index

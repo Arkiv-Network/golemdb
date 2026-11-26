@@ -1,4 +1,4 @@
-use std::ops::RangeBounds;
+use std::ops::{Bound, RangeBounds};
 
 use golemdb_cells::CellType;
 use golemdb_merkle::HASH_BYTES;
@@ -72,8 +72,8 @@ proptest! {
         let prefix = String::from_utf8_lossy(&b).into_owned();
         if prefix.as_bytes() == b.as_slice() {
             let range = TermRange::with_prefix(golemdb_cells::CellNameRef::raw(b"s"), &prefix).unwrap();
-            let (lower, upper) = crate::key::bounds(range.bounds());
-            prop_assert_eq!((lower, upper).contains(&ka), a.starts_with(&b));
+            let (start, upper) = crate::key::bounds(range.bounds());
+            prop_assert_eq!((Bound::Included(start), upper).contains(&ka), a.starts_with(&b));
         }
     }
 }

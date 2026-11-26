@@ -452,7 +452,7 @@ fn query_count_and_unavailable_history_report_the_selected_head() {
 fn boolean_admission_failures_retain_the_selected_head() {
     each_backend(|db| {
         let head = db.commit(db.begin().unwrap()).unwrap();
-        // Database currently caps And/Or nesting at 64 levels.
+        // Database currently caps And/Or/Not nesting at 64 levels.
         let too_deep = (0..65).fold(filter("color"), |child, _| Filter::And(vec![child]));
         // A standalone `Not` is admitted; an invalid tree under one is not.
         let invalid_under_not = Filter::Not(Box::new(Filter::Or(vec![])));

@@ -681,8 +681,13 @@ reference execution: the execution rules of the
     read repositions at that region, so it passes over at most one container per wanted region,
     however many the term has. The entry past the term's last container ends the read, uncharged,
     as for an unconfined read.
-  - A **confined scan** steps through its terms, charged as an unconfined scan (`read.term`, then
-    `read.term_step`s); each term's containers are then read confined, as above.
+  - A **confined scan** positions once, at the start of its range, and steps through its terms,
+    charged as an unconfined scan (`read.term`, then `read.term_step`s); each term's containers are
+    read confined, as above, on from the entry that ended the term before it rather than from a
+    new position. That first entry, loaded or passed over, never repositions the read. Past a
+    term's last wanted region, the read steps on; an entry still of the term is passed over, and
+    the read then repositions past the term. So a scanned term passes over at most one container
+    per wanted region, plus its first and one past its last wanted region.
   - A **standalone `Not`** under a further child reads the `#is_live` term confined the same way.
   - Combinations are charged on the container counts of the confined sets they take.
 - **`Or`** evaluates every child, in the written order, with no early exit, and unions them.

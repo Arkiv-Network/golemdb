@@ -57,9 +57,11 @@ pub enum Filter {
     /// Some child matches: the union of the children's match sets. Every
     /// child is evaluated, in the written order. At least one child.
     Or(Vec<Filter>),
-    /// The child does not match. A record with no cell of the leaf's name,
-    /// or one of another type, matches a `Not` of that leaf: `Not` of
-    /// `color = "red"` keeps the records with no `color` attribute. A `Not`
+    /// The child does not match. A record with no attribute of the leaf's
+    /// name, or one of another type, matches a `Not` of that leaf, as does
+    /// one holding the name as a field: fields are never indexed, so filters
+    /// never see them. `Not` of `color = "red"` keeps the records with no
+    /// `color` attribute, a `color` field of `"red"` included. A `Not`
     /// after an `And`'s first child subtracts its child's match set from
     /// the running set. Anywhere else, standalone, it subtracts it from the
     /// set of all live records, read first from the index's `#is_live` term: an

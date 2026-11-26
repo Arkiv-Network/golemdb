@@ -1013,6 +1013,8 @@ right, so a condition shared by several branches is written, and read, once.
   `total_matched` is required.
 - A record matching several children of an `Or` is returned **once**.
 - **Predicates are typed:** a cell of another type under the same name is treated as absent.
+- **Predicates see attributes only:** fields are never indexed, so a leaf never matches a field,
+  and a `Not` of it matches a record holding the same name and value as a field.
 - `LimitExceeded` caps the nesting depth.
 
 **The database performs no statistics-based planning**: work is a pure function of

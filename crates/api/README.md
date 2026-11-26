@@ -633,8 +633,9 @@ Typed cells, record CRUD, branch lifecycle, atomic opening/genesis, and typed
 immutable data are implemented behind a cloneable `Database` with shared state.
 Queries support `Eq`, `In`, `Range`, `Prefix` and `Exists` filters, combined by `And`, `Or` and
 `Not` trees, with full or projected records, and `count`. A `Not` child of an `And`, after its
-first child, removes its own child's matches from the `And`'s; a record whose cell is absent, or
-of another type, matches it. A `Not` anywhere else, standalone, removes its child's matches from
+first child, removes its own child's matches from the `And`'s; a record with no attribute of the
+leaf's name, or one of another type, matches it, as does one holding the name as a field: fields
+are never indexed, so filters never see them. A `Not` anywhere else, standalone, removes its child's matches from
 every live record: it reads the index's `#is_live` term first, and when that is empty, skips its
 child. Every child of an `And` after its first, and everything under it, reads only the index
 containers in the regions (blocks of 65 536 record IDs) the `And`'s running set occupies, skipping
@@ -655,8 +656,10 @@ types or `bytes` do not compile; `EqValue::try_from`, `InValues::try_from`,
 converts into `ApiError::InvalidArgument`). A `Range` with two unbounded sides matches every cell
 of its type.
 Queries read committed state only: `None` reads the head, and an explicit commit
-other than the head returns `ApiError::CommitUnavailable`. Sort returns
-`ApiError::NotImplemented`. Query budgets are accepted but not enforced. Cost
+other than the head returns `ApiError::CommitUnavailable`. A sorted query orders its matches by
+each sort key in turn, records every key ties in ascending record ID order, and pages over that
+order. It sorts by at most 4 keys, a hardcoded cap until it is read from genesis; more return
+`ApiError::LimitExceeded`. Query budgets are accepted but not enforced. Cost
 receipts, generated keys, OCC, and transport serialization are deferred.
 
 Use scripted mocks for consumer error paths behind `Arc<dyn Api + Send + Sync>`. For tests, replace the storage opening with

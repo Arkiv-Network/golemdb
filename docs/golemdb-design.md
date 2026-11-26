@@ -96,7 +96,7 @@ The metering layer itself (property 7 in §1) is out of scope here: it is specif
 - **[6. Merkleizing the Posting List](#6-merkleizing-the-posting-list)**
   - [Binding a Container to Its Path](#binding-a-container-to-its-path)
   - [Update Mechanics (Copy-on-Write)](#update-mechanics-copy-on-write)
-  - [Live Containers and Versioned Branches](#is_live-containers-and-versioned-branches)
+  - [Live Containers and Versioned Branches](#live-containers-and-versioned-branches)
 - **[7. Point-in-Time History](#7-point-in-time-history)**
   - [Resolving a Value as of a Commit](#resolving-a-value-as-of-a-commit)
   - [Historical Query Execution Example](#historical-query-execution-example)
