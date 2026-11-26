@@ -34,6 +34,7 @@ let config = OpenConfig::new(Genesis::new(
     },
     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
     None,
+    golemdb_api::PricingConfig::zero(), // Development example with explicit free prices.
 ));
 let db = Database::open("./golemdb-quickstart", &config)?;
 let branch = db.begin()?;
@@ -223,6 +224,7 @@ let config = OpenConfig::new(Genesis::new(
     },
     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
     None,
+    golemdb_api::PricingConfig::zero(), // Development example with explicit free prices.
 ))
 .with_mode(OpenMode::CreateNew);
 let db = Database::open("./golemdb-empty-records", &config)?;
@@ -283,6 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
         None,
+        golemdb_api::PricingConfig::zero(),
     ))
     .with_mode(OpenMode::CreateNew);
     let db = Database::open("./golemdb-catalogue", &config)?;
@@ -439,6 +442,10 @@ cell_limits:
 record_limits:
   max_cells: 100
   max_indexed_cells: 100
+metering:
+  golemdb_code_version: 1
+  host_code_version: 0
+  weights: {} # provide the deployment's prices; missing weights remain unpriced
 immutable_data:
   shard_span: 500000
   segments:
@@ -456,10 +463,26 @@ defaults to `bytes`. Duplicate and unknown fields are rejected.
 Use `Genesis::load(path)` or `Genesis::from_yaml(text)`; the loader
 does not search for files or read environment overrides.
 
-Typed construction uses `Genesis::new(hash, cell_limits, record_limits, None)` to disable
-immutable data, or `Genesis::new(hash, cell_limits, record_limits,
-Some(ImmutableDataConfig::new(shard_span, segments)))` to enable it. These
+Typed construction uses `Genesis::new(hash, cell_limits, record_limits, None, pricing)`
+to disable immutable data, or passes
+`Some(ImmutableDataConfig::new(shard_span, segments))` as the fourth argument to enable it. These
 configuration types own their declarations and implement `Clone`, not `Copy`.
+
+History retention uses the existing `OpenConfig::with_pruning(PruningConfig::new(window))`
+setting, with `window` previous commits plus the head. There is no additional
+genesis retention parameter. With pruning disabled, retained history has no
+configured cutoff. Historical reads and history cleanup remain deferred until
+their complete paths are implemented.
+Commits already record cell and container pre-images atomically with live state.
+Genesis cells have no creation events: commit zero is the baseline. Pruning
+tracks the available history internally, and opening validates that metadata.
+Enlarging the pruning window or disabling pruning cannot restore data that was
+already removed.
+
+New databases use storage format 2. Older formats are rejected without migration
+or modification; use a new compatible database. The backend must accommodate
+changeset keys with an additional eight-byte commit prefix, including reserved
+and metering cell keys.
 
 `RecordLimits { max_cells, max_indexed_cells }` contains explicit `u64` caps,
 stored at genesis as `#params.#maxRecordCells` and `#params.#maxRecordIndexedCells`.

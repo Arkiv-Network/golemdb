@@ -66,8 +66,8 @@ pub(crate) fn stage(
             }
         }
     }
-    // History and change-set tables remain deferred. Allocator/binding changes
-    // already staged as cells participate in the same sealed write set.
+    // Pre-images and history bitmaps were computed at seal. Replay them with
+    // live state; a retry must not record the same changes a second time.
     let roots = Roots {
         state: sealed.cells.root,
         index: sealed.index.root,

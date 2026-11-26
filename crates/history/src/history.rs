@@ -19,9 +19,15 @@ pub struct HistoryTables {
     pub changeset: Table,
 }
 
+/// Bytes prepended to an item key in a changeset: the modifying commit as `u64_be`.
+pub const CHANGESET_PREFIX_LEN: usize = size_of::<u64>();
+
 /// Big-endian modifying commit, followed by the complete opaque item key.
 pub fn changeset_key(commit: u64, item: &[u8]) -> Vec<u8> {
-    [&commit.to_be_bytes()[..], item].concat()
+    let mut key = Vec::with_capacity(CHANGESET_PREFIX_LEN + item.len());
+    key.extend_from_slice(&commit.to_be_bytes());
+    key.extend_from_slice(item);
+    key
 }
 
 impl HistoryTables {

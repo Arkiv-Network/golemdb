@@ -10,7 +10,7 @@ use golemdb_storage::{ReadCursor, ReadTransaction, Table, WriteTransaction};
 use crate::{Genesis, OpenConfig, OpenError, OpenInfo, OpenMode, OpenResult};
 
 const SUPERBLOCK: Table = Table("Superblock");
-const FORMAT: u32 = 2;
+pub(crate) const FORMAT: u32 = 2;
 const ROARING: u16 = 1;
 
 fn hash_id(algorithm: HashAlgorithm) -> u16 {
@@ -144,6 +144,7 @@ pub(crate) fn prepare(
         )?;
         tx.put(SUPERBLOCK, b"roaring", &ROARING.to_be_bytes())?;
         tx.put(SUPERBLOCK, b"genesis_id", &genesis_id)?;
+        golemdb_pruning::Pruner::initialize(tx)?;
         let commit_id = CommitId::GENESIS;
         let update = Cells::new(hasher).apply(
             tx,
@@ -153,6 +154,8 @@ pub(crate) fn prepare(
                 .into_iter()
                 .map(|(key, value)| CellChange::Put { key, value }),
         )?;
+        // Commit zero is the baseline. Genesis cells have no absent pre-images;
+        // their first later change records their original value during seal.
         // Every genesis cell is a field, so IndexRoot is the canonical empty root.
         // #roots cannot contain its own roots and has no history entries at commit 0.
         let roots = Roots {
@@ -180,6 +183,7 @@ pub(crate) fn prepare(
         return Err(OpenError::GenesisMismatch);
     }
     let head = read_head_state(tx)?;
+    golemdb_pruning::Pruner::validate(tx, head.commit_id.get())?;
     validate_state(tx, &head, cells, hasher)?;
     if config.mode == OpenMode::CreateNew {
         return Err(OpenError::AlreadyInitialized);

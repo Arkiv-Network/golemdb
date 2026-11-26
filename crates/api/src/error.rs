@@ -356,7 +356,7 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
         } else if let Some(error) = error.downcast_ref::<PruningError>() {
             match error {
                 PruningError::Storage(error) => Some(error),
-                PruningError::UnversionedTable(_) => None,
+                PruningError::UnversionedTable(_) | PruningError::InvalidHistoryMetadata(_) => None,
             }
         } else {
             error.source()
