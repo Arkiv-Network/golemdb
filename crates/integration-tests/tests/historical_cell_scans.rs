@@ -383,7 +383,10 @@ fn absent_candidates_are_lazy_budgetable_and_do_not_copy_live_payloads() {
     let mut attempts = 0;
     let result: Result<Option<()>, Box<dyn std::error::Error>> = scan.next_with(
         &mut attempts,
-        |n| {
+        |n, work| {
+            if work != golemdb_history::ReadOperation::Advance(tables::CELL) {
+                return Ok(());
+            }
             *n += 1;
             if *n <= 3 {
                 Ok(())
@@ -441,7 +444,7 @@ fn hooks_can_refuse_before_any_row_or_before_copying_a_selected_payload() {
         tx.accesses.take();
         let result: Result<Option<()>, Box<dyn std::error::Error>> = scan.next_with(
             &mut (),
-            |_| Err("refused".into()),
+            |_, _| Err("refused".into()),
             |_, _, _| panic!("refused before work"),
         );
         assert!(result.is_err());
@@ -450,7 +453,7 @@ fn hooks_can_refuse_before_any_row_or_before_copying_a_selected_payload() {
         tx.accesses.take();
         let result: Result<Option<()>, Box<dyn std::error::Error>> = scan.next_with(
             &mut (),
-            |_| Ok(()),
+            |_, _| Ok(()),
             |_, key, bytes| {
                 assert_eq!(key.name().as_bytes(), b"large");
                 assert_eq!(bytes.len(), 100_001);
@@ -473,7 +476,7 @@ fn hooks_can_refuse_before_any_row_or_before_copying_a_selected_payload() {
         for expected in [Some(100_001), None] {
             let result: golemdb_cells::Result<_> = scan.next_with(
                 &mut attempts,
-                |n| {
+                |n, _| {
                     *n += 1;
                     Ok(())
                 },
@@ -481,11 +484,11 @@ fn hooks_can_refuse_before_any_row_or_before_copying_a_selected_payload() {
             );
             assert_eq!(result.unwrap(), expected);
         }
-        assert_eq!(attempts, 2); // The exhaustion probe is also an attempt.
+        assert_eq!(attempts, if target.is_none() { 2 } else { 6 }); // Includes terminal probes.
         tx.accesses.take();
         let result: golemdb_cells::Result<Option<()>> = scan.next_with(
             &mut (),
-            |_| panic!("fused scan must not call hooks"),
+            |_, _| panic!("fused scan must not call hooks"),
             |_, _, _| unreachable!(),
         );
         assert_eq!(result.unwrap(), None);

@@ -412,7 +412,7 @@ fn reader_accesses_are_borrowed_and_head_paths_do_not_consult_history() {
         CellReader::new(&tx).get(&cell).unwrap(),
         Some(value.clone())
     );
-    assert_eq!(tx.reads.take(), [("owned", cell_tables::CELL)]);
+    assert_eq!(tx.reads.take(), [("borrowed", cell_tables::CELL)]);
     assert_eq!(
         CellReader::new(&tx)
             .with_encoded_value(&cell, |b| b.unwrap().len())

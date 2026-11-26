@@ -2,18 +2,27 @@ use crate::{
     Accounting, Budget, FailureReason, Ledger, MeteringFailure, Schedule, WeightName as W,
 };
 
-/// Immediate read work. A full user-record scan is one indivisible charge;
-/// projections and reserved-record scans charge returned bytes one cell at a time.
+/// Immediate read work. Live full-record scans prepay scans and returned bytes;
+/// historical scans prepay returned bytes alone and charge traversal incrementally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadStep {
     AdmissionBase,
-    AdmissionEntry { bytes: u64 },
+    AdmissionEntry {
+        bytes: u64,
+    },
     ReadBase,
     KeyResolve,
     CellRead,
     CellScan,
+    /// Prepay one encoded history bitmap's copying, validation and successor seek.
+    CommitSet {
+        encoded_bytes: u64,
+    },
     ReturnedBytes(u64),
-    FullRecordScan { cells: u64, returned_bytes: u64 },
+    FullRecordScan {
+        cells: u64,
+        returned_bytes: u64,
+    },
 }
 
 impl ReadStep {
@@ -28,6 +37,9 @@ impl ReadStep {
             Self::KeyResolve => vec![(W::READ_KEY, 1)],
             Self::CellRead => vec![(W::READ_CELL, 1)],
             Self::CellScan => vec![(W::READ_CELL_SCAN, 1)],
+            Self::CommitSet { encoded_bytes } => {
+                vec![(W::READ_COMMIT_SET, 1), (W::READ_BYTE, encoded_bytes)]
+            }
             Self::ReturnedBytes(bytes) => vec![(W::READ_BYTE, bytes)],
             Self::FullRecordScan {
                 cells,
@@ -109,6 +121,7 @@ mod tests {
                 (W::READ_KEY, 11),
                 (W::READ_CELL, 13),
                 (W::READ_CELL_SCAN, 17),
+                (W::READ_COMMIT_SET, 23),
                 (W::READ_BYTE, 19),
             ],
         )
@@ -130,6 +143,11 @@ mod tests {
             (CellRead, vec![("read.cell", 1)], 13),
             (CellScan, vec![("read.cell_scan", 1)], 17),
             (ReturnedBytes(4), vec![("read.byte", 4)], 76),
+            (
+                CommitSet { encoded_bytes: 4 },
+                vec![("read.commit_set", 1), ("read.byte", 4)],
+                99,
+            ),
             (
                 FullRecordScan {
                     cells: 2,
@@ -157,6 +175,7 @@ mod tests {
         let schedule = schedule();
         for (step, budget) in [
             (AdmissionEntry { bytes: 4 }, 24),
+            (CommitSet { encoded_bytes: 4 }, 100),
             (
                 FullRecordScan {
                     cells: 2,
@@ -254,5 +273,37 @@ mod tests {
                 assert_eq!(meter.into_accounting(), before);
             }
         }
+    }
+    #[test]
+    fn commit_set_requires_explicit_prices_and_rejects_all_overflows_atomically() {
+        let step = CommitSet { encoded_bytes: 2 };
+        for budget in [Budget::Limited(u64::MAX), Budget::Unlimited] {
+            for prices in [
+                vec![(W::READ_BYTE, 0)],
+                vec![(W::READ_COMMIT_SET, 0)],
+                vec![(W::READ_COMMIT_SET, 0), (W::READ_BYTE, u64::MAX)],
+                vec![(W::READ_COMMIT_SET, u64::MAX), (W::READ_BYTE, 1)],
+            ] {
+                let schedule = Schedule::new(WRITE_CODE_VERSION, prices).unwrap();
+                let mut meter = ReadMeter::new(&schedule, budget);
+                let failure = meter.charge(step).unwrap_err();
+                assert!(matches!(failure.reason, FailureReason::Pricing(_)));
+                assert_eq!(failure.accounting, Accounting::default());
+                assert_eq!(meter.charge(ReturnedBytes(0)).unwrap_err(), failure);
+            }
+        }
+        let schedule = Schedule::new(
+            WRITE_CODE_VERSION,
+            [(W::READ_COMMIT_SET, 0), (W::READ_BYTE, 0)],
+        )
+        .unwrap();
+        let mut meter = ReadMeter::new(&schedule, Budget::Limited(0));
+        meter.charge(step).unwrap();
+        assert_eq!(meter.accounting.ledger.count("read.commit_set"), 1);
+        assert_eq!(meter.accounting.ledger.count("read.byte"), 2);
+        meter.charge(ReturnedBytes(u64::MAX - 2)).unwrap();
+        let before = meter.accounting.clone();
+        assert!(meter.charge(step).is_err());
+        assert_eq!(meter.into_accounting(), before);
     }
 }

@@ -28,8 +28,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use golemdb_history::ValueSource;
-use golemdb_storage::{ReadTransaction, WriteTransaction};
+use golemdb_storage::WriteTransaction;
 
 use crate::{CellValue, CellValueChange, Result, tables};
 
@@ -51,20 +50,4 @@ pub fn record_changes(
         tables::HISTORY.record(tx, &change.key.encode(), commit, preimage)?;
     }
     Ok(())
-}
-
-/// Resolve raw bytes before domain parsing or allocation, just like live reads.
-/// The owner must validate target/head and retention coverage first.
-pub(crate) fn with_encoded_value<T>(
-    tx: &impl ReadTransaction,
-    key: &[u8],
-    target: u64,
-    inspect: impl FnOnce(Option<&[u8]>) -> T,
-) -> Result<T> {
-    Ok(
-        tables::HISTORY.with_resolved(tx, key, target, |source| match source {
-            ValueSource::Live => tx.with_value(tables::CELL, key, inspect),
-            ValueSource::Preimage(bytes) => Ok(inspect(bytes)),
-        })??,
-    )
 }

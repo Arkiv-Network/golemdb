@@ -224,7 +224,7 @@ What it does not change: the filter's own cost (a wide `Range` or `Exists` on th
    - an `Exists` on the key's name, typed with the key's type (an untyped `Exists` does not count).
 
    `Or`, `Not` and deeper nesting are not looked into.
-4. **The spec change and its timing.** §12 rejects index-ordered emission, rule 8 and D6.2 describe fetch-and-sort only. **Recommended:** write the spec text last, after the benchmark, with its numbers.
+4. **The spec change and its timing.** §12 rejects index-ordered emission, rule 8 and D6.3 describe fetch-and-sort only. **Recommended:** write the spec text last, after the benchmark, with its numbers.
 
 ### How it orders
 
@@ -266,6 +266,6 @@ At the first level this reads no cell at all, unless the switch rule fires.
 7. **Conformance.** `conformance!(index_walk, IndexWalk)` runs every shared case. A new property test checks `IndexWalk` returns the same page as `FetchAndSort` over random cells, matches, keys and windows, with the guarantee set exactly when every match holds the key as an attribute.
 8. **End to end.** The `tests/sort.rs` property test also runs through `Queries` built with `IndexWalk`, including filters that guarantee the key.
 9. **Benchmark.** `crates/integration-tests/benches/sort.rs`, with criterion, both strategies on the scenarios of the table above, scaled to what the memory store holds comfortably (about 100k records).
-10. **Spec text,** after the benchmark: §12's "The Alternative" becomes a second strategy with the switch rule and the guarantee; rule 8 describes both; D6.2 lists what `IndexWalk` is charged (terms stepped, terms read, containers, set combinations, fetches). Plus decision 1's outcome.
+10. **Spec text,** after the benchmark: §12's "The Alternative" becomes a second strategy with the switch rule and the guarantee; rule 8 describes both; D6.3 lists what `IndexWalk` is charged (terms stepped, terms read, containers, set combinations, fetches). Plus decision 1's outcome.
 
 Not in this phase: metering hooks for either strategy; using the index for deeper levels too (ranking each tied record by its term's position); narrowing the walk to the filter's own range on the key.

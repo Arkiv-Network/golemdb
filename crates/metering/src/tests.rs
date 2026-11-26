@@ -57,7 +57,7 @@ fn model(store: &MemoryStore, version: u64, activation: u64, golemdb: u64, host:
 #[test]
 fn canonical_cells_match_the_design_and_ignore_user_name_caps() {
     let initial = PricingConfig {
-        golemdb_code_version: 1,
+        golemdb_code_version: 2,
         host_code_version: 9,
         weights: BTreeMap::from([("host.storage_price".into(), u64::MAX)]),
     };
@@ -74,7 +74,7 @@ fn canonical_cells_match_the_design_and_ignore_user_name_caps() {
     assert_eq!(cells[0].0.name().as_bytes(), 2u64.to_be_bytes());
     assert_eq!(
         cells[0].1.as_bytes().unwrap(),
-        [100u64.to_be_bytes(), 1u64.to_be_bytes(), 9u64.to_be_bytes()].concat()
+        [100u64.to_be_bytes(), 2u64.to_be_bytes(), 9u64.to_be_bytes()].concat()
     );
     assert_eq!(cells[1].0.record_id(), 33);
     assert_eq!(
@@ -114,7 +114,7 @@ fn missing_weights_remain_unpriced_while_zero_and_host_values_are_preserved() {
         weight_names: vec!["host.storage_price".into(), "host.limit".into()],
     }];
     let initial = PricingConfig {
-        golemdb_code_version: 1,
+        golemdb_code_version: 2,
         host_code_version: 4,
         weights: BTreeMap::from([
             ("read.cell".into(), 0),
@@ -195,10 +195,10 @@ fn configuration_rejects_undeclared_names_and_bad_host_capabilities() {
         Err(ModelError::UnsupportedHostCode(7))
     ));
     initial.host_code_version = 0;
-    initial.golemdb_code_version = 2;
+    initial.golemdb_code_version = 1;
     assert!(matches!(
         initial.validate(&[]),
-        Err(ModelError::UnsupportedGolemDbCode(2))
+        Err(ModelError::UnsupportedGolemDbCode(1))
     ));
 }
 
@@ -217,12 +217,12 @@ fn activation_selection_never_falls_back_from_unsupported_active_code() {
         load(&store, 10, &[]),
         Err(ModelError::UnsupportedGolemDbCode(99))
     ));
-    model(&store, 2, 10, 1, 99);
+    model(&store, 2, 10, WRITE_CODE_VERSION, 99);
     assert!(matches!(
         load(&store, 10, &[]),
         Err(ModelError::UnsupportedHostCode(99))
     ));
-    model(&store, 2, 10, 1, 0);
+    model(&store, 2, 10, WRITE_CODE_VERSION, 0);
     let active = load(&store, 10, &[]).unwrap();
     assert_eq!(active.snapshot(10).unwrap().model.metadata.version, 2);
     assert!(active.model_weights(None).unwrap().is_empty()); // no inheritance from v1

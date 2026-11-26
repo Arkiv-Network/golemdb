@@ -103,7 +103,7 @@ table later changes the model's counting rules. The cell path charge is
    the record adapter must propagate that error before attempting any later step.
 
 This combines the earlier `check_step`/`complete_step` proposal into one helper. It
-prevents reused or uncompleted approval tokens and follows D6.3's charge-before-work
+prevents reused or uncompleted approval tokens and follows D6.4's charge-before-work
 convention. An operational storage fault or panic retains a started step's charge;
 these faults are outside deterministic validation/fee policy. The action itself has
 no access to the mutably borrowed meter. A metering failure stops that meter permanently.

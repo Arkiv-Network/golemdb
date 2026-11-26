@@ -47,3 +47,9 @@ impl From<OperationError<RecordError>> for RecordError {
 }
 
 pub type Result<T> = std::result::Result<T, RecordError>;
+
+impl From<golemdb_history::HistoryError> for RecordError {
+    fn from(error: golemdb_history::HistoryError) -> Self {
+        Self::Cells(error.into())
+    }
+}

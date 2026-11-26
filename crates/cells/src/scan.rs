@@ -2,7 +2,7 @@
 
 use std::iter::FusedIterator;
 
-use golemdb_history::{CommitSet, HistoryError};
+use golemdb_history::{CommitSet, HistoryError, ReadOperation};
 use golemdb_storage::{Entry, ReadCursor, ReadTransaction};
 
 use crate::{CellError, CellKey, CellValue, CellValueRef, Result, tables};
@@ -17,7 +17,7 @@ use crate::{CellError, CellKey, CellValue, CellValueRef, Result, tables};
 /// and selected values, not just emitted cells. A single `next` can skip many
 /// absent candidates. Lookahead retains at most one live key and one history
 /// row; decoding a history row also allocates its commit set. Live payloads are
-/// not copied by lookahead. Use [`Self::next_with`] to control candidate work
+/// not copied by lookahead. Use [`Self::next_with`] to control individual operations
 /// and inspect borrowed payloads before copying them.
 pub struct CellScan<'tx, R: ReadTransaction> {
     tx: &'tx R,
@@ -56,28 +56,22 @@ impl<'tx, R: ReadTransaction> CellScan<'tx, R> {
         })
     }
 
-    /// Return the next present cell through a borrowed-value callback.
-    /// `before_next` runs before each candidate attempt, including attempts
-    /// resolving to absence and the final exhaustion probe. It runs before
-    /// advancing cursors, decoding a commit set or reading a selected value.
-    /// Historical lookahead may fetch one row from each table per attempt; it
-    /// copies keys and encoded history bytes, but no cell payloads.
-    ///
-    /// `inspect` sees the resolved, non-absent raw value before parsing/copying;
-    /// callers can refuse its size or decode it themselves. Live empty values
-    /// are passed through as corrupt payloads; empty pre-images mean absence.
-    /// Errors from either callback terminate the scan just like storage errors.
-    /// No pricing policy is imposed here.
+    /// Return the next present cell through a borrowed-value callback. `before`
+    /// authorizes each cursor advance and selected-value lookup, and each
+    /// commit-set package before its first copy/decode. Buffered history is
+    /// charged once, even when selected on a later call. `inspect` runs before
+    /// domain parsing/copying. Empty pre-images mean absence; empty live values
+    /// remain visible to validation. Any error terminates the scan.
     pub fn next_with<C, T, E: From<CellError>>(
         &mut self,
         context: &mut C,
-        mut before_next: impl FnMut(&mut C) -> std::result::Result<(), E>,
+        mut before: impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
         mut inspect: impl FnMut(&mut C, CellKey, &[u8]) -> std::result::Result<T, E>,
     ) -> std::result::Result<Option<T>, E> {
         if self.done {
             return Ok(None);
         }
-        let result = self.advance(context, &mut before_next, &mut inspect);
+        let result = self.advance(context, &mut before, &mut inspect);
         if !matches!(result, Ok(Some(_))) {
             self.done = true;
         }
@@ -87,12 +81,12 @@ impl<'tx, R: ReadTransaction> CellScan<'tx, R> {
     fn advance<C, T, E: From<CellError>>(
         &mut self,
         context: &mut C,
-        before_next: &mut impl FnMut(&mut C) -> std::result::Result<(), E>,
+        before: &mut impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
         inspect: &mut impl FnMut(&mut C, CellKey, &[u8]) -> std::result::Result<T, E>,
     ) -> std::result::Result<Option<T>, E> {
         loop {
-            before_next(context)?;
             let Some(history) = &mut self.history else {
+                before(context, ReadOperation::Advance(tables::CELL))?;
                 return self
                     .live
                     .with_next(|row| {
@@ -109,7 +103,7 @@ impl<'tx, R: ReadTransaction> CellScan<'tx, R> {
                 encoded,
                 commits,
                 has_live_row,
-            }) = history.next_candidate(&mut self.live, &self.prefix)?
+            }) = history.next_candidate(&mut self.live, &self.prefix, context, before)?
             else {
                 return Ok(None);
             };
@@ -129,18 +123,23 @@ impl<'tx, R: ReadTransaction> CellScan<'tx, R> {
                 .transpose()?
                 .flatten();
             let value = match successor {
-                Some(commit) => tables::HISTORY
-                    .with_preimage(self.tx, &encoded, commit, |bytes| {
-                        bytes.map(|bytes| inspect(context, key, bytes)).transpose()
-                    })
-                    .map_err(CellError::from)??,
+                Some(commit) => {
+                    before(context, ReadOperation::Lookup(tables::CELL_CHANGE_SET))?;
+                    tables::HISTORY
+                        .with_preimage(self.tx, &encoded, commit, |bytes| {
+                            bytes.map(|bytes| inspect(context, key, bytes)).transpose()
+                        })
+                        .map_err(CellError::from)??
+                }
                 None if !has_live_row => continue,
-                None => self
-                    .tx
-                    .with_value(tables::CELL, &encoded, |bytes| {
-                        bytes.map(|bytes| inspect(context, key, bytes)).transpose()
-                    })
-                    .map_err(CellError::from)??,
+                None => {
+                    before(context, ReadOperation::Lookup(tables::CELL))?;
+                    self.tx
+                        .with_value(tables::CELL, &encoded, |bytes| {
+                            bytes.map(|bytes| inspect(context, key, bytes)).transpose()
+                        })
+                        .map_err(CellError::from)??
+                }
             };
             if value.is_some() {
                 return Ok(value);
@@ -155,7 +154,7 @@ impl<R: ReadTransaction> Iterator for CellScan<'_, R> {
     fn next(&mut self) -> Option<Self::Item> {
         self.next_with(
             &mut (),
-            |_| Ok::<_, CellError>(()),
+            |_, _| Ok::<_, CellError>(()),
             |_, key, bytes| Ok((key, CellValueRef::parse(bytes)?.into())),
         )
         .transpose()
@@ -179,20 +178,42 @@ struct Candidate {
     has_live_row: bool,
 }
 
-impl<C: ReadCursor> HistoricalScan<C> {
-    fn next_candidate(&mut self, live: &mut C, prefix: &[u8]) -> Result<Option<Candidate>> {
+impl<Cursor: ReadCursor> HistoricalScan<Cursor> {
+    fn next_candidate<C, E: From<CellError>>(
+        &mut self,
+        live: &mut Cursor,
+        prefix: &[u8],
+        context: &mut C,
+        before: &mut impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+    ) -> std::result::Result<Option<Candidate>, E> {
         if self.live_key.is_none() && !self.live_done {
-            self.live_key = live.with_next(|row| {
-                row.filter(|(key, _)| key.starts_with(prefix))
-                    .map(|(key, _)| key.to_vec())
-            })?;
+            before(context, ReadOperation::Advance(tables::CELL))?;
+            self.live_key = live
+                .with_next(|row| {
+                    row.filter(|(key, _)| key.starts_with(prefix))
+                        .map(|(key, _)| key.to_vec())
+                })
+                .map_err(CellError::from)?;
             self.live_done = self.live_key.is_none();
         }
         if self.history_row.is_none() && !self.history_done {
-            self.history_row = self.cursor.with_next(|row| {
-                row.filter(|(key, _)| key.starts_with(prefix))
-                    .map(|(key, bytes)| (key.to_vec(), bytes.to_vec()))
-            })?;
+            before(context, ReadOperation::Advance(tables::CELL_HISTORY))?;
+            self.history_row = self
+                .cursor
+                .with_next(|row| {
+                    row.filter(|(key, _)| key.starts_with(prefix))
+                        .map(|(key, bytes)| {
+                            before(
+                                context,
+                                ReadOperation::CommitSet {
+                                    encoded_bytes: bytes.len() as u64,
+                                },
+                            )?;
+                            Ok::<_, E>((key.to_vec(), bytes.to_vec()))
+                        })
+                        .transpose()
+                })
+                .map_err(CellError::from)??;
             self.history_done = self.history_row.is_none();
         }
         if self

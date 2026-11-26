@@ -42,7 +42,7 @@ fn lifecycle(store: impl Store + Clone + Send + Sync + 'static, cfg: &OpenConfig
             model.active.golemdb_code_version,
             model.active.host_code_version
         ),
-        (1, 1, 7)
+        (1, 2, 7)
     );
     assert_eq!(model.commit_id, CommitId::GENESIS);
     assert_eq!(model.active.activation_commit, CommitId::GENESIS);
@@ -252,7 +252,7 @@ fn reopening_refuses_malformed_or_unsupported_active_models() {
             &[0u64.to_be_bytes(), 99u64.to_be_bytes(), 0u64.to_be_bytes()].concat(),
         ),
         CellValue::from_bytes(
-            &[0u64.to_be_bytes(), 1u64.to_be_bytes(), 99u64.to_be_bytes()].concat(),
+            &[0u64.to_be_bytes(), 2u64.to_be_bytes(), 99u64.to_be_bytes()].concat(),
         ),
     ] {
         let cfg = config(HashAlgorithm::Keccak256);
@@ -284,7 +284,7 @@ fn reopening_requires_active_host_code_not_retired_genesis_host_code() {
         Keccak256Hasher,
         key,
         CellValue::from_bytes(
-            &[2u64.to_be_bytes(), 1u64.to_be_bytes(), 8u64.to_be_bytes()].concat(),
+            &[2u64.to_be_bytes(), 2u64.to_be_bytes(), 8u64.to_be_bytes()].concat(),
         ),
     );
     let db = Database::from_store(store.clone(), &cfg).unwrap();
@@ -296,7 +296,7 @@ fn reopening_requires_active_host_code_not_retired_genesis_host_code() {
         Some(MeteringModelMetadata {
             version: 2,
             activation_commit: CommitId::new(2),
-            golemdb_code_version: 1,
+            golemdb_code_version: 2,
             host_code_version: 8,
         })
     );

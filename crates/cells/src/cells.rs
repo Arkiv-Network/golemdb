@@ -1,9 +1,10 @@
+use golemdb_history::{HistoryError, ReadOperation, ValueSource};
 use golemdb_merkle::{HashProvider, RootRef};
 use golemdb_storage::{ReadTransaction, Table, WriteTransaction};
 
 use crate::{
     CELL_TRIE_PATH_BYTES, CellKey, CellScan, CellValue, CellValueRef, Result, USER_CELL_SCAN_START,
-    cell_trie::CellTrie, history, tables,
+    cell_trie::CellTrie, tables,
 };
 
 /// Cell storage and commitment over caller-owned transactions.
@@ -159,9 +160,6 @@ impl<'tx, R: ReadTransaction> CellReader<'tx, R> {
     }
 
     pub fn get(&self, key: &CellKey) -> Result<Option<CellValue>> {
-        if self.target.is_none() {
-            return read_value(self.tx, &key.encode());
-        }
         self.with_encoded_value(key, |bytes| {
             bytes
                 .map(|bytes| CellValueRef::parse(bytes).map(CellValue::from))
@@ -170,19 +168,60 @@ impl<'tx, R: ReadTransaction> CellReader<'tx, R> {
         })?
     }
 
-    /// Borrow the encoded value before validation or allocation. The caller can
-    /// inspect its length and refuse further work without copying its payload.
-    /// Empty historical pre-images become `None`; missing selected changesets
-    /// fail. Empty live rows remain present and will fail typed parsing.
+    /// Inspect selected borrowed bytes without work callbacks. See
+    /// [`Self::with_encoded_value_with_callbacks`] for upfront work authorization.
     pub fn with_encoded_value<T>(
         &self,
         key: &CellKey,
         inspect: impl FnOnce(Option<&[u8]>) -> T,
     ) -> Result<T> {
-        match self.target {
-            None => Ok(self.tx.with_value(tables::CELL, &key.encode(), inspect)?),
-            Some(target) => history::with_encoded_value(self.tx, &key.encode(), target, inspect),
-        }
+        self.with_encoded_value_with_callbacks(
+            key,
+            &mut (),
+            |_, _| Ok(()),
+            |_, bytes| Ok(inspect(bytes)),
+        )
+    }
+
+    /// Inspect borrowed bytes before domain parsing/copying. `before` authorizes
+    /// each lookup and commit-set package; a callback returning `Ok(())` permits
+    /// internal reads without charging. Empty pre-images mean absence; missing
+    /// selected changesets fail and empty live rows remain visible to validation.
+    pub fn with_encoded_value_with_callbacks<C, T, E>(
+        &self,
+        key: &CellKey,
+        context: &mut C,
+        mut before: impl FnMut(&mut C, ReadOperation) -> std::result::Result<(), E>,
+        inspect: impl FnOnce(&mut C, Option<&[u8]>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E>
+    where
+        E: From<crate::CellError> + From<HistoryError>,
+    {
+        let encoded = key.encode();
+        let key = encoded.as_slice();
+        let Some(target) = self.target else {
+            before(context, ReadOperation::Lookup(tables::CELL))?;
+            return self
+                .tx
+                .with_value(tables::CELL, key, |raw| inspect(context, raw))
+                .map_err(crate::CellError::from)?;
+        };
+        tables::HISTORY.with_resolved_with_callbacks(
+            self.tx,
+            key,
+            target,
+            &mut (context, &mut before),
+            |(context, before), work| before(context, work),
+            |(context, before), source| match source {
+                ValueSource::Preimage(bytes) => inspect(context, bytes),
+                ValueSource::Live => {
+                    before(context, ReadOperation::Lookup(tables::CELL))?;
+                    self.tx
+                        .with_value(tables::CELL, key, |raw| inspect(context, raw))
+                        .map_err(crate::CellError::from)?
+                }
+            },
+        )
     }
 
     /// Scan one record in name-byte order. Rows are owned; the iterator borrows
