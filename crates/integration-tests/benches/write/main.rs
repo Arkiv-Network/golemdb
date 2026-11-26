@@ -9,6 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
+use std::{env, fmt};
 
 use criterion::{Criterion, SamplingMode, criterion_group, criterion_main};
 use golemdb_api::{Api, BranchId, Database, OpenMode};
@@ -124,17 +125,15 @@ impl Fixture {
         start.elapsed()
     }
 
-    /// Bytes written and syncs of one commit, and the database size after it.
-    fn commit_storage(mut self, batch: Batch) -> String {
+    fn commit_storage(mut self, batch: Batch) -> Storage {
         let before = self.stats();
         self.commit(batch);
         let after = self.stats();
-        format!(
-            "{} bytes written and {} sync(s) per commit, database {:.0} MiB",
-            after.session_bytes_written - before.session_bytes_written,
-            after.session_syncs - before.session_syncs,
-            after.db_size as f64 / MIB,
-        )
+        Storage {
+            written: after.session_bytes_written - before.session_bytes_written,
+            syncs: after.session_syncs - before.session_syncs,
+            db_size: after.db_size,
+        }
     }
 
     fn apply(&self, batch: Batch) -> BranchId {
@@ -151,10 +150,12 @@ impl Fixture {
 }
 
 fn write(c: &mut Criterion) {
-    let mut group = c.benchmark_group(format!("write/{}k", RECORDS / 1000));
+    let prefix = format!("write/{}k", RECORDS / 1000);
+    let mut group = c.benchmark_group(&prefix);
     group.sampling_mode(SamplingMode::Flat);
     // Criterion calls each closure many times, and a filtered run may call none.
     let mut snapshot: Option<Snapshot> = None;
+    let mut storages = Vec::new();
 
     for (name, batch) in BATCHES {
         group.bench_function(format!("seal/{name}"), |b| {
@@ -176,9 +177,51 @@ fn write(c: &mut Criterion) {
         });
         if let Some(storage) = storage {
             println!("commit/{name}: {storage}\n");
+            storages.push((format!("{prefix}/commit/{name}"), storage));
         }
     }
     group.finish();
+    if let Ok(path) = env::var("BENCH_STORAGE_JSON") {
+        fs::write(path, Storage::json(&storages)).unwrap();
+    }
+}
+
+/// Storage work of one commit, and the database size after it.
+struct Storage {
+    written: u64,
+    syncs: u64,
+    db_size: u64,
+}
+
+impl Storage {
+    /// The `customSmallerIsBetter` format of github-action-benchmark.
+    fn json(storages: &[(String, Storage)]) -> String {
+        let entries: Vec<String> = storages
+            .iter()
+            .flat_map(|(name, storage)| {
+                [
+                    ("written", "bytes", storage.written),
+                    ("syncs", "syncs", storage.syncs),
+                ]
+                .map(|(metric, unit, value)| {
+                    format!(r#"{{"name":"{name} {metric}","unit":"{unit}","value":{value}}}"#)
+                })
+            })
+            .collect();
+        format!("[{}]", entries.join(","))
+    }
+}
+
+impl fmt::Display for Storage {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{} bytes written and {} sync(s) per commit, database {:.0} MiB",
+            self.written,
+            self.syncs,
+            self.db_size as f64 / MIB,
+        )
+    }
 }
 
 /// Makes `to`'s data file equal to `from`'s, rewriting only the pages that differ.

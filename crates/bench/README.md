@@ -6,8 +6,8 @@ the Criterion suites (`docs/benchmarks.md`) cannot: how seal, commit and query t
 develop as the database outgrows RAM.
 
 ```sh
-just bench smoke                        # seconds; results in target/bench-out/smoke
-just bench arkiv /data/out /data/db     # where the results and the database go
+just load_bench smoke                     # seconds; results in target/bench-out/smoke
+just load_bench arkiv /data/out /data/db  # where the results and the database go
 ```
 
 `<scenario>` is a name under `crates/bench/scenarios` or a path to a `.toml` file; relative paths are taken
@@ -50,7 +50,7 @@ query's times. `started_unix_ms` is when the workload started, the zero of `elap
 
 `crates/bench/suites.toml` names groups of scenarios for a benchmark runner, with the memory cap and time limit
 each runs under: `standard` is the default, `large` takes hours. A runner needs only that file,
-`just bench_build`, `just bench <scenario> <out> <db_dir>`, and the result files above.
+`just load_bench_build`, `just load_bench <scenario> <out> <db_dir>`, and the result files above.
 
 While it runs, a scenario prints a line of progress every 30 seconds.
 
