@@ -1,0 +1,30 @@
+name = "smoke"
+description = "small mixed blocks with queries, for checking the harness itself"
+seed = 7
+table_log_every = 50
+
+[database]
+hash = "keccak-256"
+limits = { max_cell_name_len = 32, max_str_len = 64, max_bytes_len = 4096 }
+max_map_size_gib = 4
+
+[shape]
+attributes = [
+    { name = "project", type = "str", cardinality = 50, distribution = "zipf", len = 16 },
+    { name = "id", type = "str", distribution = "unique", len = 36 },
+    { name = "status", type = "str", cardinality = 4, len = 8 },
+    { name = "created", type = "u64", distribution = "unique" },
+]
+fields = [{ name = "payload", type = "bytes", len = [{ min = 256, max = 2048, weight = 1 }] }]
+
+[workload]
+blocks = [
+    { ops = 17, repeat = 300 },
+    { ops = 26, repeat = 200, mix = { create = 35, patch = 30, delete = 35 } },
+]
+query_at = [300, 500]
+query_runs = 20
+queries = [
+    { name = "project + status", filter = { and = [{ eq = { project = 0 } }, { eq = { status = 1 } }] } },
+    { name = "created > half", filter = { range = { created = { gt = 2500 } } }, count = true },
+]

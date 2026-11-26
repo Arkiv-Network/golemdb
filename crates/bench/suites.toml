@@ -1,0 +1,12 @@
+[standard]
+scenarios = ["arkiv"]
+time_limit_minutes = 90
+memory_max = "8G"
+
+[large]
+scenarios = ["arkiv-large"]
+time_limit_minutes = 900
+
+[smoke]
+scenarios = ["smoke"]
+time_limit_minutes = 5

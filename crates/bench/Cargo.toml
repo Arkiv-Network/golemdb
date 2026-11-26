@@ -1,0 +1,21 @@
+[package]
+name = "golemdb-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+golemdb-api.workspace = true
+golemdb-storage.workspace = true
+golemdb-storage-mdbx.workspace = true
+anyhow.workspace = true
+# Same version as golemdb-storage-mdbx; only reads per-table stats (see tables.rs).
+libmdbx = "=0.6.6"
+rand = "0.9"
+rand_chacha = "0.9"
+rand_distr = "0.5"
+serde.workspace = true
+serde_json = "1"
+toml = "0.9"
