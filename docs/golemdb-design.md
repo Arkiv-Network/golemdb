@@ -80,7 +80,7 @@ The metering layer itself (property 7 in §1) is out of scope here: it is specif
   - [The Cell Key](#the-cell-key)
   - [Record Identity: the `#key` Cell](#record-identity-the-key-cell)
   - [Record Shape: the `#meta` Cell](#record-shape-the-meta-cell)
-  - [Record Shape: the `#live` Cell](#record-shape-the-live-cell)
+  - [Record Shape: the `#is_live` Cell](#record-shape-the-is_live-cell)
   - [Cell Names](#cell-names)
   - [Cell Kinds and Types](#cell-kinds-and-types)
   - [Benefits and Trade-offs of the Cell Decomposition](#benefits-and-trade-offs-of-the-cell-decomposition)
@@ -96,7 +96,7 @@ The metering layer itself (property 7 in §1) is out of scope here: it is specif
 - **[6. Merkleizing the Posting List](#6-merkleizing-the-posting-list)**
   - [Binding a Container to Its Path](#binding-a-container-to-its-path)
   - [Update Mechanics (Copy-on-Write)](#update-mechanics-copy-on-write)
-  - [Live Containers and Versioned Branches](#live-containers-and-versioned-branches)
+  - [Live Containers and Versioned Branches](#is_live-containers-and-versioned-branches)
 - **[7. Point-in-Time History](#7-point-in-time-history)**
   - [Resolving a Value as of a Commit](#resolving-a-value-as-of-a-commit)
   - [Historical Query Execution Example](#historical-query-execution-example)
@@ -692,33 +692,35 @@ proof of that subtree at commit _c_ shows that a whole-record read at _c_ withho
 is not needed for it. Projections use per-name non-inclusion proofs, and index queries are a
 separate question (D06).
 
-### Record Shape: the `#live` Cell
+### Record Shape: the `#is_live` Cell
 
 Every user record carries a third reserved cell, a liveness marker. It is the one engine cell that
 is an `attribute`, so the index holds the set of live user records:
 
 ```
-Cell:  recordID ‖ "#live"                          →   typeTag(attribute, bool) ‖ 0x01
-Term:  "#live" ‖ 0x00 ‖ typeTag(attribute, bool) ‖ 0x01   →   every live user record's ID
+Cell:  recordID ‖ "#is_live"                          →   typeTag(attribute, bool) ‖ 0x01
+Term:  "#is_live" ‖ 0x00 ‖ typeTag(attribute, bool) ‖ 0x01   →   every live user record's ID
 ```
 
 A negation needs a set to subtract from. Inside an `And`, after its first child, the running set
 serves; a standalone `Not`, anywhere else, subtracts from this term's postings: every live record
-(product decision P08). Without the term, that set would be either the allocated ID range, which
-still holds deleted records, or a scan of every record. With it, the set is one term's
-containers: one read per 65 536 live IDs, never one per record.
+(product decision P08).
 
-- **User records only.** System and admin records carry no `#live`, as they carry no `#meta`.
+- **A `bool`, always `true`.** The value only has to be the same for every live record, so its one
+  term lists them all. `bool` is the smallest attribute type, one payload byte against four for
+  the narrowest integer, and its codec rejects any byte but `0x00` and `0x01`. Only `true` is valid:
+  a `false`, or any other value, is corrupt state.
+- **User records only.** System and admin records carry no `#is_live`, as they carry no `#meta`.
 - **Engine-maintained.** `create` writes it, `delete` removes it with the record, and seal
   derives its postings from the cell diff as for any attribute. The name starts with `#`, so no user
   cell can take it and the data plane cannot write it. A filter or sort key cannot name it either:
   the engine reads the term itself.
-- **The only indexed engine name.** An index term's name is a user name or `#live`. Any other
+- **The only indexed engine name.** An index term's name is a user name or `#is_live`. Any other
   engine cell is a `field`, and an indexed one is rejected at seal as a broken invariant.
 - **Charged as a system cell**, together with its term's join on `create` and leave on `delete`
   ([metering](golemdb-metering.md#record-model)). It is not counted in `#meta`.
-- **Read with `get`**: a full read includes `#live`, so a whole-record read still withholds no
-  cell. A missing or different `#live` on a live record is corrupt state.
+- **Read with `get`**: a full read includes `#is_live`, so a whole-record read still withholds no
+  cell. A missing or different `#is_live` on a live record is corrupt state.
 
 ### Cell Names
 
@@ -1357,8 +1359,8 @@ Price <= 500`), the engine maintains an index over those values in the `Index` t
 one bounded Roaring container of the records matching an _index term_, so a term's posting list is
 the run of rows the term prefixes; `IndexTrie` commits to every container
 ([§6](#6-merkleizing-the-posting-list)). Besides user attributes, the index holds one engine term:
-`#live = true`, which lists every live user record
-([§3](#record-shape-the-live-cell)).
+`#is_live = true`, which lists every live user record
+([§3](#record-shape-the-is_live-cell)).
 
 > **Notation.** `WHERE …`, `SELECT …`, `FIND RECORDS … AT COMMIT …` and similar fragments throughout
 > this document are illustrative pseudo-syntax for a predicate, projection or historical read. Golem
@@ -3563,7 +3565,7 @@ onto chapters.
 | D17 | Are segment columns typed? As written, no: a column is raw bytes and the application owns the format, which keeps the engine ignorant of what a receipt is. The alternative declares a §3 type per column, so a column carries a `typeTag` as a cell does — self-describing segments, tooling without application code, a complete record/cell parallel — at the cost of dragging the type system into a structure built for opaque payloads and pinning at genesis an encoding the application may want to version independently | §11 |
 | D19 | Per-commit log digest (requirement SE-1): how a digest of each segment's appended rows is defined, and whether the engine commits it (lag-one, in `#logDigests`, record 5) or the host does | §4, §11 |
 | D21 | Content addressing for large values: store a large `bytes` (or `str`) value once under its hash, with the cell holding its length and hash, so repeated values are stored only once and record scans can skip payloads. Worth it only if large repeated values are common; costs a second row per such cell, reference counting or garbage collection, and changes to history, change sets and proofs | §3, §7, §8 |
-| P08 | **Standalone negation.** Arkiv's live DSL accepts `status != "open"` and `!` on its own; the API admits negated literals; nothing here says what a negation-only query is a complement *of*. Beside a positive predicate, negation is set difference from the running intermediate and needs nothing new. Standalone negation, `EXISTS` and match-all all need a posting list of every live record — an engine-maintained `#live` index term, one container write per create and per delete. Adopt it, or drop standalone `!=` from the product. Either way, record whether the live DSL's `!=` includes records without the attribute (D01) | §5, §6, §12 |
+| P08 | **Standalone negation.** Arkiv's live DSL accepts `status != "open"` and `!` on its own; the API admits negated literals; nothing here says what a negation-only query is a complement *of*. Beside a positive predicate, negation is set difference from the running intermediate and needs nothing new. Standalone negation, `EXISTS` and match-all all need a posting list of every live record — an engine-maintained `#is_live` index term, one container write per create and per delete. Adopt it, or drop standalone `!=` from the product. Either way, record whether the live DSL's `!=` includes records without the attribute (D01) | §5, §6, §12 |
 | P09 | **Glob `~`.** The live DSL has it; a general glob has no bounded, deterministic cost shape. Proposed: a literal with one trailing wildcard compiles to the §5 prefix scan; anything else is `InvalidQuery` | §5 |
 | T01, T02 | reth claims to verify against source: NippyJar's format properties; static-file write ordering | §11 |
 

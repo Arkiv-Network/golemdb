@@ -25,7 +25,7 @@ pub fn committed_snapshot<S: Store>(
 }
 
 /// The committed record `id`, as `get` returns it: every cell including
-/// `#key`, `#meta` and `#live`, or only the projected cells, with missing user
+/// `#key`, `#meta` and `#is_live`, or only the projected cells, with missing user
 /// cells omitted. The key comes from the record's own `#key` cell.
 ///
 /// For engine readers that already know `id` names a live record, such as a

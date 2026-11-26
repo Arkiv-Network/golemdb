@@ -219,7 +219,7 @@ fn term(field: &CellName, value: &CellValue) -> Result<IndexTerm> {
 }
 
 /// `field` as a query may name it: a user name. An engine name (`#…`,
-/// `@…`) is the engine's, the indexed `#live` included, and fails as a name
+/// `@…`) is the engine's, the indexed `#is_live` included, and fails as a name
 /// outside the grammar does; the index checks the rest of the grammar.
 pub(crate) fn user_field(field: &CellName) -> Result<CellNameRef<'_>> {
     match field.as_bytes() {
@@ -263,7 +263,7 @@ mod tests {
     #[test]
     fn a_leaf_cannot_name_an_engine_cell_not_even_the_indexed_live_marker() {
         use golemdb_cells::marker::Bool;
-        for name in [&b"#live"[..], b"#key", b"@admin"] {
+        for name in [&b"#is_live"[..], b"#key", b"@admin"] {
             let field: CellName = CellNameRef::raw(name).into();
             for filter in [
                 Filter::Eq {

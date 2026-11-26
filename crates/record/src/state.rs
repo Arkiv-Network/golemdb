@@ -50,19 +50,19 @@ pub(crate) fn identity_key(identity: &CellValue) -> Option<RecordKey> {
         .map(RecordKey)
 }
 
-/// The address of user record `id`'s `#live` marker.
+/// The address of user record `id`'s `#is_live` marker.
 pub(crate) fn live_key(id: u64) -> CellKey {
-    CellKey::new(id, reserved::LIVE)
+    CellKey::new(id, reserved::IS_LIVE)
 }
 
-/// A live user record's `#live` cell must hold exactly
+/// A live user record's `#is_live` cell must hold exactly
 /// [`CellValue::live`]: otherwise the index's live set and the record
 /// disagree.
 pub(crate) fn check_live(value: Option<&CellValue>) -> Result<()> {
     match value {
         Some(value) if *value == CellValue::live() => Ok(()),
-        Some(_) => Err(RecordError::CorruptState("invalid #live")),
-        None => Err(RecordError::CorruptState("user record has no #live")),
+        Some(_) => Err(RecordError::CorruptState("invalid #is_live")),
+        None => Err(RecordError::CorruptState("user record has no #is_live")),
     }
 }
 

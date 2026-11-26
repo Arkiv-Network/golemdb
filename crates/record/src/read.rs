@@ -19,9 +19,9 @@ const META_CELL_BYTES: u64 =
     (size_of::<u64>() + reserved::META.as_bytes().len() + size_of::<u8>() + size_of::<[u64; 4]>())
         as u64;
 
-/// D4 size: record ID + name + value tag + bool = 8 + 5 + 1 + 1 = 15.
+/// D4 size: record ID + name + value tag + bool = 8 + 8 + 1 + 1 = 18.
 const LIVE_CELL_BYTES: u64 =
-    (size_of::<u64>() + reserved::LIVE.as_bytes().len() + size_of::<u8>() + size_of::<bool>())
+    (size_of::<u64>() + reserved::IS_LIVE.as_bytes().len() + size_of::<u8>() + size_of::<bool>())
         as u64;
 
 pub(crate) fn get<R: ReadTransaction>(
@@ -106,7 +106,7 @@ pub(crate) fn get<R: ReadTransaction>(
             }
             values.insert(reserved::KEY.into(), identity);
             values.insert(reserved::META.into(), metadata);
-            values.insert(reserved::LIVE.into(), CellValue::live());
+            values.insert(reserved::IS_LIVE.into(), CellValue::live());
         }
         None => {
             reader.visit_record(

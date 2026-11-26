@@ -312,7 +312,7 @@ fn work_in_progress_is_isolated_and_projection_preserves_identity() {
     assert_eq!(full.cells.len(), 4);
     assert_eq!(full.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
     assert!(!full.cells[b"#key".as_slice()].is_indexable());
-    assert_eq!(full.cells[b"#live".as_slice()], CellValue::live());
+    assert_eq!(full.cells[b"#is_live".as_slice()], CellValue::live());
     for target in [
         ReadTarget::Branch(b),
         ReadTarget::Commit(golemdb_branch::CommitId::new(0)),
@@ -850,7 +850,7 @@ fn committed_cell_reader_keeps_one_snapshot_when_head_advances() {
         .unwrap()
         .collect::<golemdb_cells::Result<Vec<_>>>()
         .unwrap();
-    // #key, #live, #meta, then the user cell.
+    // #is_live, #key, #meta, then the user cell.
     assert_eq!(stored.len(), 4);
     assert_eq!(stored[3].1, text("before", true));
     assert_eq!(
@@ -1047,8 +1047,8 @@ fn full_reads_and_deletes_require_the_live_marker() {
         branches
             .write(b, |writer| {
                 match bad.clone() {
-                    Some(value) => writer.put(CellKey::new(64, reserved::LIVE), value),
-                    None => writer.delete(CellKey::new(64, reserved::LIVE)),
+                    Some(value) => writer.put(CellKey::new(64, reserved::IS_LIVE), value),
+                    None => writer.delete(CellKey::new(64, reserved::IS_LIVE)),
                 }
                 Ok::<_, RecordError>(())
             })
@@ -1066,7 +1066,7 @@ fn full_reads_and_deletes_require_the_live_marker() {
         ));
         assert_eq!(snapshot(&branches, b), before);
         // A projection returns the stored cell as it is.
-        let projection = [name(b"#live")];
+        let projection = [name(b"#is_live")];
         let record = records
             .get(
                 ReadTarget::Branch(b),
@@ -1076,7 +1076,7 @@ fn full_reads_and_deletes_require_the_live_marker() {
             )
             .result
             .unwrap();
-        assert_eq!(record.cells.get(b"#live".as_slice()), bad.as_ref());
+        assert_eq!(record.cells.get(b"#is_live".as_slice()), bad.as_ref());
     }
 }
 

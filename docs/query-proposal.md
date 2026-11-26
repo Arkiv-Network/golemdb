@@ -217,7 +217,7 @@ The written order of the tree is the execution order. Cost and stopping point ar
 4. **`Or`:** every child is evaluated in order and unioned; no early exit.
 5. **`Not`** needs a set to subtract from: inside an `And`, after its first child, the running
    set. A standalone `Not`, anywhere else, subtracts from the set of all live records, the
-   index's `#live` term ([design](golemdb-design.md#record-shape-the-live-cell)). That set is
+   index's `#is_live` term ([design](golemdb-design.md#record-shape-the-is_live-cell)). That set is
    read first; when it is empty, the `Not`'s child is skipped and not charged.
 6. **Set combination.** Every `And`, `Or` and `Not` is charged for combining its children's sets,
    per bitmap container processed, so the budget also bounds set work that nesting would
@@ -350,7 +350,7 @@ Gaps against this proposal:
 | Step | Contents | Status |
 | --- | --- | --- |
 | Tree | `Filter`, `QueryOp`, `CountOp`, admission validation, caps | done except caps and the tree nodes |
-| Boolean | `And`, `Or`, `Not`, `In` | done; standalone `Not` over the `#live` term |
+| Boolean | `And`, `Or`, `Not`, `In` | done; standalone `Not` over the `#is_live` term |
 | Scans | `Range`, `Prefix`, `Exists` over a typed run | `Range` done |
 | API | `query`, `count`, snapshot selection, record IDs → records, projection | done for the head |
 | Sort | multi-key, typed, absent below every value, record ID tie-break | done (fetch-and-sort); index walk open |
@@ -365,7 +365,7 @@ A first cut (MVP): `Eq`, `In`, `Range`, `And`, materialization, `limit` / `offse
 
 1. **The tree replaces the ordered DNF** assumed by the API spec and D01 (which recommends "flat
    DNF only"), for the reasons in [Why a tree](#why-a-tree).
-2. **Standalone `Not`:** implemented over the `#live` term; P08 to record that the capability is kept.
+2. **Standalone `Not`:** implemented over the `#is_live` term; P08 to record that the capability is kept.
 3. **The cap values,** and the code ceilings ([Caps](#caps)).
 4. **The cursor contract** (D11), before paging by cursor.
 

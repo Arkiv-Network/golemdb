@@ -214,7 +214,7 @@ impl CellValue {
     }
 
     /// The value of every live user record's
-    /// [`reserved::LIVE`](crate::reserved::LIVE) cell: the bool `true`, as an
+    /// [`reserved::IS_LIVE`](crate::reserved::IS_LIVE) cell: the bool `true`, as an
     /// attribute. All live user records share it, so its one index term lists
     /// them all.
     pub fn live() -> Self {

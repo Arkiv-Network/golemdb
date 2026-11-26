@@ -73,8 +73,8 @@ fn get_shapes_and_budget_cutoffs_match_on_branches_and_committed_storage() {
     each_backend(genesis(), |db| {
         let branch = create(&db);
         let exercise = |target, commit| {
-            // User cells occupy 16 + 17 bytes, and #key/#meta/#live 45 + 46 + 15.
-            // Base = 2 + 3 + 7; full = base + 3*11 + 2*13 + 139*2 = 349.
+            // User cells occupy 16 + 17 bytes, and #key/#meta/#is_live 45 + 46 + 18.
+            // Base = 2 + 3 + 7; full = base + 3*11 + 2*13 + 142*2 = 355.
             for (budget, spent) in [
                 (0, 0),
                 (1, 0),
@@ -89,16 +89,16 @@ fn get_shapes_and_budget_cutoffs_match_on_branches_and_committed_storage() {
                 (34, 34),
                 (44, 34),
                 (45, 45),
-                (348, 45),
-                (349, 349),
+                (354, 45),
+                (355, 355),
             ] {
                 let call = db.get(target, RecordOp::get(KEY, Budget::Limited(budget)));
                 check(&call, spent, commit, &db);
-                if budget == 349 {
+                if budget == 355 {
                     assert_eq!(call.result.unwrap().cells.len(), 5);
                     assert_eq!(call.receipt.ledger.count("read.cell"), 3);
                     assert_eq!(call.receipt.ledger.count("read.cell_scan"), 2);
-                    assert_eq!(call.receipt.ledger.count("read.byte"), 139);
+                    assert_eq!(call.receipt.ledger.count("read.byte"), 142);
                 } else {
                     assert!(matches!(
                         call.result,
@@ -282,6 +282,6 @@ fn get_zero_missing_and_overflowing_prices_preserve_completed_accounting() {
         check(&call, 0, db.head().unwrap(), &db);
         assert_eq!(call.result.unwrap().cells.len(), 5);
         assert_eq!(call.receipt.ledger.count("read.cell_scan"), 2);
-        assert_eq!(call.receipt.ledger.count("read.byte"), 139);
+        assert_eq!(call.receipt.ledger.count("read.byte"), 142);
     });
 }

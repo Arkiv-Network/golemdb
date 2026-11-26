@@ -88,12 +88,12 @@ impl IndexTerm {
         Self::from_str_name(name_str(name)?, value)
     }
 
-    /// The term every live user record is indexed under: `#live = true`,
-    /// its [`reserved::LIVE`] cell. Its postings are the set of all live
+    /// The term every live user record is indexed under: `#is_live = true`,
+    /// its [`reserved::IS_LIVE`] cell. Its postings are the set of all live
     /// user records.
     pub fn live() -> Self {
-        Self::from_cell_name(reserved::LIVE, CellValue::live().as_view())
-            .expect("`#live` is an indexed engine name, and a bool has a term")
+        Self::from_cell_name(reserved::IS_LIVE, CellValue::live().as_view())
+            .expect("`#is_live` is an indexed engine name, and a bool has a term")
     }
 
     /// Check a stored cell name as [`Self::from_cell_name`] does, for a leaf
@@ -172,7 +172,7 @@ pub(crate) fn name_prefix(name: &str) -> Result<Vec<u8>, TermError> {
 }
 
 /// A term name is a user name of the §3 grammar, or one of the few engine
-/// names that are indexed ([`reserved::INDEXED`]: `#live`). Neither holds
+/// names that are indexed ([`reserved::INDEXED`]: `#is_live`). Neither holds
 /// `0x00`, so the separator after it is unambiguous. Any other engine name
 /// is a field's, so an indexed one is a broken invariant that seal rejects.
 /// Lengths are the engine's policy, not the codec's: no cap applies here.
@@ -408,8 +408,8 @@ mod tests {
     fn the_indexed_engine_names_are_term_names() {
         // The live set's term, as seal indexes it and decoding reads it back.
         let live = CellValue::live();
-        let term = IndexTerm::from_cell_name(reserved::LIVE, live.as_view()).expect("indexed");
-        assert_eq!(term.as_bytes(), b"#live\0\x81\x01");
+        let term = IndexTerm::from_cell_name(reserved::IS_LIVE, live.as_view()).expect("indexed");
+        assert_eq!(term.as_bytes(), b"#is_live\0\x81\x01");
         assert_eq!(IndexTerm::live(), term);
         assert_eq!(IndexTerm::decode(term.as_bytes()), Ok(term));
         // Every other engine name is a field's, never a term's.
@@ -429,7 +429,16 @@ mod tests {
     fn for_value_rejects_invalid_names_and_variable_length_bytes() {
         let value = CellValue::from_u32(7);
         for name in [
-            "", "$", "0bad", "#key", "@admin", "#live2", "$#live", "a b", "a\0b", "é",
+            "",
+            "$",
+            "0bad",
+            "#key",
+            "@admin",
+            "#is_live2",
+            "$#is_live",
+            "a b",
+            "a\0b",
+            "é",
         ] {
             assert_eq!(
                 IndexTerm::from_str_name(name, value.as_view()),

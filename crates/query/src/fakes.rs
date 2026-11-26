@@ -34,7 +34,7 @@ impl FakeSource {
     }
 
     /// Index `ids` as the live user records, under [`IndexTerm::live`], as
-    /// seal does for every record's `#live` cell.
+    /// seal does for every record's `#is_live` cell.
     pub(crate) fn with_live(mut self, ids: impl IntoIterator<Item = u64>) -> Self {
         self.0.insert(IndexTerm::live(), bitmap(ids));
         self

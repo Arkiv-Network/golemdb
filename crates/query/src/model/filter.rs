@@ -62,7 +62,7 @@ pub enum Filter {
     /// `color = "red"` keeps the records with no `color` attribute. A `Not`
     /// after an `And`'s first child subtracts its child's match set from
     /// the running set. Anywhere else, standalone, it subtracts it from the
-    /// set of all live records, read first from the index's `#live` term: an
+    /// set of all live records, read first from the index's `#is_live` term: an
     /// extra read whose size grows with the number of live records, one
     /// container per 65 536 of them. So place a `Not` after a selective
     /// positive child of an `And` where the query allows it.

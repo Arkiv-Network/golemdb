@@ -100,7 +100,7 @@ fn crud_pending_reads_projections_and_recreation() {
         assert_eq!(pending.key, KEY);
         assert_eq!(pending.cells.len(), 5);
         assert_eq!(pending.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
-        assert_eq!(pending.cells[b"#live".as_slice()], CellValue::live());
+        assert_eq!(pending.cells[b"#is_live".as_slice()], CellValue::live());
         assert!(pending.cells[b"price".as_slice()].is_indexable());
         let selected = api
             .get(
@@ -517,7 +517,7 @@ fn empty_records_keep_identity_through_patch_rollback_commit_and_delete() {
         .unwrap();
         let empty = get(&db, ReadTarget::Branch(branch));
         assert_eq!(empty.key, KEY);
-        // #key, #live and #meta.
+        // #is_live, #key and #meta.
         assert_eq!(empty.cells.len(), 3);
         assert_eq!(empty.cells[b"#key".as_slice()].as_bytes32(), Some(KEY.0));
         assert_eq!(allocator(&db, ReadTarget::Branch(branch)), 65);

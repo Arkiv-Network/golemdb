@@ -75,11 +75,11 @@ fn lifecycle(store: impl Store + Clone + Send + Sync + 'static, cfg: &OpenConfig
     let branch = api.begin().unwrap();
     let created = api.create(
         branch,
-        RecordOp::create(RecordKey([1; 32]), Budget::Limited(519))
+        RecordOp::create(RecordKey([1; 32]), Budget::Limited(528))
             .field("x", CellValue::from_u64(12)),
     );
-    // 155 system-cell bytes + 18 user-cell bytes, at the persisted price of 3.
-    assert_eq!(created.receipt.cost, 519);
+    // 158 system-cell bytes + 18 user-cell bytes, at the persisted price of 3.
+    assert_eq!(created.receipt.cost, 528);
     assert!(created.result.is_ok());
     assert_eq!(
         api.model_weights(None, None).unwrap().commit_id,
@@ -110,11 +110,11 @@ fn lifecycle(store: impl Store + Clone + Send + Sync + 'static, cfg: &OpenConfig
     let branch = reopened.begin().unwrap();
     let created = reopened.create(
         branch,
-        RecordOp::create(RecordKey([2; 32]), Budget::Limited(519))
+        RecordOp::create(RecordKey([2; 32]), Budget::Limited(528))
             .field("x", CellValue::from_u64(12)),
     );
     created.result.unwrap();
-    assert_eq!(created.receipt.cost, 519);
+    assert_eq!(created.receipt.cost, 528);
     assert_eq!(created.receipt.priced_at, Some(CommitId::new(1)));
     reopened.discard(branch).unwrap();
 }

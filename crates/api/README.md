@@ -123,8 +123,8 @@ name bytes (duplicates included), `read.base`, and `read.key`. Distinct projecte
 names cost `read.cell` each, including absent cells; found cells also pay `read.byte`
 on encoded key + tagged value size, before decoding/copying. An empty projection
 only resolves the binding. `#key` consistency is checked when that cell is returned.
-A full user record reads `#key`, `#meta` and `#live` (three `read.cell`), then atomically charges
-`meta.cells * read.cell_scan + (meta.cell_bytes + 106) * read.byte` before scanning.
+A full user record reads `#key`, `#meta` and `#is_live` (three `read.cell`), then atomically charges
+`meta.cells * read.cell_scan + (meta.cell_bytes + 109) * read.byte` before scanning.
 Its metadata must be valid. A full reserved record has no `#meta`: it charges scan
 attempts and returned bytes incrementally. Attempts include the terminating probe,
 overlay-only entries (including tombstones), and origin rows even when shadowed.
@@ -203,7 +203,7 @@ or discard.
 
 ## Empty records
 
-A record may have zero user cells. A full read still contains its system `#key`, `#meta` and `#live`;
+A record may have zero user cells. A full read still contains its system `#key`, `#meta` and `#is_live`;
 its binding and identity remain until `delete`. Removing the last user cell does
 not delete the record. An empty projection returns no cells but still verifies
 that the record exists. Operation pricing remains deferred.
@@ -477,11 +477,11 @@ or `None` if the cell is absent or malformed. Full `get`, patch and delete valid
 metadata before using its counters: missing or malformed metadata, or counter
 underflow, returns `Internal` without repair.
 
-Each user record also stores `#live`: the `bool` `true` as an attribute, the one indexed
-engine cell. Its single index term, `#live = true`, lists every live user record, the set a
+Each user record also stores `#is_live`: the `bool` `true` as an attribute, the one indexed
+engine cell. Its single index term, `#is_live = true`, lists every live user record, the set a
 standalone `Not` subtracts from. `create` writes it and `delete` removes it; both pay for
 the cell and for joining or leaving its term, like any attribute. Filters and sort keys cannot
-name it. Full `get` and delete require it, and a missing or different `#live` returns
+name it. Full `get` and delete require it, and a missing or different `#is_live` returns
 `Internal`.
 
 Segment names match `[a-z][a-z0-9_]{0,63}` and are rejected rather than normalized
@@ -635,7 +635,7 @@ Queries support `Eq`, `In`, `Range`, `Prefix` and `Exists` filters, combined by 
 `Not` trees, with full or projected records, and `count`. A `Not` child of an `And`, after its
 first child, removes its own child's matches from the `And`'s; a record whose cell is absent, or
 of another type, matches it. A `Not` anywhere else, standalone, removes its child's matches from
-every live record: it reads the index's `#live` term first, and when that is empty, skips its
+every live record: it reads the index's `#is_live` term first, and when that is empty, skips its
 child. Every child of an `And` after its first, and everything under it, reads only the index
 containers in the regions (blocks of 65 536 record IDs) the `And`'s running set occupies, skipping
 the rest of each posting list. A filter nests at most 64 `And` / `Or` / `Not` levels, a

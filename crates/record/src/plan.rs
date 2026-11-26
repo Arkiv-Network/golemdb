@@ -190,7 +190,7 @@ pub(crate) fn create<R: ReadTransaction>(
         meter,
     )?;
     let live = CellValue::live();
-    indexes(reader, &reserved::LIVE.into(), None, Some(&live), meter)?;
+    indexes(reader, &reserved::IS_LIVE.into(), None, Some(&live), meter)?;
     plan.cell(state::live_key(id), None, Some(live), None, meter)?;
     plan.cell(
         state::binding(key),
@@ -308,7 +308,13 @@ pub(crate) fn delete<R: ReadTransaction>(
         None,
         meter,
     )?;
-    indexes(reader, &reserved::LIVE.into(), live.as_ref(), None, meter)?;
+    indexes(
+        reader,
+        &reserved::IS_LIVE.into(),
+        live.as_ref(),
+        None,
+        meter,
+    )?;
     plan.cell(state::live_key(id), live, None, None, meter)?;
     plan.cell(
         state::binding(key),

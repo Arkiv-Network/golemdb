@@ -1,7 +1,7 @@
 //! Record CRUD over guarded branch cell views.
 //!
-//! Records may have zero user cells; their `#key`, `#meta`, `#live` and binding preserve
-//! identity until explicit deletion. `#live` is the one indexed engine cell: every live user
+//! Records may have zero user cells; their `#key`, `#meta`, `#is_live` and binding preserve
+//! identity until explicit deletion. `#is_live` is the one indexed engine cell: every live user
 //! record carries it, so its index term lists them all.
 //!
 //! Caller-assigned keys only. Each mutation is one atomic branch operation,
@@ -38,7 +38,7 @@
 //! [`ReadTarget::Head`] selects and reads the current head in one snapshot.
 //! Commit-targeted reads support the head only and explicitly reject other
 //! commits until history is available. Deletes enumerate and tombstone every
-//! live cell, `#live` included; sealing derives index changes from the resulting
+//! live cell, `#is_live` included; sealing derives index changes from the resulting
 //! cell diff.
 //!
 //! ```

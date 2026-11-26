@@ -228,13 +228,13 @@ mod tests {
 
     #[test]
     fn a_key_with_a_bad_name_is_an_invalid_argument() {
-        // Engine names are the engine's, even the indexed `#live`.
+        // Engine names are the engine's, even the indexed `#is_live`.
         for name in [
             &b"1bad"[..],
             b"a b",
             b"",
             &[0xff],
-            b"#live",
+            b"#is_live",
             b"#key",
             b"@admin",
         ] {

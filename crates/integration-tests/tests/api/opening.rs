@@ -398,7 +398,7 @@ fn unsupported_format_ids_and_missing_trie_roots_are_rejected() {
                 | OpenError::UnsupportedRoaring(99))
         ));
     }
-    // Format 2 predates `#live`: its user records would be missing from the
+    // Format 2 predates `#is_live`: its user records would be missing from the
     // live set a standalone `Not` subtracts from.
     let db = MemoryStore::new();
     Database::from_store(db.clone(), &config()).unwrap();

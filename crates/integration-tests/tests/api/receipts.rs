@@ -50,10 +50,10 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
         assert_eq!(created.receipt.cost, 0);
         assert_eq!(created.receipt.ledger.count("write.admission.entry"), 2);
         assert_eq!(created.receipt.ledger.count("write.admission.byte"), 15);
-        // Two user cells, then #meta, #key, #live and the binding.
+        // Two user cells, then #meta, #key, #is_live and the binding.
         assert_eq!(created.receipt.ledger.count("write.cell.create"), 6);
         assert_eq!(created.receipt.ledger.count("write.cell_trie_update"), 36);
-        // `price`, then `#live`.
+        // `price`, then `#is_live`.
         assert_eq!(created.receipt.ledger.count("read.term"), 2);
         assert_eq!(details.cells_created, 2);
         assert_eq!(details.cell_bytes_written, 33);
@@ -157,7 +157,7 @@ fn effects_follow_actual_user_changes_and_failed_patches_are_atomic() {
         let deleted = db.delete(branch, RecordOp::delete(KEY, BUDGET));
         deleted.result.unwrap();
         assert_eq!(deleted.receipt.cost, 0);
-        // #meta, #key, #live and the two user cells.
+        // #meta, #key, #is_live and the two user cells.
         assert_eq!(deleted.receipt.ledger.count("read.cell"), 5);
         assert_eq!(deleted.receipt.ledger.count("write.cell.delete"), 6);
         let d = deleted.receipt.details;

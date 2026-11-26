@@ -106,15 +106,15 @@ fn real_create_matches_the_worked_example_and_keeps_system_charges_out_of_effect
     let schedule = &snapshot.model.schedule;
     let records = Records::new(branches.clone(), pricing());
     let branch = branches.begin().unwrap();
-    let result = records.create(branch, KEY, entries(), Budget::Limited(314));
+    let result = records.create(branch, KEY, entries(), Budget::Limited(320));
     assert_eq!(result.result.unwrap(), KEY);
-    assert_eq!(result.accounting.cost, 314);
-    assert_eq!(schedule.price(&result.accounting.ledger).unwrap(), 314);
-    // The user cells, then #meta, #key, #live and the binding.
+    assert_eq!(result.accounting.cost, 320);
+    assert_eq!(schedule.price(&result.accounting.ledger).unwrap(), 320);
+    // The user cells, then #meta, #key, #is_live and the binding.
     assert_eq!(result.accounting.ledger.count("write.cell.create"), 6);
-    assert_eq!(result.accounting.ledger.count("write.cell_byte"), 188);
+    assert_eq!(result.accounting.ledger.count("write.cell_byte"), 191);
     assert_eq!(result.accounting.ledger.count("read.cell"), 0);
-    // `color`, then `#live`: its term, new in an empty index.
+    // `color`, then `#is_live`: its term, new in an empty index.
     assert_eq!(result.accounting.ledger.count("read.term"), 2);
     assert_eq!(result.accounting.ledger.count("write.index.join"), 2);
     assert_eq!(result.accounting.ledger.count("write.index_term_create"), 2);
@@ -144,11 +144,11 @@ fn every_create_checkpoint_rejects_without_writes_or_id_consumption() {
         (21, 19, None),
         (22, 22, None),
         (23, 22, None),
-        // The `#live` term read.
+        // The `#is_live` term read.
         (24, 24, None),
         (25, 24, None),
-        (26, 26, Some(314)),
-        (313, 26, Some(314)),
+        (26, 26, Some(320)),
+        (319, 26, Some(320)),
     ] {
         let (_, branches, _) = crud_tests::setup();
         let records = Records::new(branches.clone(), pricing());
@@ -339,7 +339,7 @@ fn term_creation_uses_the_origin_even_after_an_earlier_branch_join() {
     for key in [KEY, OTHER] {
         let outcome = records.create(branch, key, entries(), Budget::Unlimited);
         outcome.result.unwrap();
-        // `color` and `#live`, both new at the origin.
+        // `color` and `#is_live`, both new at the origin.
         assert_eq!(
             outcome.accounting.ledger.count("write.index_term_create"),
             2
@@ -353,7 +353,7 @@ fn term_creation_uses_the_origin_even_after_an_earlier_branch_join() {
         outcome.accounting.ledger.count("write.index_term_create"),
         0
     );
-    assert_eq!(outcome.accounting.cost, 300);
+    assert_eq!(outcome.accounting.cost, 306);
 }
 
 #[test]
@@ -464,7 +464,7 @@ impl<C: ReadCursor> ReadCursor for ObservedCursor<C> {
 
 #[test]
 fn admission_and_unfunded_reads_do_not_access_record_or_index_state() {
-    for budget in [0, 19, 21, 22, 23, 24, 25, 26, 313, 314] {
+    for budget in [0, 19, 21, 22, 23, 24, 25, 26, 319, 320] {
         let (store, _, _) = crud_tests::setup();
         let accesses = Arc::new(Mutex::new(Vec::new()));
         let branches = Branches::new(
@@ -481,7 +481,7 @@ fn admission_and_unfunded_reads_do_not_access_record_or_index_state() {
         let branch = branches.begin().unwrap();
         accesses.lock().unwrap().clear();
         let result = records.create(branch, KEY, entries(), Budget::Limited(budget));
-        assert_eq!(result.result.is_ok(), budget == 314);
+        assert_eq!(result.result.is_ok(), budget == 320);
         let calls = accesses.lock().unwrap();
         let cell_gets: Vec<_> = calls
             .iter()
@@ -505,7 +505,7 @@ fn admission_and_unfunded_reads_do_not_access_record_or_index_state() {
             .iter()
             .filter(|call| matches!(call, Access::Cursor(Table("Index"), _)))
             .count();
-        // `color`'s term, then `#live`'s.
+        // `color`'s term, then `#is_live`'s.
         let expected = usize::from(budget >= 24) + usize::from(budget >= 26);
         assert_eq!(index_seeks, expected, "budget {budget}");
         assert!(
@@ -620,8 +620,8 @@ fn delete_counts_each_live_cell_once_and_charges_no_deleted_bytes() {
             assert_eq!(outcome.accounting.ledger.count("write.index_byte"), 0);
             if budget == 79 {
                 outcome.result.unwrap();
-                assert_eq!(outcome.accounting.ledger.count("read.cell"), 5); // #meta, #key, #live, two user cells
-                assert_eq!(outcome.accounting.ledger.count("read.term"), 2); // `color`, `#live`
+                assert_eq!(outcome.accounting.ledger.count("read.cell"), 5); // #meta, #key, #is_live, two user cells
+                assert_eq!(outcome.accounting.ledger.count("read.term"), 2); // `color`, `#is_live`
                 assert_eq!(outcome.accounting.ledger.count("write.index.leave"), 2);
                 assert_eq!(outcome.accounting.ledger.count("write.cell.delete"), 6);
                 assert_eq!(outcome.effects.cells_deleted, 2);
@@ -694,7 +694,7 @@ fn deletion_skips_a_long_tombstone_run_without_extra_charges_or_unfunded_steps()
             .unwrap();
         accesses.lock().unwrap().clear();
         let result = records.delete(branch, KEY, Budget::Limited(budget));
-        // User-cell scan steps; the `#live` term lookup steps the Index.
+        // User-cell scan steps; the `#is_live` term lookup steps the Index.
         let steps = accesses
             .lock()
             .unwrap()
@@ -728,12 +728,12 @@ fn empty_records_missing_records_and_zero_weights_have_defined_charges() {
     assert_eq!(missing.accounting.cost, 5);
     let empty = records.create(branch, KEY, vec![], Budget::Unlimited);
     empty.result.unwrap();
-    // 5 + 4*9 + 155 system bytes, and `#live`'s term: read 2, join 3 + 4 + 8 bytes + created 7.
-    assert_eq!(empty.accounting.cost, 220);
+    // 5 + 4*9 + 158 system bytes, and `#is_live`'s term: read 2, join 3 + 4 + 11 bytes + created 7.
+    assert_eq!(empty.accounting.cost, 226);
     let duplicate = records.create(branch, KEY, vec![], Budget::Unlimited);
     assert!(matches!(duplicate.result, Err(RecordError::AlreadyExists)));
     assert_eq!(duplicate.accounting.cost, 5);
-    // 5 + 3 system cell reads + `#live`'s term read 2 + 4*8 deletes + `#live`'s leave 2 + 4.
+    // 5 + 3 system cell reads + `#is_live`'s term read 2 + 4*8 deletes + `#is_live`'s leave 2 + 4.
     let deleted = records.delete(branch, KEY, Budget::Limited(51));
     deleted.result.unwrap();
     assert_eq!(deleted.accounting.cost, 51);
@@ -849,7 +849,7 @@ fn get_stops_before_unpaid_storage_work_and_skips_user_tombstone_runs() {
     );
     accesses.lock().unwrap().clear();
     let full = records.get(ReadTarget::Branch(b), KEY, None, Budget::Unlimited);
-    // x39, #key, #meta and #live.
+    // x39, #key, #meta and #is_live.
     assert_eq!(full.result.unwrap().cells.len(), 4);
     assert_eq!(full.accounting.ledger.count("read.cell"), 3);
     assert_eq!(full.accounting.ledger.count("read.cell_scan"), 1);

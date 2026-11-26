@@ -127,7 +127,7 @@ fn allocated<S: Store>(
         .as_u64()
         .unwrap()
 }
-/// The record IDs the index lists as live: the postings of `#live = true`.
+/// The record IDs the index lists as live: the postings of `#is_live = true`.
 fn live_ids(tx: &impl golemdb_storage::ReadTransaction) -> Vec<u64> {
     Index::new(&Keccak256Hasher)
         .bitmap(tx, &IndexTerm::live())
