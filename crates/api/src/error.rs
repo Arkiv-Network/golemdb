@@ -183,9 +183,9 @@ impl From<golemdb_pruning::PruningError> for ApiError {
                 head: CommitId::new(head),
             },
             PruningError::InvalidHistoryMetadata(reason) => Self::InvalidHistoryMetadata { reason },
-            error @ (PruningError::Storage(_) | PruningError::UnversionedTable(_)) => {
-                Self::internal(error)
-            }
+            error @ (PruningError::Storage(_)
+            | PruningError::History(_)
+            | PruningError::UnversionedTable(_)) => Self::internal(error),
         }
     }
 }
@@ -375,6 +375,8 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
             match error {
                 HistoryError::Storage(error) => Some(error),
                 HistoryError::EmptyPreimage
+                | HistoryError::InvalidChangesetKey { .. }
+                | HistoryError::MissingCommit { .. }
                 | HistoryError::InvalidCommits { .. }
                 | HistoryError::NonIncreasingCommit { .. }
                 | HistoryError::ExistingPreimage { .. }
@@ -391,6 +393,7 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
         } else if let Some(error) = error.downcast_ref::<PruningError>() {
             match error {
                 PruningError::Storage(error) => Some(error),
+                PruningError::History(error) => Some(error),
                 PruningError::CommitInFuture { .. }
                 | PruningError::CommitOutsideHistory { .. }
                 | PruningError::UnversionedTable(_)
@@ -418,6 +421,9 @@ mod tests {
         let full = || HistoryError::Storage(StorageError::Full);
         for error in [
             ApiError::internal(full()),
+            ApiError::from(BranchError::Pruning(
+                golemdb_pruning::PruningError::History(full()),
+            )),
             ApiError::internal(CellError::History(full())),
             ApiError::internal(IndexError::History(full())),
             ApiError::internal(RecordError::ReadTarget(

@@ -25,6 +25,8 @@ pub struct Genesis {
     pub hash_function: HashAlgorithm,
     pub cell_limits: CellLimits,
     pub record_limits: RecordLimits,
+    /// Minimum number of previous commits every node must retain for the host.
+    pub min_retention: u64,
     /// Initial model 1 and explicit weights; missing weights remain unpriced.
     pub metering: PricingConfig,
     /// None disables immutable storage. Some requires at least one segment.
@@ -37,6 +39,7 @@ impl Genesis {
         hash_function: HashAlgorithm,
         cell_limits: CellLimits,
         record_limits: RecordLimits,
+        min_retention: u64,
         immutable_data: Option<ImmutableDataConfig>,
         metering: PricingConfig,
     ) -> Self {
@@ -44,6 +47,7 @@ impl Genesis {
             hash_function,
             cell_limits,
             record_limits,
+            min_retention,
             immutable_data,
             metering,
         }
@@ -154,6 +158,19 @@ impl OpenConfig {
             immutable_data_directory: None,
             pruning: None,
         }
+    }
+
+    pub(crate) fn validate_pruning(&self) -> OpenResult<()> {
+        if let Some(pruning) = self.pruning
+            && pruning.window() < self.genesis.min_retention
+        {
+            return Err(OpenError::InvalidConfig(format!(
+                "pruning window {} is below genesis min_retention {}",
+                pruning.window(),
+                self.genesis.min_retention
+            )));
+        }
+        Ok(())
     }
 
     pub const fn with_mode(mut self, mode: OpenMode) -> Self {

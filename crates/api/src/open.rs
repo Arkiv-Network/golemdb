@@ -75,6 +75,7 @@ impl<S: Store + Clone + Send + Sync + 'static> OpenedStore<S> {
 /// Inspect, validate, and initialize under one writer to serialize with other
 /// initializers and committers. Reopening does not commit or rewrite any rows.
 pub(crate) fn open_store<S: Store>(store: S, config: &OpenConfig) -> OpenResult<OpenedStore<S>> {
+    config.validate_pruning()?;
     config
         .genesis
         .validate(store.max_key_size(), store.max_value_size())?;
@@ -121,6 +122,7 @@ pub(crate) fn open_mdbx(
     config: &OpenConfig,
     options: golemdb_storage_mdbx::MdbxOptions,
 ) -> OpenResult<OpenedStore<golemdb_storage_mdbx::MdbxStore>> {
+    config.validate_pruning()?;
     // Do not create a missing directory for ExistingOnly. Initialization itself
     // is always determined from the contents under the storage writer lock.
     if config.mode == crate::OpenMode::ExistingOnly

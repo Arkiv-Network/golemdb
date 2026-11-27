@@ -33,6 +33,7 @@ fn config() -> OpenConfig {
             max_cells: 100,
             max_indexed_cells: 100,
         },
+        0,
         None,
         PricingConfig::zero(),
     ))
@@ -65,7 +66,7 @@ fn history_snapshot(tx: &impl ReadTransaction) -> Vec<Vec<golemdb_storage::Entry
 }
 
 fn assert_final(tx: &impl ReadTransaction) {
-    golemdb_pruning::Pruner::validate(tx, 5).unwrap();
+    golemdb_pruning::Pruner::validate(tx, 5, 0).unwrap();
     for (target, first, second) in [
         (0, None, None),
         (1, Some(value("A")), Some(value("A"))),
@@ -170,7 +171,7 @@ fn publication(store: impl Store + Clone + Send + Sync + 'static) {
     let db = Database::from_store(store.clone(), &config()).unwrap();
     let genesis = store.begin_read().unwrap();
     assert!(history_snapshot(&genesis).iter().all(Vec::is_empty));
-    golemdb_pruning::Pruner::validate(&genesis, 0).unwrap();
+    golemdb_pruning::Pruner::validate(&genesis, 0, 0).unwrap();
     let branches = Branches::new(store.clone(), Keccak256Hasher, None, None).unwrap();
     let first = branches.begin().unwrap();
     branches

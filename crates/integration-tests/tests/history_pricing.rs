@@ -2,7 +2,7 @@
 use std::{cell::RefCell, collections::BTreeMap};
 
 use golemdb_cells::{CellError, CellKey, CellNameRef, CellReader, CellValue, tables};
-use golemdb_history::{CommitSet, ReadOperation, changeset_key};
+use golemdb_history::{ReadOperation, changeset_key};
 use golemdb_index::{
     BitmapContainer, ContainerId, IndexError, IndexKey, IndexReader, IndexTerm, TermRange,
     tables as index,
@@ -584,25 +584,13 @@ fn retention_contract(store: &impl Store) {
     let old = store.begin_read().unwrap();
     let (old_value, old_point) = point(&old, b"a", 500, Budget::Unlimited);
     let (old_rows, old_scan) = scan(&old, 500, Budget::Unlimited);
-    // Test-only cleanup below T, using the unchanged history keys/encoding.
     let mut tx = store.begin_write().unwrap();
-    for commit in [1, 100] {
-        tx.delete(tables::CELL_CHANGE_SET, &changeset_key(commit, &k))
-            .unwrap();
-    }
-    tx.put(
-        tables::CELL_HISTORY,
-        &k,
-        &[1000].into_iter().collect::<CommitSet>().encode().unwrap(),
-    )
-    .unwrap();
-    tx.delete(tables::CELL_HISTORY, &key(b"old").encode())
-        .unwrap();
-    tx.delete(
-        tables::CELL_CHANGE_SET,
-        &changeset_key(100, &key(b"old").encode()),
-    )
-    .unwrap();
+    assert_eq!(
+        tables::HISTORY
+            .prune_batch(&mut tx, 100, 3, |_, _| true)
+            .unwrap(),
+        Some(100)
+    );
     tx.commit().unwrap();
     let tx = store.begin_read().unwrap();
     let (value, new_point) = point(&tx, b"a", 500, Budget::Unlimited);

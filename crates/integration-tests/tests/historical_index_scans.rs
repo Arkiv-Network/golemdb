@@ -173,13 +173,13 @@ fn ranges() -> Vec<TermRange> {
     ranges
 }
 
-fn check(tx: &impl ReadTransaction, snapshots: &[State], check_ranges: bool) {
+fn check(tx: &impl ReadTransaction, snapshots: &[State], earliest: usize, check_ranges: bool) {
     let all_terms = snapshots
         .iter()
         .flat_map(|state| state.keys().cloned())
         .chain([string("missing")])
         .collect::<BTreeSet<_>>();
-    for (target, state) in snapshots.iter().enumerate() {
+    for (target, state) in snapshots.iter().enumerate().skip(earliest) {
         let reader = IndexReader::at(tx, target as u64);
         assert_eq!(
             scanned(&reader, TermRange::all()),
@@ -349,8 +349,8 @@ fn timeline(store: &impl Store) -> Vec<State> {
         })
         .collect();
     assert_eq!(old, expected(&snapshots[1], &TermRange::all()));
-    check(&old_tx, &snapshots[..2], true);
-    check(&store.begin_read().unwrap(), &snapshots, true);
+    check(&old_tx, &snapshots[..2], 0, true);
+    check(&store.begin_read().unwrap(), &snapshots, 0, true);
     snapshots
 }
 
@@ -364,7 +364,7 @@ fn mdbx_scans_match_saved_states_after_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let snapshots = timeline(&MdbxStore::open(dir.path()).unwrap());
     let store = MdbxStore::open(dir.path()).unwrap();
-    check(&store.begin_read().unwrap(), &snapshots, true);
+    check(&store.begin_read().unwrap(), &snapshots, 0, true);
 }
 
 proptest! {
@@ -381,7 +381,7 @@ proptest! {
             publish(&store, &mut root, &mut state, step as u64 + 1, vec![posting(&terms[term], ids[id], present)]);
             snapshots.push(state.clone());
         }
-        check(&store.begin_read().unwrap(), &snapshots, false);
+        check(&store.begin_read().unwrap(), &snapshots, 0, false);
     }
 }
 
@@ -854,4 +854,41 @@ fn preimages_override_corrupt_live_payloads_and_absence_is_not_term_presence() {
     assert!(reader.bitmap(&future).unwrap().is_none());
     assert!(reader.postings(&future).unwrap().treemap().is_empty());
     assert!(IndexReader::new(&tx).bitmap(&term).is_err());
+}
+
+fn check_partial_cleanup(store: &impl Store) {
+    let snapshots = timeline(store);
+    let old = store.begin_read().unwrap();
+    let mut earliest = 0;
+    loop {
+        let mut tx = store.begin_write().unwrap();
+        let highest = tables::HISTORY
+            .prune_batch(&mut tx, 2, 3, |_, _| true)
+            .unwrap();
+        tx.commit().unwrap();
+        let Some(highest) = highest else { break };
+        earliest = highest as usize;
+        check(&store.begin_read().unwrap(), &snapshots, earliest, true);
+    }
+    assert_eq!(earliest, 2);
+    check(&old, &snapshots, 0, true);
+    // Exact postings and range scans can complete with only flat rows and pre-images.
+    let mut tx = store.begin_write().unwrap();
+    let trie = tables::INDEX_TRIE.table();
+    let keys: Vec<_> = golemdb_storage::scan_prefix(&tx, trie, vec![])
+        .unwrap()
+        .map(|row| row.unwrap().0)
+        .collect();
+    assert!(!keys.is_empty());
+    for key in keys {
+        tx.delete(trie, &key).unwrap();
+    }
+    check(&tx, &snapshots, earliest, true);
+}
+
+#[test]
+fn retained_scans_match_saved_states_after_each_partial_batch() {
+    check_partial_cleanup(&MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    check_partial_cleanup(&MdbxStore::open(dir.path()).unwrap());
 }

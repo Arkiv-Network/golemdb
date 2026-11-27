@@ -21,6 +21,7 @@ fn config(directory: &std::path::Path) -> OpenConfig {
             max_cells: 100,
             max_indexed_cells: 100,
         },
+        0,
         Some(golemdb_api::ImmutableDataConfig::new(
             500_000,
             vec![golemdb_api::ImmutableDataSegment {

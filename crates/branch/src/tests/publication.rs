@@ -75,6 +75,7 @@ pub(crate) fn seed(
     let index = Index::new(hash)
         .apply(&mut tx, id, RootRef::Empty, postings)
         .unwrap();
+    golemdb_pruning::Pruner::initialize(&mut tx).unwrap();
     head(&mut tx, hash, id, cells.root, index.root);
     tx.commit().unwrap();
 }

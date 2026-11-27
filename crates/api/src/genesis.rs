@@ -44,6 +44,7 @@ fn initial_cells(config: &Genesis) -> OpenResult<BTreeMap<CellKey, CellValue>> {
         );
     }
     for (name, value) in [
+        (reserved::MIN_RETENTION, config.min_retention),
         (reserved::MAX_RECORD_CELLS, config.record_limits.max_cells),
         (
             reserved::MAX_RECORD_INDEXED_CELLS,
@@ -183,7 +184,7 @@ pub(crate) fn prepare(
         return Err(OpenError::GenesisMismatch);
     }
     let head = read_head_state(tx)?;
-    golemdb_pruning::Pruner::validate(tx, head.commit_id.get())?;
+    golemdb_pruning::Pruner::validate(tx, head.commit_id.get(), config.genesis.min_retention)?;
     validate_state(tx, &head, cells, hasher)?;
     if config.mode == OpenMode::CreateNew {
         return Err(OpenError::AlreadyInitialized);

@@ -19,6 +19,7 @@ fn config(hash_function: HashAlgorithm) -> OpenConfig {
             max_cells: 100,
             max_indexed_cells: 100,
         },
+        0,
         None,
         golemdb_api::PricingConfig::zero(),
     ))
