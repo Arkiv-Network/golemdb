@@ -1,6 +1,5 @@
 //! Hand-counted get prices and stopping points, shared by both storage backends.
 use golemdb_api::*;
-use golemdb_cells::system;
 
 const KEY: RecordKey = RecordKey([0x42; 32]);
 
@@ -160,7 +159,7 @@ fn get_shapes_and_budget_cutoffs_match_on_branches_and_committed_storage() {
             ] {
                 let call = db.get(
                     target,
-                    RecordOp::get(RecordKey(system::ALLOC.key), Budget::Limited(budget)),
+                    RecordOp::get(RecordKey::ALLOC, Budget::Limited(budget)),
                 );
                 check(&call, spent, commit, &db);
                 if budget == 201 {
@@ -214,7 +213,7 @@ fn get_shapes_and_budget_cutoffs_match_on_branches_and_committed_storage() {
         )
         .result
         .unwrap();
-        let bindings = || RecordOp::get(RecordKey(system::RECORD_KEYS.key), Budget::Unlimited);
+        let bindings = || RecordOp::get(RecordKey::RECORD_KEYS, Budget::Unlimited);
         let pending = db.get(ReadTarget::Branch(branch), bindings());
         let cells = &pending.result.as_ref().unwrap().cells;
         assert!(cells.contains_key([0x11; 32].as_slice()));
