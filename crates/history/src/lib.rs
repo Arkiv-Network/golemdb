@@ -13,8 +13,9 @@
 //!
 //! Record each net item change once, after coalescing branch operations. The
 //! caller publishes history and live state atomically and must abort after a
-//! mutation error. No method opens or commits a transaction. Pruning, domain
-//! codecs, pricing and branch integration belong to subsequent layers.
+//! mutation error. [`HistoryTables::prune_batch`] updates the paired tables
+//! in a caller's writer. The pruning crate chooses the cutoff and batch sizes
+//! and advances the persisted floor in that transaction.
 //!
 //! History rows grow with retained changes and have no fixed 16 KiB ceiling.
 //! Backend key/value limits still apply; exceeding one fails the transaction,
@@ -53,6 +54,7 @@
 mod commits;
 mod error;
 mod history;
+mod prune;
 mod read;
 
 pub use commits::{CommitSet, CommitSetError};

@@ -655,6 +655,7 @@ name = "golemdb-pruning"
 version = "0.1.0"
 dependencies = [
  "golemdb-cells",
+ "golemdb-history",
  "golemdb-index",
  "golemdb-storage",
  "thiserror",

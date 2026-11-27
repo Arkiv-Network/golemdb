@@ -66,8 +66,8 @@ fn expected(state: &State, id: u64, users: bool) -> Vec<(CellKey, CellValue)> {
         .collect()
 }
 
-fn check(tx: &impl ReadTransaction, snapshots: &[State]) {
-    for (target, state) in snapshots.iter().enumerate() {
+fn check(tx: &impl ReadTransaction, snapshots: &[State], earliest: usize) {
+    for (target, state) in snapshots.iter().enumerate().skip(earliest) {
         let reader = CellReader::at(tx, target as u64);
         for id in [0, 1, 3, 4, 63, 64, 65, 66, u64::MAX - 1, u64::MAX] {
             assert_eq!(
@@ -194,7 +194,7 @@ fn timeline(store: &impl Store) -> Vec<State> {
             .collect::<Vec<_>>(),
         expected(&snapshots[1], 64, false)
     );
-    check(&store.begin_read().unwrap(), &snapshots);
+    check(&store.begin_read().unwrap(), &snapshots, 0);
     snapshots
 }
 
@@ -208,7 +208,7 @@ fn mdbx_enumerates_saved_states_across_publication_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let snapshots = timeline(&MdbxStore::open(dir.path()).unwrap());
     let store = MdbxStore::open(dir.path()).unwrap();
-    check(&store.begin_read().unwrap(), &snapshots);
+    check(&store.begin_read().unwrap(), &snapshots, 0);
 }
 
 proptest! {
@@ -232,7 +232,7 @@ proptest! {
             publish(&store, &mut root, &mut state, step as u64 + 1, vec![change]);
             snapshots.push(state.clone());
         }
-        check(&store.begin_read().unwrap(), &snapshots);
+        check(&store.begin_read().unwrap(), &snapshots, 0);
     }
 }
 
@@ -615,4 +615,29 @@ fn selected_corruption_fails_lazily_and_shadowed_live_bytes_are_not_decoded() {
         drop(scan);
         tx.abort();
     }
+}
+
+fn check_partial_cleanup(store: &impl Store) {
+    let snapshots = timeline(store);
+    let old = store.begin_read().unwrap();
+    let mut earliest = 0;
+    loop {
+        let mut tx = store.begin_write().unwrap();
+        let highest = tables::HISTORY
+            .prune_batch(&mut tx, 2, 3, |_, _| true)
+            .unwrap();
+        tx.commit().unwrap();
+        let Some(highest) = highest else { break };
+        earliest = highest as usize;
+        check(&store.begin_read().unwrap(), &snapshots, earliest);
+    }
+    assert_eq!(earliest, 2);
+    check(&old, &snapshots, 0);
+}
+
+#[test]
+fn retained_scans_match_saved_states_after_each_partial_batch() {
+    check_partial_cleanup(&MemoryStore::new());
+    let dir = tempfile::tempdir().unwrap();
+    check_partial_cleanup(&MdbxStore::open(dir.path()).unwrap());
 }

@@ -27,6 +27,7 @@ pub fn config() -> OpenConfig {
         HashAlgorithm::Keccak256,
         cells,
         records,
+        0,
         no_immutable_data,
         PricingConfig::zero(),
     ))

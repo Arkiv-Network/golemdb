@@ -221,6 +221,7 @@ fn genesis_caps_bound_final_records_without_consuming_ids_on_failure() {
                 max_cells: 2,
                 max_indexed_cells: 1,
             },
+            0,
             None,
             golemdb_api::PricingConfig::zero(),
         );
@@ -249,6 +250,7 @@ fn zero_caps_allow_empty_records_and_do_not_limit_system_records() {
             max_cells: 0,
             max_indexed_cells: 0,
         },
+        0,
         None,
         golemdb_api::PricingConfig::zero(),
     );

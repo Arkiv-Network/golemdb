@@ -13,6 +13,7 @@ fn genesis(hash: HashAlgorithm) -> Genesis {
             max_cells: 100,
             max_indexed_cells: 100,
         },
+        0,
         Some(ImmutableDataConfig::new(
             2,
             vec![

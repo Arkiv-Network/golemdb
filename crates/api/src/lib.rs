@@ -21,6 +21,7 @@
 //!         max_cell_name_len: 32, max_str_len: 64, max_bytes_len: 128,
 //! },
 //!     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
+//!     0,
 //!     None,
 //!     golemdb_api::PricingConfig::zero(),
 //! ));

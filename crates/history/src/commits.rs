@@ -68,6 +68,14 @@ impl CommitSet {
         self.0.max()
     }
 
+    pub(crate) fn remove(&mut self, commit: u64) -> bool {
+        self.0.remove(commit)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub(crate) fn insert(&mut self, commit: u64) {
         self.0.insert(commit);
     }

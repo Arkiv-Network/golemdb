@@ -311,7 +311,8 @@ fn borrowed_reads_and_scan_reuse_do_not_fetch_extra_rows() {
 
 struct FailWrite<W> {
     inner: W,
-    writes: usize,
+    writes: Vec<(Table, Vec<u8>)>,
+    reads: RefCell<Vec<(Table, Vec<u8>)>>,
     fail_at: usize,
 }
 
@@ -329,6 +330,7 @@ impl<W: ReadTransaction> ReadTransaction for FailWrite<W> {
         key: &[u8],
         inspect: impl FnOnce(Option<&[u8]>) -> T,
     ) -> golemdb_storage::Result<T> {
+        self.reads.borrow_mut().push((table, key.to_vec()));
         self.inner.with_value(table, key, inspect)
     }
     fn cursor(&self, table: Table, key: &[u8]) -> golemdb_storage::Result<Self::Cursor<'_>> {
@@ -337,9 +339,9 @@ impl<W: ReadTransaction> ReadTransaction for FailWrite<W> {
 }
 
 impl<W: WriteTransaction> FailWrite<W> {
-    fn before_write(&mut self) -> golemdb_storage::Result<()> {
-        self.writes += 1;
-        if self.writes == self.fail_at {
+    fn before_write(&mut self, table: Table, key: &[u8]) -> golemdb_storage::Result<()> {
+        self.writes.push((table, key.to_vec()));
+        if self.writes.len() == self.fail_at {
             Err(StorageError::Full)
         } else {
             Ok(())
@@ -349,14 +351,15 @@ impl<W: WriteTransaction> FailWrite<W> {
 
 impl<W: WriteTransaction> WriteTransaction for FailWrite<W> {
     fn put(&mut self, table: Table, key: &[u8], value: &[u8]) -> golemdb_storage::Result<()> {
-        self.before_write()?;
+        self.before_write(table, key)?;
         self.inner.put(table, key, value)
     }
     fn insert(&mut self, table: Table, key: &[u8], value: &[u8]) -> golemdb_storage::Result<()> {
-        self.before_write()?;
+        self.before_write(table, key)?;
         self.inner.insert(table, key, value)
     }
     fn delete(&mut self, table: Table, key: &[u8]) -> golemdb_storage::Result<bool> {
+        self.before_write(table, key)?;
         self.inner.delete(table, key)
     }
     fn commit(self) -> golemdb_storage::Result<()> {
@@ -374,7 +377,8 @@ fn aborts(db: &impl Store) {
     for fail_at in [1, 2] {
         let mut tx = FailWrite {
             inner: db.begin_write().unwrap(),
-            writes: 0,
+            writes: vec![],
+            reads: RefCell::default(),
             fail_at,
         };
         assert!(matches!(
@@ -467,4 +471,63 @@ proptest! {
             prop_assert_eq!(HISTORY.read_commits(&tx, &[item]).unwrap(), events[item as usize].iter().copied().collect::<CommitSet>());
         }
     }
+}
+
+#[test]
+fn pruning_groups_history_accesses_then_deletes_changesets_in_cursor_order() {
+    let db = MemoryStore::new();
+    let mut writer = db.begin_write().unwrap();
+    for (commit, key) in [(1, b"z"), (2, b"a"), (2, b"z"), (u64::MAX, b"a")] {
+        HISTORY.record(&mut writer, key, commit, None).unwrap();
+    }
+    let mut tx = FailWrite {
+        inner: writer,
+        reads: RefCell::default(),
+        writes: vec![],
+        fail_at: usize::MAX,
+    };
+    assert_eq!(
+        HISTORY
+            .prune_batch(&mut tx, 2, 10, |rows, oldest| {
+                assert_eq!((rows, oldest), (3, 1));
+                false
+            })
+            .unwrap(),
+        None
+    );
+    assert!(tx.writes.is_empty() && tx.reads.borrow().is_empty());
+    assert_eq!(
+        HISTORY.prune_batch(&mut tx, 2, 10, |_, _| true).unwrap(),
+        Some(2)
+    );
+    let history = [
+        (HISTORY.history, b"a".to_vec()),
+        (HISTORY.history, b"z".to_vec()),
+    ];
+    assert_eq!(tx.reads.take(), history);
+    let expected = history
+        .into_iter()
+        .chain(
+            [(1, b"z"), (2, b"a"), (2, b"z")]
+                .map(|(c, k)| (HISTORY.changeset, changeset_key(c, k))),
+        )
+        .collect::<Vec<_>>();
+    assert_eq!(tx.writes, expected);
+    assert_eq!(
+        HISTORY.read_commits(&tx, b"a").unwrap(),
+        [u64::MAX].into_iter().collect()
+    );
+    assert_eq!(tx.get(HISTORY.history, b"z").unwrap(), None);
+    assert_eq!(
+        HISTORY
+            .prune_batch(&mut tx, u64::MAX, 1, |_, _| true)
+            .unwrap(),
+        Some(u64::MAX)
+    );
+    assert_eq!(
+        HISTORY
+            .prune_batch(&mut tx, u64::MAX, 1, |_, _| panic!("empty batch"))
+            .unwrap(),
+        None
+    );
 }

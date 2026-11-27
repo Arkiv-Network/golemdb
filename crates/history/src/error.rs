@@ -30,6 +30,14 @@ pub enum HistoryError {
         key: Vec<u8>,
         commit: u64,
     },
+    #[error("changeset key in {table:?} has no complete commit prefix: {key:?}")]
+    InvalidChangesetKey { table: Table, key: Vec<u8> },
+    #[error("changeset commit {commit} is missing from {table:?} for {key:?}")]
+    MissingCommit {
+        table: Table,
+        key: Vec<u8>,
+        commit: u64,
+    },
     #[error("missing pre-image at commit {commit} in {table:?} for {key:?}")]
     MissingPreimage {
         table: Table,

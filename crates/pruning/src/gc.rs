@@ -1,6 +1,6 @@
 use golemdb_storage::{ReadCursor, Table, WriteTransaction};
 
-use crate::{PruningError, Result};
+use crate::{Batch, PruningError, Result};
 
 /// Superseded rows awaiting deletion, one `commit ‖ table ‖ key` row each with
 /// an empty value; `commit` is the one that superseded the row.
@@ -32,16 +32,6 @@ pub(crate) fn register<'a>(
     Ok(())
 }
 
-/// When a sweep deletes a batch, and how large one may be.
-pub(crate) struct Batch {
-    /// Due rows to wait for.
-    pub(crate) min: usize,
-    /// Most rows to delete.
-    pub(crate) max: usize,
-    /// Commits the oldest due row may wait before a smaller batch goes.
-    pub(crate) max_wait: u64,
-}
-
 /// Delete the oldest rows superseded at or before `cutoff`, at most
 /// `batch.max`, sorted by table and key, once at least `batch.min` are due or
 /// the oldest has been due for `batch.max_wait` commits. A `Stale` row too short
@@ -61,8 +51,7 @@ pub(crate) fn sweep(tx: &mut impl WriteTransaction, cutoff: u64, batch: Batch) -
         due.push(key);
     }
     drop(cursor);
-    let waited = oldest.is_some_and(|oldest| cutoff - oldest >= batch.max_wait);
-    if due.len() < batch.min && !waited {
+    if !oldest.is_some_and(|oldest| batch.ready(due.len(), oldest, cutoff)) {
         return Ok(());
     }
     // Trie rows sorted, so rows sharing a page go together.

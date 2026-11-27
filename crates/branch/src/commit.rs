@@ -80,6 +80,7 @@ pub(crate) fn stage(
             .map(|(table, key)| (*table, key.as_slice()));
         pruner.register_tries(tx, commit, superseded)?;
         pruner.sweep_tries(tx, commit)?;
+        pruner.sweep_history(tx, commit)?;
         pruner.prune_commit_keyed_rows(tx, crate::ROOTS, commit)?;
         tracing::info!(
             commit_id = commit,

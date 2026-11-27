@@ -33,6 +33,7 @@ let config = OpenConfig::new(Genesis::new(
         max_bytes_len: 128,
     },
     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
+    0,
     None,
     golemdb_api::PricingConfig::zero(), // Development example with explicit free prices.
 ));
@@ -237,6 +238,7 @@ let config = OpenConfig::new(Genesis::new(
         max_bytes_len: 128,
     },
     golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
+    0,
     None,
     golemdb_api::PricingConfig::zero(), // Development example with explicit free prices.
 ))
@@ -298,6 +300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_bytes_len: 1024,
         },
         golemdb_api::RecordLimits { max_cells: 100, max_indexed_cells: 100 },
+        0,
         None,
         golemdb_api::PricingConfig::zero(),
     ))
@@ -450,6 +453,7 @@ Provide immutable startup values explicitly, as `Genesis` or a caller-selected Y
 
 ```yaml
 hash_function: keccak-256
+min_retention: 0
 cell_limits:
   max_cell_name_len: 32
   max_str_len: 64
@@ -478,21 +482,17 @@ defaults to `bytes`. Duplicate and unknown fields are rejected.
 Use `Genesis::load(path)` or `Genesis::from_yaml(text)`; the loader
 does not search for files or read environment overrides.
 
-Typed construction uses `Genesis::new(hash, cell_limits, record_limits, None, pricing)`
+Typed construction uses `Genesis::new(hash, cell_limits, record_limits, min_retention, None, pricing)`
 to disable immutable data, or passes
-`Some(ImmutableDataConfig::new(shard_span, segments))` as the fourth argument to enable it. These
+`Some(ImmutableDataConfig::new(shard_span, segments))` as the fifth argument to enable it. These
 configuration types own their declarations and implement `Clone`, not `Copy`.
 
-History retention uses the existing `OpenConfig::with_pruning(PruningConfig::new(window))`
-setting, with `window` previous commits plus the head. There is no additional
-genesis retention parameter. With pruning disabled, retained history has no
-configured cutoff. Historical reads and history cleanup remain deferred until
-their complete paths are implemented.
-Commits already record cell and container pre-images atomically with live state.
-Genesis cells have no creation events: commit zero is the baseline. Pruning
-tracks the available history internally, and opening validates that metadata.
-Enlarging the pruning window or disabling pruning cannot restore data that was
-already removed.
+Genesis stores the host's minimum retention window in `#params.#minRetention`.
+A node can disable pruning or set `OpenConfig::with_pruning(PruningConfig::new(window))`
+to retain at least that many previous commits plus the head. The local window can
+change on reopen. Each publication can prune a batch of old cell pre-images and a
+batch of index-container pre-images. Widening the window or disabling pruning
+afterward allows reads back to the earliest commit still covered by both histories.
 
 New databases use storage format 2. Older formats are rejected without migration
 or modification; use a new compatible database. The backend must accommodate

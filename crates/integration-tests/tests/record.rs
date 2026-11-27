@@ -29,6 +29,7 @@ fn zero_pricing() -> WritePricing {
         golemdb_api::HashAlgorithm::Keccak256,
         limits,
         record_limits,
+        0,
         None,
         golemdb_api::PricingConfig::zero(),
     ));

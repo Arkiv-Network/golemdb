@@ -29,6 +29,7 @@ fn genesis() -> Genesis {
             max_cells: 100,
             max_indexed_cells: 100,
         },
+        0,
         None,
         prices,
     )

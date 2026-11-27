@@ -14,6 +14,8 @@ pub enum PruningError {
     #[error("invalid history pruning metadata: {0}")]
     InvalidHistoryMetadata(&'static str),
     #[error(transparent)]
+    History(#[from] golemdb_history::HistoryError),
+    #[error(transparent)]
     Storage(#[from] StorageError),
     #[error("table {0} is not versioned, so it has no superseded rows")]
     UnversionedTable(&'static str),

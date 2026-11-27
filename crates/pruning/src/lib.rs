@@ -6,7 +6,9 @@
 //! deleted once `s ≤ head − window`. Due rows are deleted in batches, sorted by
 //! table and key, so rows sharing a page are deleted together.
 //! [`Pruner::prune_commit_keyed_rows`] drops a caller's own rows keyed by
-//! commit, such as `Roots`, outside the window.
+//! commit, such as `Roots`, outside the window. [`Pruner::sweep_history`] groups
+//! eligible pre-images by item to update each bitmap once, then deletes the
+//! pre-images in changeset order in the same transaction.
 
 mod error;
 mod gc;
@@ -23,12 +25,35 @@ use golemdb_storage::{ReadTransaction, Table, WriteTransaction, scan};
 /// enough for rows sharing a page to be deleted together.
 pub const MIN_BATCH_ROWS: usize = 10_000;
 
-/// Most rows one sweep deletes, bounding the commit that carries a batch.
+/// Maximum rows selected per batch, independently for trie GC and each changeset table.
 pub const MAX_BATCH_ROWS: usize = 40_000;
 
 /// Commits a due row waits at most: past this, a sweep deletes a smaller batch,
 /// so a quiet node still drains.
 pub const MAX_WAIT_COMMITS: u64 = 50;
+
+/// When a sweep deletes a batch, and how large one may be.
+#[derive(Clone, Copy)]
+struct Batch {
+    /// Due rows to wait for.
+    min: usize,
+    /// Most rows to delete.
+    max: usize,
+    /// Commits the oldest due row may wait before a smaller batch goes.
+    max_wait: u64,
+}
+
+impl Batch {
+    const DEFAULT: Self = Self {
+        min: MIN_BATCH_ROWS,
+        max: MAX_BATCH_ROWS,
+        max_wait: MAX_WAIT_COMMITS,
+    };
+
+    fn ready(self, rows: usize, oldest: u64, cutoff: u64) -> bool {
+        rows >= self.min || cutoff - oldest >= self.max_wait
+    }
+}
 
 /// Node-local pruning settings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +67,7 @@ impl PruningConfig {
         Self { window }
     }
 
-    /// Commits whose roots stay readable.
+    /// Number of previous commits retained in addition to the head.
     pub const fn window(&self) -> u64 {
         self.window
     }
@@ -71,10 +96,10 @@ impl Pruner {
         history::initialize(tx)
     }
 
-    /// Validate persisted pruning metadata against the head of the same snapshot,
+    /// Validate persisted pruning metadata against the snapshot head and genesis minimum,
     /// including when pruning is disabled. Does not repair metadata or scan history.
-    pub fn validate(tx: &impl ReadTransaction, head: u64) -> Result<()> {
-        history::validate(tx, head)
+    pub fn validate(tx: &impl ReadTransaction, head: u64, min_retention: u64) -> Result<()> {
+        history::validate(tx, head, min_retention)
     }
 
     /// Validate a historical target using this snapshot's head and history metadata.
@@ -105,12 +130,13 @@ impl Pruner {
     /// oldest has been due for [`MAX_WAIT_COMMITS`] commits; otherwise delete
     /// nothing. Commits that delete a batch take longer than the others.
     pub fn sweep_tries(&self, tx: &mut impl WriteTransaction, head: u64) -> Result<()> {
-        let batch = gc::Batch {
-            min: MIN_BATCH_ROWS,
-            max: MAX_BATCH_ROWS,
-            max_wait: MAX_WAIT_COMMITS,
-        };
-        gc::sweep(tx, self.cutoff(head), batch)
+        gc::sweep(tx, self.cutoff(head), Batch::DEFAULT)
+    }
+
+    /// Prune due cell and index-container pre-images. Each table has its own
+    /// batch under the trie GC thresholds. Abort the writer on error.
+    pub fn sweep_history(&self, tx: &mut impl WriteTransaction, head: u64) -> Result<()> {
+        history::sweep(tx, head, self.cutoff(head), Batch::DEFAULT)
     }
 
     /// Delete every row of `table` keyed by a big-endian commit before
