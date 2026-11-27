@@ -4,14 +4,15 @@ use golemdb_branch::{BranchId, Branches, CellRead};
 use golemdb_cells::CellName;
 use golemdb_merkle::HashProvider;
 use golemdb_metering::{Accounting, Budget, ReadMeter, WriteMeter};
-use golemdb_storage::Store;
+use golemdb_storage::{ReadTransaction, Store};
 
 use crate::{
     CreateEntry, Effects, Outcome, PatchEntry, ReadTarget, Record, RecordError, RecordKey, Result,
     WritePricing, admission,
-    committed::committed_snapshot,
+    committed::CommittedRead,
     plan::{self, WritePlan},
     read,
+    read_metering::MeteredCellFetcher,
 };
 
 /// Record semantics over guarded branch views. Every operation requires an
@@ -48,38 +49,67 @@ impl<S: Store, H: HashProvider> Records<S, H> {
         projection: Option<&[CellName]>,
         budget: Budget,
     ) -> Outcome<Record, RecordError> {
-        let mut priced_at = None;
-        let mut accounting = Accounting::default();
-        let mut read = |origin: golemdb_branch::CommitId, reader: &CellRead<'_, S::Read<'_>>| {
-            let snapshot = self.pricing.provider.snapshot(origin.get())?;
-            priced_at = Some(origin);
-            let mut meter = ReadMeter::new(&snapshot.model.schedule, budget);
-            let result = read::get(reader, key, projection, &mut meter);
-            accounting = meter.into_accounting();
-            result
-        };
-        let result = match target {
-            ReadTarget::Branch(branch) => self
-                .branches
-                .read_with_origin(branch, &mut read)
-                .map_err(Into::into),
+        match target {
+            ReadTarget::Branch(branch) => {
+                match self.branches.read_with_origin(branch, |origin, reader| {
+                    Ok::<_, RecordError>(self.read_get(
+                        origin,
+                        MeteredCellFetcher::Branch(reader),
+                        key,
+                        projection,
+                        budget,
+                    ))
+                }) {
+                    Ok(outcome) => outcome,
+                    Err(error) => Outcome::new(Err(error.into()), None, Effects::default()),
+                }
+            }
             target => {
                 let commit = match target {
                     ReadTarget::Commit(c) => Some(c),
                     _ => None,
                 };
-                match committed_snapshot(self.branches.store(), commit) {
-                    Ok((tx, head)) => read(head, &CellRead::committed(&tx)),
-                    Err(error) => {
-                        if let RecordError::CommitUnavailable { head, .. } = &error {
-                            priced_at = Some(*head);
-                        }
-                        Err(error)
-                    }
+                let mut context = match self
+                    .branches
+                    .store()
+                    .begin_read()
+                    .map_err(RecordError::from)
+                    .and_then(CommittedRead::new)
+                {
+                    Ok(context) => context,
+                    Err(error) => return Outcome::new(Err(error), None, Effects::default()),
+                };
+                let head = context.head();
+                if let Err(error) = context.select_target(commit, self.branches.pruning()) {
+                    return Outcome::new(Err(error), Some(head), Effects::default());
                 }
+                self.read_get(
+                    head,
+                    MeteredCellFetcher::Committed(context.cells()),
+                    key,
+                    projection,
+                    budget,
+                )
             }
+        }
+    }
+
+    fn read_get<R: ReadTransaction>(
+        &self,
+        pricing_commit: golemdb_branch::CommitId,
+        reader: MeteredCellFetcher<'_, '_, R>,
+        key: RecordKey,
+        projection: Option<&[CellName]>,
+        budget: Budget,
+    ) -> Outcome<Record, RecordError> {
+        let snapshot = match self.pricing.provider.snapshot(pricing_commit.get()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return Outcome::new(Err(error.into()), None, Effects::default()),
         };
-        Outcome::new(result, priced_at, Effects::default()).with_accounting(accounting)
+        let mut meter = ReadMeter::new(&snapshot.model.schedule, budget);
+        let result = read::get(&reader, key, projection, &mut meter);
+        Outcome::new(result, Some(pricing_commit), Effects::default())
+            .with_accounting(meter.into_accounting())
     }
 
     /// Admit and plan without writes, approve the complete cost, then apply.

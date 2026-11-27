@@ -422,10 +422,13 @@ fn query_count_and_unavailable_history_report_the_selected_head() {
         for requested in [CommitId::GENESIS, CommitId::new(head.get() + 1)] {
             let get = db.get(ReadTarget::Commit(requested), RecordOp::get(KEY, BUDGET));
             unchanged(&get, Some(head));
-            assert!(matches!(
-                get.result,
-                Err(ApiError::CommitUnavailable { .. })
-            ));
+            if requested == CommitId::GENESIS {
+                assert!(matches!(get.result, Err(ApiError::NotFound)));
+                assert_eq!(get.receipt.ledger.count("read.key"), 1);
+            } else {
+                assert!(matches!(get.result, Err(ApiError::CommitInFuture { .. })));
+                assert!(get.receipt.ledger.is_empty());
+            }
             let query = db.query(
                 Some(requested),
                 QueryOp::from_filter(filter("color"), BUDGET),

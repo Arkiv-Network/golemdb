@@ -60,6 +60,10 @@ impl Pruner {
         Self { config }
     }
 
+    pub const fn config(&self) -> PruningConfig {
+        self.config
+    }
+
     /// Initialize pruning metadata in a new database's genesis transaction,
     /// including when pruning is disabled. Never use this to repair an existing
     /// database; existing metadata is preserved and returns `AlreadyExists`.
@@ -71,6 +75,18 @@ impl Pruner {
     /// including when pruning is disabled. Does not repair metadata or scan history.
     pub fn validate(tx: &impl ReadTransaction, head: u64) -> Result<()> {
         history::validate(tx, head)
+    }
+
+    /// Validate a historical target using this snapshot's head and history metadata.
+    /// The supported interval respects both the configured window and earlier
+    /// cleanup. Disabling pruning cannot restore history already removed.
+    pub fn validate_target(
+        tx: &impl ReadTransaction,
+        head: u64,
+        requested: u64,
+        config: Option<PruningConfig>,
+    ) -> Result<()> {
+        history::validate_target(tx, head, requested, config)
     }
 
     /// Register the rows `commit` superseded, to delete once they leave the

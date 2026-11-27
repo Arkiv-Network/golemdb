@@ -119,7 +119,7 @@ and failures before selecting a snapshot have no pricing commit. `receipt.detail
 counts actual user-cell changes and encoded bytes; it excludes system cells,
 no-ops, failed writes and reads. Rollback does not revoke earlier receipts.
 
-`get` charges `read.admission.base`, then each supplied projection entry and its
+Live and branch `get` charge `read.admission.base`, then each supplied projection entry and its
 name bytes (duplicates included), `read.base`, and `read.key`. Distinct projected
 names cost `read.cell` each, including absent cells; found cells also pay `read.byte`
 on encoded key + tagged value size, before decoding/copying. An empty projection
@@ -133,9 +133,18 @@ An overlay replacement shares the origin row's attempt. Reserved scan charges ca
 therefore differ from a scan of the committed result; user scans skip hidden runs.
 Every failed read retains spent accounting and returns no partial record.
 
+Historical `get` additionally charges `read.cell` for each history point lookup,
+`read.cell_scan` for each live/history cursor advance, and one atomic
+`read.commit_set + encoded_bitmap_bytes * read.byte` package per processed commit set.
+Selected binding lookups use `read.key`; selected ordinary cells use `read.cell`,
+whether their values come from live state or a pre-image. Full historical user records
+prepay returned bytes from `#meta` at the target commit, while traversal remains
+incremental. Metadata counts present cells, not the number of historical candidates.
+
 Target selection still precedes admission: invalid handles and unavailable commits
-cost zero. The selected snapshot supplies both data and committed prices; staged
-weights are never used. Admission-before-snapshot ordering and `evaluated_at` remain
+cost zero. One snapshot supplies the head, historical target validation and all data.
+Prices come from that head even for historical data; branch prices come from its origin.
+Staged weights are never used. Admission-before-snapshot ordering and `evaluated_at` remain
 deferred. No new public CRUD arguments or receipt fields are added.
 
 `receipt.ledger` contains charged units per weight name, in name order. It is
@@ -181,8 +190,13 @@ it. Removing/rejoining a term present at the origin adds no creation charge. Sea
 still applies the final index diff; these are deterministic per-call charges.
 
 `ReadTarget::Branch(id)` reads work in progress. `ReadTarget::Head` resolves head
-and reads the record in one storage snapshot. `ReadTarget::Commit(id)` currently
-accepts only that snapshot's head; historical reads are deferred.
+and reads the record in one storage snapshot. `ReadTarget::Commit(id)` reads that
+historical version within the node's supported interval. The interval respects the
+configured pruning window and any history already removed. Future commits return
+`CommitInFuture`, targets outside the interval return `CommitOutsideHistory`, and
+missing or corrupt history metadata returns `InvalidHistoryMetadata`.
+Explicitly selecting the snapshot's head uses the same live path and charges as `Head`.
+Queries and counts still accept only the head.
 `RecordOp::get(key, golemdb_api::Budget::Limited(u64::MAX))` reads all cells. Its `.only(names)` helper accepts text or raw
 byte names for reserved records. The builder preserves duplicates and input order;
 execution deduplicates and sorts after selecting the target. Calling `.only()` again
@@ -399,7 +413,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(db.head()?, second_commit);
 
     // 4. Read again: laptop changed, keyboard stayed the same, monitor appeared,
-    //    and mouse disappeared. Use Head now; historical commit 1 is deferred.
+    //    and mouse disappeared. Head reads the latest state; Commit(first_commit)
+    //    would still return the earlier version while that history is supported.
     let updated_laptop = db.get(ReadTarget::Head, RecordOp::get(laptop, golemdb_api::Budget::Limited(u64::MAX))).into_result()?;
     assert_eq!(updated_laptop, pending_laptop);
     assert_eq!(updated_laptop.cells[b"stock".as_slice()].as_u32(), Some(5));

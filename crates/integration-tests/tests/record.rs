@@ -111,6 +111,7 @@ fn initialize(db: &impl Store) {
         index: RootRef::Empty,
     };
     golemdb_branch::init_head(&mut tx, &roots, &hash).unwrap();
+    golemdb_pruning::Pruner::initialize(&mut tx).unwrap();
     tx.commit().unwrap();
 }
 
@@ -201,14 +202,31 @@ fn lifecycle(db: impl Store + Clone) {
         Err(RecordError::Branch(BranchError::HandleInvalid))
     ));
     assert!(matches!(
-        records.get(ReadTarget::Commit(golemdb_branch::CommitId::new(0)), KEY, None, Budget::Unlimited).result,
-        Err(RecordError::CommitUnavailable {
-            requested, head }) if requested.get() == 0 && head.get() == 1
+        records
+            .get(
+                ReadTarget::Commit(golemdb_branch::CommitId::new(0)),
+                KEY,
+                None,
+                Budget::Unlimited
+            )
+            .result,
+        Err(RecordError::NotFound)
     ));
     assert!(matches!(
-        records.get(ReadTarget::Commit(golemdb_branch::CommitId::new(2)), KEY, None, Budget::Unlimited).result,
-        Err(RecordError::CommitUnavailable {
-            requested, head }) if requested.get() == 2 && head.get() == 1
+        records
+            .get(
+                ReadTarget::Commit(golemdb_branch::CommitId::new(2)),
+                KEY,
+                None,
+                Budget::Unlimited
+            )
+            .result,
+        Err(RecordError::ReadTarget(
+            golemdb_pruning::PruningError::CommitInFuture {
+                requested: 2,
+                head: 1
+            }
+        ))
     ));
     assert_eq!(
         records

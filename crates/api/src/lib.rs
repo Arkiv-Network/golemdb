@@ -93,7 +93,8 @@ pub trait Api {
 
     /// Read pending or committed state. Head selection and materialization share
     /// one snapshot. Missing projected cells are omitted; an empty projection
-    /// still verifies existence. Explicit non-head commits are not yet supported.
+    /// still verifies existence. Commit targets read supported historical data at
+    /// current prices; future targets and targets outside retained history fail.
     fn get(&self, target: ReadTarget, operation: RecordOp<op::Get>) -> Metered<Record>;
 
     /// Atomically edit one record. Removing every user cell preserves its identity.
@@ -121,7 +122,7 @@ pub trait Api {
     fn count(&self, commit_id: Option<CommitId>, operation: CountOp) -> Metered<u64>;
 
     /// Unmetered committed pricing inspection. None selects head; explicit
-    /// non-head commits return CommitUnavailable until historical reads exist.
+    /// non-head commits return CommitUnavailable; pricing inspection is head-only.
     fn metering_model(&self, commit_id: Option<CommitId>) -> Result<MeteringModelInfo>;
 
     /// Weights (including host.*) at the selected commit. None selects its active

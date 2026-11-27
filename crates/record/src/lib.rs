@@ -35,8 +35,9 @@
 //! missing weights stop only the operations that need them. `get` uses
 //! [`golemdb_metering::ReadMeter`], charging admission, lookups, scans and returned bytes.
 //! [`ReadTarget::Head`] selects and reads the current head in one snapshot.
-//! Commit-targeted reads support the head only and explicitly reject other
-//! commits until history is available. Deletes enumerate and tombstone every
+//! Commit-targeted reads resolve supported historical data at current prices.
+//! The retention window and stored history metadata bound available targets.
+//! Deletes enumerate and tombstone every
 //! live cell; sealing derives index changes from the resulting cell diff.
 //!
 //! ```
@@ -72,16 +73,16 @@ mod admission;
 mod committed;
 mod crud;
 mod error;
-pub mod historical;
 mod meta;
 mod outcome;
 mod plan;
 mod pricing;
 mod read;
+pub mod read_metering;
 mod state;
 mod types;
 
-pub use committed::{committed_snapshot, read_committed_by_id};
+pub use committed::{CommittedRead, read_committed_by_id};
 pub use crud::Records;
 pub use error::{RecordError, Result};
 pub use meta::{RecordLimits, RecordMeta};

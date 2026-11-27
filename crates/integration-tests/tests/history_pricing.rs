@@ -12,7 +12,7 @@ use golemdb_metering::{
 };
 use golemdb_record::{
     RecordError, RecordMeta,
-    historical::{self, LookupRole, RecordPrepayment},
+    read_metering::{self, LookupRole, MeteredCellFetcher, RecordPrepayment},
 };
 use golemdb_storage::{
     MemoryStore, ReadCursor, ReadTransaction, StorageError, Store, Table, WriteTransaction,
@@ -50,13 +50,12 @@ fn point<R: ReadTransaction>(
     let schedule = schedule();
     let mut meter = ReadMeter::new(&schedule, budget);
     let k = key(name);
-    let result = historical::with_value(
-        &CellReader::at(tx, target),
+    let result = MeteredCellFetcher::Committed(CellReader::at(tx, target)).with_value(
         &k,
         LookupRole::Cell,
         &mut meter,
         |meter, raw| {
-            raw.map(|raw| historical::returned(&k.name().into(), raw, meter))
+            raw.map(|raw| read_metering::returned(&k.name().into(), raw, meter))
                 .transpose()
         },
     );
@@ -75,7 +74,7 @@ fn scan<R: ReadTransaction>(
     let mut scan = CellReader::at(tx, target).scan_record(64).unwrap();
     let mut rows = vec![];
     let result = loop {
-        match historical::next_cell(&mut scan, &mut meter, None) {
+        match read_metering::next_cell(&mut scan, &mut meter, None) {
             Ok(Some(row)) => rows.push(row),
             Ok(None) => break Ok(rows),
             Err(e) => {
@@ -228,14 +227,11 @@ fn point_contract(store: &impl Store) {
     let tx = store.begin_read().unwrap();
     let schedule = schedule();
     let mut meter = ReadMeter::new(&schedule, Budget::Unlimited);
-    historical::with_value(
-        &CellReader::at(&tx, 9),
-        &key(b"a"),
-        LookupRole::Binding,
-        &mut meter,
-        |_, raw| Ok(raw.unwrap().len()),
-    )
-    .unwrap();
+    MeteredCellFetcher::Committed(CellReader::at(&tx, 9))
+        .with_value(&key(b"a"), LookupRole::Binding, &mut meter, |_, raw| {
+            Ok(raw.unwrap().len())
+        })
+        .unwrap();
     assert_eq!(
         ledger(&meter.into_accounting().ledger),
         counts([
@@ -301,7 +297,7 @@ fn scan_contract(store: &impl Store) {
     let mut cells = CellReader::at(&tx, 0).scan_record(64).unwrap();
     assert!(tx.accesses.borrow().is_empty());
     assert_eq!(
-        historical::next_cell(&mut cells, &mut meter, None)
+        read_metering::next_cell(&mut cells, &mut meter, None)
             .unwrap()
             .unwrap()
             .0,
@@ -314,7 +310,7 @@ fn scan_contract(store: &impl Store) {
     assert_eq!(first.ledger.count("read.commit_set"), 1);
     let mut meter = ReadMeter::new(&schedule, Budget::Unlimited);
     assert_eq!(
-        historical::next_cell(&mut cells, &mut meter, None)
+        read_metering::next_cell(&mut cells, &mut meter, None)
             .unwrap()
             .unwrap()
             .0,
@@ -325,7 +321,7 @@ fn scan_contract(store: &impl Store) {
     assert_eq!(second.ledger.count("read.commit_set"), 0);
     let mut meter = ReadMeter::new(&schedule, Budget::Unlimited);
     assert!(
-        historical::next_cell(&mut cells, &mut meter, None)
+        read_metering::next_cell(&mut cells, &mut meter, None)
             .unwrap()
             .is_none()
     );
@@ -545,7 +541,8 @@ fn full_record_prepays_only_returned_bytes_and_checks_counters_before_copying() 
     let mut prepaid = RecordPrepayment::new(&meta, &mut meter).unwrap();
     let mut cells = CellReader::at(&tx, 0).scan_user_cells(64).unwrap();
     let mut actual = vec![];
-    while let Some(row) = historical::next_cell(&mut cells, &mut meter, Some(&mut prepaid)).unwrap()
+    while let Some(row) =
+        read_metering::next_cell(&mut cells, &mut meter, Some(&mut prepaid)).unwrap()
     {
         actual.push(row);
     }
@@ -564,7 +561,7 @@ fn full_record_prepays_only_returned_bytes_and_checks_counters_before_copying() 
     let mut prepaid = RecordPrepayment::new(&RecordMeta::default(), &mut meter).unwrap();
     let mut cells = CellReader::at(&tx, 0).scan_user_cells(64).unwrap();
     assert!(matches!(
-        historical::next_cell(&mut cells, &mut meter, Some(&mut prepaid)),
+        read_metering::next_cell(&mut cells, &mut meter, Some(&mut prepaid)),
         Err(RecordError::CorruptState(_))
     ));
     assert!(cells.next().is_none());

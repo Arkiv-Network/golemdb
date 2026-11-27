@@ -5,6 +5,43 @@ use golemdb_branch::BranchError;
 use golemdb_record::RecordError;
 
 #[test]
+fn historical_target_errors_keep_their_structure_through_record_and_query() {
+    use golemdb_pruning::PruningError;
+    use golemdb_query::QueryError;
+    for through_query in [false, true] {
+        let convert = |error: PruningError| {
+            let record = RecordError::from(error);
+            if through_query {
+                ApiError::from(QueryError::from(record))
+            } else {
+                ApiError::from(record)
+            }
+        };
+        assert!(
+            matches!(convert(PruningError::CommitInFuture { requested: 9, head: 8 }),
+            ApiError::CommitInFuture { requested, head } if requested.get() == 9 && head.get() == 8)
+        );
+        assert!(
+            matches!(convert(PruningError::CommitOutsideHistory { requested: 2, earliest: 3, head: 8 }),
+            ApiError::CommitOutsideHistory { requested, earliest, head }
+            if requested.get() == 2 && earliest.get() == 3 && head.get() == 8)
+        );
+        assert!(matches!(
+            convert(PruningError::InvalidHistoryMetadata(
+                "missing history floor"
+            )),
+            ApiError::InvalidHistoryMetadata {
+                reason: "missing history floor"
+            }
+        ));
+        assert!(matches!(
+            convert(PruningError::Storage(golemdb_storage::StorageError::Full)),
+            ApiError::StoreFull
+        ));
+    }
+}
+
+#[test]
 fn api_errors_preserve_diagnostic_sources() {
     let invalid = ApiError::from(RecordError::InvalidInput {
         message: "deployment limit".into(),

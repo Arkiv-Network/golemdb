@@ -54,6 +54,16 @@ pub enum ApiError {
     NoFrameToRollback,
     #[error("commit {requested} is unavailable for this operation; current head is {head}")]
     CommitUnavailable { requested: CommitId, head: CommitId },
+    #[error("commit {requested} is after current head {head}")]
+    CommitInFuture { requested: CommitId, head: CommitId },
+    #[error("commit {requested} is outside supported history {earliest}..={head}")]
+    CommitOutsideHistory {
+        requested: CommitId,
+        earliest: CommitId,
+        head: CommitId,
+    },
+    #[error("invalid history metadata: {reason}")]
+    InvalidHistoryMetadata { reason: &'static str },
     #[error("internal database error")]
     Internal {
         #[source]
@@ -124,6 +134,7 @@ impl From<RecordError> for ApiError {
                 Self::CommitUnavailable { requested, head }
             }
             RecordError::Branch(error) => error.into(),
+            RecordError::ReadTarget(error) => error.into(),
             error @ (RecordError::AccountingOverflow
             | RecordError::Pricing(_)
             | RecordError::CorruptState(_)
@@ -147,8 +158,34 @@ impl From<QueryError> for ApiError {
             QueryError::CommitUnavailable { requested, head } => {
                 Self::CommitUnavailable { requested, head }
             }
+            QueryError::ReadTarget(error) => error.into(),
             QueryError::Internal(source) if store_full(source.as_ref()) => Self::StoreFull,
             QueryError::Internal(source) => Self::Internal { source },
+        }
+    }
+}
+
+impl From<golemdb_pruning::PruningError> for ApiError {
+    fn from(error: golemdb_pruning::PruningError) -> Self {
+        use golemdb_pruning::PruningError;
+        match error {
+            PruningError::CommitInFuture { requested, head } => Self::CommitInFuture {
+                requested: CommitId::new(requested),
+                head: CommitId::new(head),
+            },
+            PruningError::CommitOutsideHistory {
+                requested,
+                earliest,
+                head,
+            } => Self::CommitOutsideHistory {
+                requested: CommitId::new(requested),
+                earliest: CommitId::new(earliest),
+                head: CommitId::new(head),
+            },
+            PruningError::InvalidHistoryMetadata(reason) => Self::InvalidHistoryMetadata { reason },
+            error @ (PruningError::Storage(_) | PruningError::UnversionedTable(_)) => {
+                Self::internal(error)
+            }
         }
     }
 }
@@ -259,6 +296,7 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
                 RecordError::Cells(e) => Some(e),
                 RecordError::Branch(e) => Some(e),
                 RecordError::Pricing(e) => Some(e),
+                RecordError::ReadTarget(e) => Some(e),
                 RecordError::NotFound
                 | RecordError::CellNotFound { .. }
                 | RecordError::AlreadyExists
@@ -353,7 +391,10 @@ fn store_full(error: &(dyn Error + 'static)) -> bool {
         } else if let Some(error) = error.downcast_ref::<PruningError>() {
             match error {
                 PruningError::Storage(error) => Some(error),
-                PruningError::UnversionedTable(_) | PruningError::InvalidHistoryMetadata(_) => None,
+                PruningError::CommitInFuture { .. }
+                | PruningError::CommitOutsideHistory { .. }
+                | PruningError::UnversionedTable(_)
+                | PruningError::InvalidHistoryMetadata(_) => None,
             }
         } else {
             error.source()
@@ -379,6 +420,9 @@ mod tests {
             ApiError::internal(full()),
             ApiError::internal(CellError::History(full())),
             ApiError::internal(IndexError::History(full())),
+            ApiError::internal(RecordError::ReadTarget(
+                golemdb_pruning::PruningError::Storage(StorageError::Full),
+            )),
             ApiError::from(RecordError::Cells(CellError::History(full()))),
             ApiError::from(BranchError::Cells(CellError::History(full()))),
             ApiError::from(BranchError::Index(IndexError::History(full()))),

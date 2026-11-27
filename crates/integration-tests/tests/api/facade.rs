@@ -177,9 +177,12 @@ fn crud_pending_reads_projections_and_recreation() {
         assert_eq!(db.info().commit_id, golemdb_branch::CommitId::new(0)); // opening metadata is not a live head
         assert_eq!(db.head().unwrap(), golemdb_branch::CommitId::new(1));
         assert!(matches!(
-            api.get(ReadTarget::Commit(golemdb_branch::CommitId::new(0)), RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))).into_result(),
-            Err(ApiError::CommitUnavailable {
-                requested, head }) if requested.get() == 0 && head.get() == 1
+            api.get(
+                ReadTarget::Commit(golemdb_branch::CommitId::new(0)),
+                RecordOp::get(KEY, golemdb_api::Budget::Limited(u64::MAX))
+            )
+            .into_result(),
+            Err(ApiError::NotFound)
         ));
         assert!(matches!(api.commit(other), Err(ApiError::Conflict)));
 

@@ -95,12 +95,20 @@ fn head_selection_and_record_read_share_one_snapshot() {
         .result
         .unwrap();
     assert_eq!(latest.cells[b"name".as_slice()].as_str(), Some("after"));
-    assert!(matches!(
-        reader.get(ReadTarget::Commit(golemdb_branch::CommitId::new(1)), KEY, None, Budget::Unlimited).result,
-        Err(RecordError::CommitUnavailable {
-            requested, head
-        }) if requested.get() == 1 && head.get() == 2
-    ));
+    assert_eq!(
+        reader
+            .get(
+                ReadTarget::Commit(golemdb_branch::CommitId::new(1)),
+                KEY,
+                None,
+                Budget::Unlimited
+            )
+            .result
+            .unwrap()
+            .cells[b"name".as_slice()]
+        .as_str(),
+        Some("before")
+    );
     assert_eq!(
         reader
             .get(
@@ -186,6 +194,7 @@ fn initialize(db: &impl Store) {
         index: RootRef::Empty,
     };
     golemdb_branch::init_head(&mut tx, &roots, &hash).unwrap();
+    golemdb_pruning::Pruner::initialize(&mut tx).unwrap();
     tx.commit().unwrap();
 }
 
@@ -867,7 +876,7 @@ fn committed_cell_reader_keeps_one_snapshot_when_head_advances() {
 }
 
 #[test]
-fn committed_reads_by_id_match_get_and_check_the_commit() {
+fn committed_reads_by_id_match_get_at_head() {
     let (db, branches, records) = setup();
     let b = branches.begin().unwrap();
     records
@@ -876,9 +885,9 @@ fn committed_reads_by_id_match_get_and_check_the_commit() {
         .unwrap();
     let head = branches.commit(b).unwrap();
 
-    let (tx, at) = crate::committed_snapshot(&db, None).unwrap();
-    assert_eq!(at, head);
-    let cell_reader = golemdb_cells::CellReader::new(&tx);
+    let context = crate::CommittedRead::new(db.begin_read().unwrap()).unwrap();
+    assert_eq!(context.head(), head);
+    let cell_reader = context.cells();
     let only_name = [name(b"name")];
     for projection in [None, Some(&only_name[..]), Some(&[][..])] {
         assert_eq!(
@@ -889,14 +898,6 @@ fn committed_reads_by_id_match_get_and_check_the_commit() {
                 .unwrap()
         );
     }
-
-    assert_eq!(crate::committed_snapshot(&db, Some(head)).unwrap().1, head);
-    let older = golemdb_branch::CommitId::new(head.get() - 1);
-    assert!(matches!(
-        crate::committed_snapshot(&db, Some(older)),
-        Err(RecordError::CommitUnavailable { requested, head: got })
-            if requested == older && got == head
-    ));
 }
 
 /// Callers pass IDs they know are live, so a record without a valid `#key`
@@ -926,8 +927,8 @@ fn committed_reads_by_id_reject_a_missing_or_invalid_key_cell() {
             .unwrap();
         branches.commit(b).unwrap();
 
-        let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
-        let cell_reader = golemdb_cells::CellReader::new(&tx);
+        let context = crate::CommittedRead::new(db.begin_read().unwrap()).unwrap();
+        let cell_reader = context.cells();
         assert!(
             matches!(
                 crate::read_committed_by_id(&cell_reader, 64, None),
@@ -937,9 +938,9 @@ fn committed_reads_by_id_reject_a_missing_or_invalid_key_cell() {
         );
     }
     let (db, _, _) = setup();
-    let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
+    let context = crate::CommittedRead::new(db.begin_read().unwrap()).unwrap();
     assert!(matches!(
-        crate::read_committed_by_id(&golemdb_cells::CellReader::new(&tx), 64, None),
+        crate::read_committed_by_id(&context.cells(), 64, None),
         Err(RecordError::CorruptState("record has no #key"))
     ));
 }
@@ -1119,8 +1120,8 @@ fn projections_return_stored_metadata_while_full_reads_and_writes_require_valid_
             }
         }
         tx.commit().unwrap();
-        let (tx, _) = crate::committed_snapshot(&db, None).unwrap();
-        let reader = golemdb_cells::CellReader::new(&tx);
+        let context = crate::CommittedRead::new(db.begin_read().unwrap()).unwrap();
+        let reader = context.cells();
         assert!(matches!(
             records
                 .get(ReadTarget::Head, KEY, None, Budget::Unlimited)
