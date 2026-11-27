@@ -20,11 +20,11 @@ pub const RECORD_LIMITS: RecordLimits = RecordLimits {
 /// The budget every call states: tests check behaviour, not metering.
 pub const B: Budget = Budget::Unlimited;
 
-/// The spec's example genesis, priced by `pricing`.
-pub fn genesis(pricing: PricingConfig) -> Genesis {
+/// The spec's example genesis, with `limits` and priced by `pricing`.
+pub fn genesis(limits: CellLimits, pricing: PricingConfig) -> Genesis {
     Genesis::new(
         HashAlgorithm::Keccak256,
-        LIMITS,
+        limits,
         RECORD_LIMITS,
         None,
         pricing,
@@ -40,17 +40,17 @@ pub struct TestDb {
 }
 
 impl TestDb {
-    /// A fresh database created from [`genesis`] with zero pricing.
+    /// A fresh database created from [`genesis`] with [`LIMITS`] and zero pricing.
     pub fn new() -> Self {
-        Self::with_pricing(PricingConfig::zero())
+        Self::open(LIMITS, PricingConfig::zero())
     }
 
-    /// A fresh database created from [`genesis`] with `pricing`.
-    pub fn with_pricing(pricing: PricingConfig) -> Self {
+    /// A fresh database created from [`genesis`] with `limits` and `pricing`.
+    pub fn open(limits: CellLimits, pricing: PricingConfig) -> Self {
         let dir = tempfile::tempdir().expect("temporary directory");
         let db = Database::open(
             dir.path(),
-            &OpenConfig::new(genesis(pricing)).with_mode(OpenMode::CreateNew),
+            &OpenConfig::new(genesis(limits, pricing)).with_mode(OpenMode::CreateNew),
         )
         .expect("open MDBX database");
         Self { db, _dir: dir }

@@ -2,6 +2,7 @@
 //! Each test quotes the statement it checks.
 
 mod create;
+mod data_model;
 mod delete;
 mod get;
 mod patch;

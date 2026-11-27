@@ -34,7 +34,7 @@ use golemdb_conformance::*;
 /// `key(1)` with `a`, a `u32` attribute 1, and `b`, a `str` field "x", committed,
 /// at `pricing`.
 fn setup(pricing: PricingConfig) -> TestDb {
-    let db = TestDb::with_pricing(pricing);
+    let db = TestDb::open(LIMITS, pricing);
     let branch = db.begin().unwrap();
     db.create(branch, op_create_1()).result.unwrap();
     db.commit(branch).unwrap();
@@ -744,7 +744,7 @@ fn an_overflowing_cost_is_out_of_budget_even_unlimited() {
     };
     // A cell byte at `u64::MAX`: a create overflows and writes nothing.
     let pricing = overflowing(WeightName::WRITE_CELL_BYTE);
-    let db = TestDb::with_pricing(pricing.clone());
+    let db = TestDb::open(LIMITS, pricing.clone());
     let branch = db.begin().unwrap();
     let created = db.create(branch, op_create_1());
     assert_err!(created.result, ApiError::OutOfBudget { required: None });
