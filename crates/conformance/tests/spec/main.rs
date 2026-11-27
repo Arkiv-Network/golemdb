@@ -4,5 +4,6 @@
 
 mod api_shape;
 mod data_model;
+mod errors;
 mod receipts;
 mod records;
